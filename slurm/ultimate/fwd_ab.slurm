@@ -31,6 +31,7 @@ which python; hostname
 nvidia-smi --query-gpu=name,clocks.sm,clocks.max.sm,memory.total --format=csv,noheader
 python -P -c "import stream_cqsa, torch, flash_attn, cqsa_cuda_next_v12f as m; print(stream_cqsa.__file__, torch.__version__, flash_attn.__version__, m.__file__)"
 ls -la --time-style=full-iso $V12F_DIR/cqsa_cuda_next_v12f*.so; md5sum $V12F_DIR/cqsa_cuda_next_v12f*.so
-python -P -u "$ROOT/benchmarks/ultimate/fwd_ab.py" --out "$OUT/results/ultimate/fwd_ab.json"
+# FWD_AB_NAME names the result files (fwd_ab_b2.json/.md ...) so a later build does not overwrite earlier rows.
+python -P -u "$ROOT/benchmarks/ultimate/fwd_ab.py" --out "$OUT/results/ultimate/${FWD_AB_NAME:-fwd_ab}.json"
 echo "exit $?  $(date +%T)"
 sacct -j "$SLURM_JOB_ID" -o JobID,MaxRSS,Elapsed -P 2>/dev/null | tail -3

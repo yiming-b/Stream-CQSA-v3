@@ -34,7 +34,40 @@ P2 (this package) started 13:12.
 | SXM job bwd_ab (b2) | done 14:3x | job 14323074, snapshot `ultimate-d5c7f0e`, frozen/b2 -> `results/ultimate/bwd_ab_b2.{json,md}`, `bwd_ab_b2_14323074.out`. Drift check: every arm re-timed at the end within 0.1% except the job's very first timed arm (v11x at 14K: 3.14 first, 2.85 last = GPU clock ramp; b1's 14K ratios are flattered by it). b2 vs v11x (last): plain 1.028-1.051, zero 1.032-1.071; real 0.839x flash_attn (56K causal D64), 0.754x SDPA non-causal; c=73 0.942x flash_attn loop: b2 did not close the gap |
 | b3a: dP_sum staged in smem (hand-specialised body) | built 14:35 (249 s), NOT measured | superseded by b3 before its job; frozen/b3a keeps .so + header |
 | b3 (final kernel iteration): the ALIGNED function = the TEXT of v11x's compute_dq_dk_dv_1colblock (CQSA_BWD_NO_CQS side), + Use_runs changes folded away by `if constexpr` when off, + Dpsum_smem template (env CQSA_V12B_DPSUM_SMEM, default 0 = upstream global reads) | built 14:44 (235 s, main units only), 44 tests pass in both dP_sum modes, frozen/b3 (md5 942f97c3...) | SASS: even the text-identical CQS-off instantiation schedules the dP_sum LDGs 1-2 instructions before use (v11x: ~70), so the TU context, not the source, decides it; Dpsum_smem removes the LDGs from the loop. One job measures both dP_sum sources |
-| results, diff, commit | - | |
+| SXM job bwd_ab (b3) | done 14:47, 58 s | job 14323878 (della-l07g5), snapshot `ultimate-35d5562`, frozen/b3 -> `results/ultimate/bwd_ab.{json,md}` (canonical; copy `bwd_ab_b3.*`), `bwd_ab_b3_14323878.out`. ALL TARGETS MET (below) |
+| b4: host-side default of the dP_sum source per path (CQS-on smem, CQS-off global) from job 14323878 | built 14:51 (207 s), cuobjdump -sass of every ALIGNED / LEGACY / census kernel identical to b3, 48 tests pass (both sources), frozen/b4 (md5 fc6fde7b...) | no new measurement needed: the b4 default runs exactly the kernels measured as `v12b_s` / `v12b_plain` |
+| results, diff, static report, commit | done 14:5x | `docs/ultimate/kernel_diffs/v12b.diff` (vs v11), `results/ultimate/v12b_static.md` (b4) |
+
+## Verdict (job 14323878, A100-SXM4-80GB; b4 default = the `v12b_s` rows for CQS-on, `v12b_plain` for CQS-off)
+
+| target | measured | pass |
+|---|---|---|
+| zero <= 1.05x v11x NO_CQS (causal D64 14K/28K/56K; D128 56K; non-causal D64 56K) | 0.996 / 0.992 / 0.990; 0.974; 0.993 | yes |
+| real <= 0.85x flash_attn bwd, causal D64 56K | 0.783 (34.41 vs 43.95 ms) | yes |
+| design P2.1: real <= 1.30x SDPA causal 56K, non-causal <= 1.10x | 0.722, 0.726 | yes |
+| design P2.1: c=73 N=131072 <= 1.45x SDPA | 0.795x SDPA per-task sum; 0.885x flash_attn over the same 73 calls; 1.064x one monolithic flash_attn bwd at N | yes |
+| CQS-off at upstream speed | 0.990-1.001x v11x, 0.983-0.999x flash_attn (L >= 28K) | yes |
+| dk/dv torch.equal v11; dq drift | every row / every c=73 task; dq max 1.2e-4 (= v11's own rerun drift) | yes |
+| float64 within 1.2x FA-2's error (+1e-4) | tests/test_ultimate_v12b.py::test_float64_error_within_fa2 (vis1, c=7 N=8192, zero + real, causal + non-causal) | yes |
+| LEGACY bit-identical to v11 | forced LEGACY dk/dv equal in every row, times within 0.1% of v11; random/half/unaligned route to LEGACY (tests) | yes |
+
+vs v11 (today's CQS backward): 2.48x faster real causal D64 56K, 2.02x D128, 1.94x non-causal, 2.35x c=73.
+Static (b4): ALIGNED runs+smem hdim64 128x128 causal even 255 REG / 104 B STACK / 2320 SASS vs v11 224 B / 5624,
+v11x 112 B / 2152, torch-FA2 96 B / 2336 (in upstream's 96-144 B band). deterministic=True (item 3): 66.60 vs 34.40 ms
+at L=56064 H=8 b=1 (1.94x, reruns torch.equal) -- W*H ~ k x 108 caveat confirmed; exposed through `bwd`'s existing
+`deterministic` argument (the interface still passes False).
+
+Lessons: (1) b1/b2 were hand-specialised copies of upstream's loop; the same algorithm with fewer instructions ran
+3-5% slower because ptxas scheduled it differently (dP_sum loads next to their use, spills). Deriving the ALIGNED
+function from the exact text of v11x's loop (`if constexpr` / constant `m_step` for everything new) gave upstream
+speed. (2) Even the text-identical CQS-off instantiation schedules the dP_sum loads late in this TU, yet measures at
+v11x speed: the static load-use distance was not the cause. (3) A new nvcc `-time` csv path changes the command line
+and makes ninja rebuild every unit: build.sh now takes CSV_TAG. (4) Never edit a build script while a detached build
+runs it (bash reads the file by offset); the b2-era edit was reverted before its `wait` returned.
+
+Open (not in this package): engine integration (interface.py backward default is Triton; `bwd_wave` in native/ still
+has v11's loop), in-place wave backward, engine-level acceptance (1M itr=1 backward <= 24 s, wave 131K <= 450 ms /
+3 GiB), bf16 / `common` build, P3 merge (both censuses in one binary), exposing `deterministic` in interface.py.
 
 ## Design as built (refinements of the task's sketch)
 
@@ -53,8 +86,10 @@ P2 (this package) started 13:12.
   ALIGNED CTAs return if route != 0, LEGACY CTAs return if route == 0 (gate in the LEGACY `__global__` wrapper,
   the only change to v11's kernel code path). Ineligible CQS calls: LEGACY alone (route null). CQS-off calls:
   ALIGNED<Use_runs=false> (upstream's loop, no table) when eligible, else LEGACY.
-- **ALIGNED kernel** (`src/flash_bwd_aligned.h`): upstream FA-2's seqk-parallel `compute_dq_dk_dv_1colblock`
-  specialised to Is_first = Is_last = false, Seq_parallel = true, no dropout/local/alibi/softcap, Is_even_K; the
+- **ALIGNED kernel** (`src/flash_bwd_aligned.h`; b3/b4: the TEXT of v11x's `compute_dq_dk_dv_1colblock` with the
+  CQSA_BWD_NO_CQS sides selected, called with Is_first = Is_last = false, Seq_parallel = true, no dropout/local/
+  alibi/softcap, Is_even_K, plus template flags Use_runs and Dpsum_smem whose changes fold away when off; b1/b2 were a
+  hand-specialised copy, same algorithm): upstream FA-2's seqk-parallel loop; the
   m loop walks the runs: `m_next = m > run_lo ? m - 1 : next run's hi` (the table is re-read only at a run
   boundary, index in a register, base in constant memory); Q / dO / LSE / dPsum / dQaccum pointers jump by
   `m_step = m - m_next` rows (64-bit arithmetic); the sQ double buffer toggles per VISITED tile (`sQ_cur`), not by
@@ -82,10 +117,14 @@ Files changed in v12b vs v11: `setup.py`, `csrc/flash_attn/flash_api.cpp`, `src/
 
 ## Job ids / builds
 
+- b2 (full rebuild, csv path changed) 14:16-14:30; b3a 14:31-14:35 (not measured); b3 14:40-14:44; b4 14:48-14:51.
+- 14323074: bwd_ab b2 (snapshot ultimate-d5c7f0e, frozen/b2) -> bwd_ab_b2.*.
+- 14323878: bwd_ab b3 (snapshot ultimate-35d5562, frozen/b3) -> bwd_ab.{json,md} (canonical), bwd_ab_b3.*.
+
 - b1: clean build 2026-09-23 13:34-14:02 on vis1 (`TAG=b1 CLEAN=1 nohup setsid bash next/kernel/v12b/build.sh`), rc=0.
 - 14322302: bwd_ab on A100-SXM4-80GB (snapshot ultimate-50e64d2, frozen/b1) -> results/ultimate/bwd_ab.{json,md}, bwd_ab_14322302.out.
 
-## Next step for a resumed agent
+## Next step for a resumed agent (package complete; kept for reference)
 
 Check `next/logs/06_build_v12b_b1.log` ("finished rc="). Then on vis1 with
 PYTHONPATH = worktree:next/kernel/stable:$PYTHONPATH:next/native:next/kernel/v11x:next/kernel/v12b (variant dirs LAST):

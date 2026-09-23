@@ -9,7 +9,8 @@ within the fp32 atomics' drift; otherwise LEGACY (v11's own code) does. CQS off 
 table (== v11's CQS-off backward for dk/dv). Checked on the shared vis1 GPU at small L: the census against a numpy
 reference, aligned real tasks (c = 7, 31, 73; itr 1-2; ragged L), zero / all-ones / plain, causal and non-causal,
 D = 64 and 128, a caller-supplied dsoftmax_sum (the engine's call), automatic LEGACY routing of random / half /
-unaligned patterns, forced LEGACY, deterministic=True reruns, and float64 gradients against flash_attn's error.
+unaligned patterns, forced LEGACY, deterministic=True reruns, float64 gradients against flash_attn's error, and
+the two dP_sum sources of the ALIGNED kernel (global vs smem stage, env CQSA_V12B_DPSUM_SMEM) agreeing.
 Helpers come from benchmarks/ultimate/bwd_ab.py; every GPU test skips when the extensions are absent
 (next/kernel/{stable,v11x,v12b} on PYTHONPATH, the variant dirs last). The census-reference test needs no GPU.
 """
@@ -299,3 +300,25 @@ def test_float64_error_within_fa2(causal):
         for grad, a, b, fe in zip(("dq", "dk", "dv"), g, ref, fa_err):
             e = _rel(a, b)
             assert e <= 1.2 * fe + 1e-4, f"{name} {grad}: error vs float64 {e:.3e} > 1.2 x flash_attn's {fe:.3e} + 1e-4"
+
+
+# ------------------------------------------------------------------------------------------------ dP_sum source
+@cuda
+@pytest.mark.parametrize("causal", [True, False])
+@pytest.mark.parametrize("D", [64, 128])
+def test_dpsum_sources_identical(D, causal, monkeypatch):
+    """The ALIGNED kernel reads dP_sum from global memory or from its smem stage (env CQSA_V12B_DPSUM_SMEM, read
+    per call; default per path): same values, same arithmetic -> dk/dv torch.equal, dq within the drift."""
+    ab = _harness()
+    t = _task(100003, 7, 1, 5)
+    L = int(t.local_size)
+    tabs = ab.task_tables(t)
+    q, k, v, do = _inputs(L, D, seed=5)
+    o16, lse = ab.cqs_fwd(ab.MODS["v11"], q, k, v, tabs, causal)
+    got = {}
+    for mode in ("0", "1"):
+        monkeypatch.setenv("CQSA_V12B_DPSUM_SMEM", mode)
+        got[mode] = (ab.cqs_bwd(ab.MODS["v12b"], do, q, k, v, o16, lse, tabs, causal, flags=0),
+                     ab.cqs_bwd(ab.MODS["v12b"], do, q, k, v, o16, lse, None, causal))
+    for i, what in enumerate(("CQS-on", "CQS-off")):
+        _assert_match(got["1"][i], got["0"][i], f"dP_sum smem vs global, {what}, D={D} causal={causal}")

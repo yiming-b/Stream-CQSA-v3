@@ -394,8 +394,8 @@ diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__py
 +}  // namespace FLASH_NAMESPACE
 diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__pycache__' '--exclude=stream_cqsa' '--exclude=frozen' v11/csrc/flash_attn/src/flash_bwd_aligned.h v12b/csrc/flash_attn/src/flash_bwd_aligned.h
 --- v11/csrc/flash_attn/src/flash_bwd_aligned.h	1969-12-31 19:00:00.000000000 -0500
-+++ v12b/csrc/flash_attn/src/flash_bwd_aligned.h	2026-09-23 14:40:27.485560000 -0400
-@@ -0,0 +1,1021 @@
++++ v12b/csrc/flash_attn/src/flash_bwd_aligned.h	2026-09-23 14:48:13.150890000 -0400
+@@ -0,0 +1,1028 @@
 +/******************************************************************************
 + * next/ v12b: the ALIGNED backward (and, without a run table, the CQS-off one).
 + *
@@ -421,8 +421,9 @@ diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__py
 + * block, are absent; the owner diagonal takes upstream's causal mask and the
 + * ragged tail upstream's !Is_even_MN path. A call whose census finds a mixed tile
 + * (or more runs than slots) runs on LEGACY (v11's CQS backward) instead, decided
-+ * on the device. Dpsum_smem (A/B, env CQSA_V12B_DPSUM_SMEM): dP_sum staged in
-+ * smem by cp.async next to the Q prefetch instead of read from global memory.
++ * on the device. Dpsum_smem: dP_sum staged in smem by cp.async next to the Q
++ * prefetch instead of read from global memory (default for CQS-on calls; env
++ * CQSA_V12B_DPSUM_SMEM=0/1 overrides it per call for A/B runs).
 + *
 + * Contract kept from v11 (the engine's): global lse in, caller-supplied
 + * dsoftmax_sum (or the preprocess pass), fp32 dq_accum by atomics, dk/dv
@@ -461,8 +462,12 @@ diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__py
 +template<typename Kernel_traits>
 +constexpr int kCqsBwdDpsumSmem = 2 * Kernel_traits::kBlockM * int(sizeof(typename Kernel_traits::ElementAccum));
 +
-+// Default of the dP_sum source when CQSA_V12B_DPSUM_SMEM is unset: global memory (upstream's reads).
-+constexpr bool kCqsBwdDpsumSmemDefault = false;
++// Default of the dP_sum source when CQSA_V12B_DPSUM_SMEM is unset, per path, from job 14323878 (A100-SXM4-80GB,
++// results/ultimate/bwd_ab.md; both sources are bit-identical): CQS-on (run table) smem -- equal at hdim64 causal,
++// 1.6-2.1% faster at hdim128 causal and hdim64 non-causal; CQS-off global (upstream's reads) -- equal at hdim64,
++// smem 2.8% slower at hdim128 causal.
++constexpr bool kCqsBwdDpsumSmemCqsOn = true;
++constexpr bool kCqsBwdDpsumSmemCqsOff = false;
 +
 +// next/ v12b: compute_dq_dk_dv_1colblock of v11x (CQSA_BWD_NO_CQS side), extended with Use_runs / Dpsum_smem.
 +template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Is_softcap, bool Is_first, bool Is_last, bool Seq_parallel, bool Use_runs, bool Dpsum_smem, typename Params>
@@ -1367,9 +1372,11 @@ diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__py
 +    const int gridDimx = bwd_grid_dimx<Kernel_traits>(params);
 +    dim3 grid_n(gridDimx, params.b, params.h);
 +    const bool is_even_MN = params.seqlen_q % Kernel_traits::kBlockM == 0 && params.seqlen_k % Kernel_traits::kBlockN == 0;
-+    // A/B switch for the dP_sum source, read per call (unset: kCqsBwdDpsumSmemDefault).
++    // A/B switch for the dP_sum source, read per call (unset: the per-path defaults above).
 +    const char *dps_env = std::getenv("CQSA_V12B_DPSUM_SMEM");
-+    const bool dpsum_smem = dps_env != nullptr && dps_env[0] != '\0' ? dps_env[0] == '1' : kCqsBwdDpsumSmemDefault;
++    const bool dpsum_smem = dps_env != nullptr && dps_env[0] != '\0'
++        ? dps_env[0] == '1'
++        : (params.cqs_enabled ? kCqsBwdDpsumSmemCqsOn : kCqsBwdDpsumSmemCqsOff);
 +    BOOL_SWITCH(is_even_MN, IsEvenMNConst, [&] {
 +        BOOL_SWITCH(params.cqs_enabled, UseRunsConst, [&] {
 +            BOOL_SWITCH(dpsum_smem, DpsumSmemConst, [&] {

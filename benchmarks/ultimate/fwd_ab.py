@@ -57,6 +57,7 @@ DT = torch.float16
 DEV = torch.device("cuda")
 GPU = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "no GPU"     # the CPU tests import this module
 SEG_ALIGN = 128
+NAN = float("nan")       # F23: sentinel pre-fill of the CQS output buffers in every identity copy
 OUT_DIR = "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate"
 
 
@@ -119,15 +120,22 @@ def plain_fwd(mod, q, k, v, causal):
     return out, lse
 
 
-def cqs_fwd(mod, q, k, v, tabs, causal, flags=None, block_base=None):
+def cqs_fwd(mod, q, k, v, tabs, causal, flags=None, block_base=None, window=(-1, -1), fill=None):
     """CQS on, as interface.flash_attn_func_cqs_group_bits calls it (fp32 out, contiguous outputs), with v12f's
     cqs_fwd_flags when given. q/k/v may be strided in-place views when block_base (seg_align 128) is set.
+    window = (window_size_left, window_size_right) as the extension takes them (-1 = none). fill: pre-fill the
+    output buffers with this value (e.g. NaN, for correctness checks: a kernel that skips writes cannot pass by
+    inheriting a freed reference buffer from the caching allocator); None = torch.empty (the timed calls).
     Returns (out32, lse, out16)."""
     bits, bo, ba = tabs
     shape = tuple(q.shape)
-    out = torch.empty(shape, device=q.device, dtype=q.dtype)
-    acc = torch.empty(shape, device=q.device, dtype=torch.float32)
-    args = [q, k, v, out, None, 0.0, q.shape[-1] ** -0.5, bool(causal), -1, -1, 0.0, False, None, bits, bo, ba,
+    if fill is None:
+        out = torch.empty(shape, device=q.device, dtype=q.dtype)
+        acc = torch.empty(shape, device=q.device, dtype=torch.float32)
+    else:
+        out = torch.full(shape, fill, device=q.device, dtype=q.dtype)
+        acc = torch.full(shape, fill, device=q.device, dtype=torch.float32)
+    args = [q, k, v, out, None, 0.0, q.shape[-1] ** -0.5, bool(causal), int(window[0]), int(window[1]), 0.0, False, None, bits, bo, ba,
             CQS_BLK_SIZE, acc, block_base, SEG_ALIGN if block_base is not None else None]
     if flags is not None:
         args.append(int(flags))
@@ -281,13 +289,13 @@ def arms_for(causal):
     return arms
 
 
-def run_arm(module, pattern, flags, q, k, v, pats, causal):
-    """One call of an arm: (out, lse, out16 or None)."""
+def run_arm(module, pattern, flags, q, k, v, pats, causal, fill=None):
+    """One call of an arm: (out, lse, out16 or None). fill: sentinel pre-fill of the CQS outputs (identity copies)."""
     mod = MODS[module]
     if pattern == "plain":
         o16, lse = plain_fwd(mod, q, k, v, causal)
         return o16, lse, None
-    return cqs_fwd(mod, q, k, v, pats[pattern], causal, flags=flags)
+    return cqs_fwd(mod, q, k, v, pats[pattern], causal, flags=flags, fill=fill)
 
 
 def equal_outputs(a, b):
@@ -312,7 +320,7 @@ def part_task(res, N, configs, iters, key):
                        pattern=pattern, flags=flags, **fa)
             if module == "v12f" and pattern != "plain":
                 row["census_route"] = routes[pattern]
-            outs = run_arm(module, pattern, flags, q, k, v, pats, causal)
+            outs = run_arm(module, pattern, flags, q, k, v, pats, causal, fill=NAN)
             row["ms"], row["min_ms"] = timed(lambda: run_arm(module, pattern, flags, q, k, v, pats, causal), iters)
             row["ratio_vs_flash_attn"] = row["ms"] / fa["flash_attn_ms"]
             row["ratio_vs_sdpa"] = row["ms"] / fa["sdpa_flash_ms"]
@@ -355,7 +363,7 @@ def part_mixed(res, N, iters, D=64):
             for module in mods:
                 row = dict(gpu=GPU, N=N, L=L, L_mod_128=L % 128, path=list(task.path), causal=causal, D=D,
                            module=module, pattern=pattern, flags=0 if module == "v12f" else None, **fa)
-                outs = run_arm(module, pattern, row["flags"], q, k, v, pats, causal)
+                outs = run_arm(module, pattern, row["flags"], q, k, v, pats, causal, fill=NAN)
                 row["ms"], row["min_ms"] = timed(lambda: run_arm(module, pattern, row["flags"], q, k, v, pats, causal), iters)
                 row["ratio_vs_flash_attn"] = row["ms"] / fa["flash_attn_ms"]
                 row["ratio_vs_sdpa"] = row["ms"] / fa["sdpa_flash_ms"]
@@ -398,7 +406,7 @@ def part_c73(res, N, iters, D=64):
         ref = None
         for module, pattern, flags in arms:
             name = f"{module}_{pattern}{sfx[flags]}"
-            outs = run_arm(module, pattern, flags, q, k, v, pats, True)
+            outs = run_arm(module, pattern, flags, q, k, v, pats, True, fill=NAN)
             tot[name] += timed(lambda: run_arm(module, pattern, flags, q, k, v, pats, True), iters)[0]
             if (module, pattern, flags) == ("v12f", "real", 0):
                 for kk, vv in kernel_times(lambda: run_arm(module, pattern, flags, q, k, v, pats, True)).items():

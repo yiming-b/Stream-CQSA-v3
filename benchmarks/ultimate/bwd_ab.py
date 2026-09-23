@@ -134,24 +134,50 @@ def plain_fwd(mod, q, k, v, causal):
     return out, lse
 
 
-def cqs_fwd(mod, q, k, v, tabs, causal):
+def cqs_fwd(mod, q, k, v, tabs, causal, window=(-1, -1)):
     """CQS on, as interface.flash_attn_func_cqs_group_bits calls it (fp32 out). Returns (out16, lse). Use v11
     for real patterns: v11x/v12b are built with -DCQSA_NO_ELEMENT_PATH and poison a real pattern's forward."""
     bits, bo, ba = tabs
     # both contiguous: the entry requires acc's strides == out's, and q may be a prefix view (c=73 part)
     out = torch.empty(q.shape, device=q.device, dtype=q.dtype)
     acc = torch.empty(q.shape, device=q.device, dtype=torch.float32)
-    out16, lse, _, _ = mod.fwd_cqs_group_bits(q, k, v, out, None, 0.0, q.shape[-1] ** -0.5, bool(causal), -1, -1, 0.0,
+    out16, lse, _, _ = mod.fwd_cqs_group_bits(q, k, v, out, None, 0.0, q.shape[-1] ** -0.5, bool(causal),
+                                              int(window[0]), int(window[1]), 0.0,
                                               False, None, bits, bo, ba, CQS_BLK_SIZE, acc, None, None)
     return out16, lse
 
 
-def cqs_bwd(mod, do, q, k, v, o16, lse, tabs, causal, flags=None, deterministic=False, dsum=None):
+# F23 (review finding): the correctness copies (identity vs v11, reruns) run with output buffers pre-filled by a
+# sentinel (NaN), so a kernel that skips writes cannot pass by inheriting the freed buffer of an earlier identical
+# v11 call from the caching allocator (torch.equal(NaN, NaN) is False). The timed calls keep torch.empty.
+SENTINEL_FILL = [None]
+
+
+class sentinel_outputs:
+    """Within the block, cqs_bwd allocates dq/dk/dv pre-filled with `value` (default NaN)."""
+    def __init__(self, value=float("nan")):
+        self.value = value
+
+    def __enter__(self):
+        self.saved = SENTINEL_FILL[0]
+        SENTINEL_FILL[0] = self.value
+
+    def __exit__(self, *exc):
+        SENTINEL_FILL[0] = self.saved
+
+
+def cqs_bwd(mod, do, q, k, v, o16, lse, tabs, causal, flags=None, deterministic=False, dsum=None, window=(-1, -1),
+            fill=None):
     """The extension's `bwd` with the engine's global-lse contract: CQS on with tabs = (bits, blk_or, blk_and),
-    CQS off with tabs = None; v12b's cqs_bwd_flags when given. Returns (dq, dk, dv)."""
-    dq, dk, dv = (torch.empty_like(x) for x in (q, k, v))
-    args = [do, q, k, v, o16, lse, dq, dk, dv, None, 0.0, q.shape[-1] ** -0.5, bool(causal), -1, -1, 0.0,
-            bool(deterministic), None, None]
+    CQS off with tabs = None; v12b's cqs_bwd_flags when given. fill (or the sentinel_outputs block): pre-fill
+    dq/dk/dv with that value instead of torch.empty. Returns (dq, dk, dv)."""
+    fill = SENTINEL_FILL[0] if fill is None else fill
+    if fill is None:
+        dq, dk, dv = (torch.empty_like(x) for x in (q, k, v))
+    else:
+        dq, dk, dv = (torch.full_like(x, fill) for x in (q, k, v))
+    args = [do, q, k, v, o16, lse, dq, dk, dv, None, 0.0, q.shape[-1] ** -0.5, bool(causal),
+            int(window[0]), int(window[1]), 0.0, bool(deterministic), None, None]
     if tabs is not None or dsum is not None or flags is not None:     # upstream's `bwd` (flash_attn_2_cuda) stops here
         args += [None, None, None, None, dsum] if tabs is None else [tabs[0], tabs[1], tabs[2], CQS_BLK_SIZE, dsum]
     if flags is not None:
@@ -326,8 +352,9 @@ def part_config(res, key, N, task, D, causal, iters, patterns=("real", "zero"), 
         r["ms"], r["min_ms"] = timed(fn, iters)
         r["ratio_vs_flash_attn"] = r["ms"] / fa["flash_attn_bwd_ms"]
         r["ratio_vs_sdpa"] = r["ms"] / fa["sdpa_flash_bwd_ms"]
-        g1 = [x.clone() for x in fn()]
-        g2 = fn()
+        with sentinel_outputs():          # F23: NaN-filled outputs for the identity / rerun checks
+            g1 = [x.clone() for x in fn()]
+            g2 = fn()
         r["rerun_maxdiff_dq_dk_dv"] = [maxdiff(a, b) for a, b in zip(g1, g2)]
         r["rerun_dk_dv_equal"] = bool(torch.equal(g1[1], g2[1]) and torch.equal(g1[2], g2[2]))
         if ref is not None:
@@ -346,7 +373,7 @@ def part_config(res, key, N, task, D, causal, iters, patterns=("real", "zero"), 
 
     # CQS off: the upstream loop in v11x (NO_CQS) and in v12b (ALIGNED without runs)
     o16p, lsep = plain_fwd(MODS["v11"], q, k, v, causal)
-    ref_plain = [x.clone() for x in cqs_bwd(MODS["v11"], do, q, k, v, o16p, lsep, None, causal)]
+    ref_plain = [x.clone() for x in cqs_bwd(MODS["v11"], do, q, k, v, o16p, lsep, None, causal, fill=float("nan"))]
     row("v11x_nocqs", "plain", lambda: cqs_bwd(MODS["v11x"], do, q, k, v, o16p, lsep, None, causal), ref_plain)
     row("v12b_plain", "plain", lambda: cqs_bwd(MODS["v12b"], do, q, k, v, o16p, lsep, None, causal), ref_plain)
     row("v12b_plain_s", "plain", with_dpsum(True, lambda: cqs_bwd(MODS["v12b"], do, q, k, v, o16p, lsep, None, causal)), ref_plain)
@@ -388,7 +415,8 @@ def part_deterministic(res, task, iters):
     for name, det in (("atomics", False), ("deterministic", True)):
         fn = lambda: cqs_bwd(MODS["v12b"], do, q, k, v, o16, lse, tabs, True, flags=0, deterministic=det)
         r[f"{name}_ms"], r[f"{name}_min_ms"] = timed(fn, iters)
-        gs = [[x.clone() for x in fn()] for _ in range(3)]
+        with sentinel_outputs():
+            gs = [[x.clone() for x in fn()] for _ in range(3)]
         r[f"{name}_reruns_equal"] = all(torch.equal(a, b) for g in gs[1:] for a, b in zip(gs[0], g))
         r[f"{name}_rerun_maxdiff_dq"] = max(maxdiff(gs[0][0], g[0]) for g in gs[1:])
         r[f"{name}_grads"] = gs[0]
@@ -446,8 +474,8 @@ def part_c73(res, N, iters):
     # identity on every task: v12b dk/dv == v11's
     eq, dq_max = True, 0.0
     for qs, ks, vs, dos, o16, lse, tabs in items:
-        a = cqs_bwd(MODS["v11"], dos, qs, ks, vs, o16, lse, tabs, True)
-        b = cqs_bwd(MODS["v12b"], dos, qs, ks, vs, o16, lse, tabs, True, flags=0)
+        a = cqs_bwd(MODS["v11"], dos, qs, ks, vs, o16, lse, tabs, True, fill=float("nan"))
+        b = cqs_bwd(MODS["v12b"], dos, qs, ks, vs, o16, lse, tabs, True, flags=0, fill=float("nan"))
         eq &= bool(torch.equal(a[1], b[1]) and torch.equal(a[2], b[2]))
         dq_max = max(dq_max, maxdiff(a[0], b[0]))
     r["dk_dv_equal_vs_v11_all_tasks"], r["maxdiff_dq_vs_v11"] = eq, dq_max

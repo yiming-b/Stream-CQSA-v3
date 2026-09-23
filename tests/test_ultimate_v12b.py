@@ -11,6 +11,11 @@ reference, aligned real tasks (c = 7, 31, 73; itr 1-2; ragged L), zero / all-one
 D = 64 and 128, a caller-supplied dsoftmax_sum (the engine's call), automatic LEGACY routing of random / half /
 unaligned patterns, forced LEGACY, deterministic=True reruns, float64 gradients against flash_attn's error, and
 the two dP_sum sources of the ALIGNED kernel (global vs smem stage, env CQSA_V12B_DPSUM_SMEM) agreeing.
+F23 regressions (review fixes): every gradient buffer is pre-filled with NaN (bwd_ab.SENTINEL_FILL), so a kernel
+that skips writes cannot pass by inheriting a freed v11 buffer; run-table overflow (> 15 runs per column) end to
+end through census -> ALIGNED exit -> LEGACY, and exactly 15 runs staying ALIGNED; batch 2 with GQA;
+deterministic=True against v11's deterministic backward; strided q/k/v views of a packed qkv buffer and prefix
+views; CQS off with seqlen_q != seqlen_k; windowed (local) calls; the CQSA_V12B_DPSUM_SMEM parse.
 Helpers come from benchmarks/ultimate/bwd_ab.py; every GPU test skips when the extensions are absent
 (next/kernel/{stable,v11x,v12b} on PYTHONPATH, the variant dirs last). The census-reference test needs no GPU.
 """
@@ -31,6 +36,7 @@ def _harness(gpu=True):
     if path not in sys.path:
         sys.path.insert(0, path)
     import bwd_ab
+    bwd_ab.SENTINEL_FILL[0] = float("nan")      # F23: every cqs_bwd in these tests writes into NaN-filled buffers
     if gpu:
         try:
             bwd_ab.load_modules(("v11", "v12b"))
@@ -322,3 +328,147 @@ def test_dpsum_sources_identical(D, causal, monkeypatch):
                      ab.cqs_bwd(ab.MODS["v12b"], do, q, k, v, o16, lse, None, causal))
     for i, what in enumerate(("CQS-on", "CQS-off")):
         _assert_match(got["1"][i], got["0"][i], f"dP_sum smem vs global, {what}, D={D} causal={causal}")
+
+
+# ------------------------------------------------------------------------------------------------ F23 regressions
+def _comb(n_groups, tail=None):
+    bits = torch.repeat_interleave(torch.arange(n_groups) % 2, 128).to(torch.int64)
+    return bits if tail is None else bits[: (n_groups - 1) * 128 + tail]
+
+
+@cuda
+@pytest.mark.parametrize("D", [64, 128])
+@pytest.mark.parametrize("causal", [True, False])
+@pytest.mark.parametrize("n_groups,tail,overflow", [(30, None, False), (32, None, True), (40, None, True),
+                                                    (41, 57, True)])
+def test_run_table_overflow_through_kernels(n_groups, tail, overflow, causal, D):
+    """Alternating owner / non-owner 128-token groups: a non-owner column block has n_groups/2 isolated live runs
+    of m blocks. 15 runs fit the 16-slot table (route 0, ALIGNED); more set the overflow bit (route 2, no mixed
+    tile), the ALIGNED CTAs exit and LEGACY computes the call: dk/dv torch.equal to v11. The ragged case ends
+    on an owner group with a 57-token tail."""
+    ab = _harness()
+    bits = _comb(n_groups, tail)
+    L = bits.numel()
+    tabs = ab.tables(bits)
+    route, _, tile = ab.census(ab.MODS["v12b"], tabs, causal, D)
+    assert route == ab.census_ref(bits.numpy(), *tile, causal=causal)[0]
+    assert not (route & 1), "a 128-aligned comb has no mixed tile"
+    if not causal:
+        assert bool(route & 2) == overflow, f"n_groups={n_groups}: route {route}"
+    out, ref = _compare(ab, tabs, L, D, causal, seed=n_groups)
+    _assert_match(out, ref, f"comb n_groups={n_groups} route={route} causal={causal} D={D}")
+
+
+@cuda
+@pytest.mark.parametrize("causal", [True, False])
+def test_batch2_gqa(causal):
+    """B = 2 with GQA (q heads 4, k/v heads 2 and 1): ALIGNED's h_h_k_ratio / dk_expanded path == v11."""
+    ab = _harness()
+    t = _task(32768, 7, 1, 3)
+    L = int(t.local_size)
+    tabs = ab.task_tables(t)
+    for hk in (2, 1):
+        g = torch.Generator(device="cuda").manual_seed(hk)
+        q, do = (torch.randn(2, L, H, 64, device=DEV, dtype=torch.float16, generator=g) for _ in range(2))
+        k, v = (torch.randn(2, L, hk, 64, device=DEV, dtype=torch.float16, generator=g) for _ in range(2))
+        o16, lse = ab.cqs_fwd(ab.MODS["v11"], q, k, v, tabs, causal)
+        assert ab.census(ab.MODS["v12b"], tabs, causal, 64)[0] == 0
+        ref = ab.cqs_bwd(ab.MODS["v11"], do, q, k, v, o16, lse, tabs, causal)
+        out = ab.cqs_bwd(ab.MODS["v12b"], do, q, k, v, o16, lse, tabs, causal, flags=0)
+        _assert_match(out, ref, f"B=2 GQA {H}:{hk} causal={causal}")
+
+
+@cuda
+@pytest.mark.parametrize("causal", [True, False])
+def test_deterministic_matches_v11_deterministic(causal):
+    """deterministic=True: dq, dk and dv all torch.equal to v11's deterministic backward (same split dq_accum,
+    same per-CTA column walk, live tiles in the same order)."""
+    ab = _harness()
+    for N, c, itr, pick in ((32768, 7, 1, 3), (100003, 7, 1, 5)):
+        t = _task(N, c, itr, pick)
+        L = int(t.local_size)
+        tabs = ab.task_tables(t)
+        q, k, v, do = _inputs(L, 64, seed=pick)
+        o16, lse = ab.cqs_fwd(ab.MODS["v11"], q, k, v, tabs, causal)
+        ref = ab.cqs_bwd(ab.MODS["v11"], do, q, k, v, o16, lse, tabs, causal, deterministic=True)
+        out = ab.cqs_bwd(ab.MODS["v12b"], do, q, k, v, o16, lse, tabs, causal, flags=0, deterministic=True)
+        for name, a, b in zip(("dq", "dk", "dv"), out, ref):
+            assert torch.equal(a, b), f"deterministic {name} differs from v11's, path={t.path} causal={causal}"
+
+
+@cuda
+@pytest.mark.parametrize("causal", [True, False])
+def test_strided_and_prefix_views(causal):
+    """q/k/v as strided views of one packed [1, L, 3, H, D] qkv buffer, and as prefix views [:, :L] of longer
+    tensors (the c=73 harness's layout), with the engine's caller-supplied dsoftmax_sum: == v11."""
+    ab = _harness()
+    t = _task(100003, 7, 1, 5)
+    L = int(t.local_size)
+    tabs = ab.task_tables(t)
+    g = torch.Generator(device="cuda").manual_seed(9)
+    qkv = torch.randn(1, L, 3, H, 64, device=DEV, dtype=torch.float16, generator=g)
+    big = [torch.randn(1, L + 999, H, 64, device=DEV, dtype=torch.float16, generator=g) for _ in range(4)]
+    do_full = torch.randn(1, L, H, 64, device=DEV, dtype=torch.float16, generator=g)
+    for what, (q, k, v, do) in (("packed qkv", (qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2], do_full)),
+                                ("prefix", tuple(x[:, :L] for x in big))):
+        o16, lse = ab.cqs_fwd(ab.MODS["v11"], q, k, v, tabs, causal)
+        ds = (do.float() * o16.float()).sum(-1).transpose(1, 2).contiguous()
+        for dsum in (None, ds):
+            ref = ab.cqs_bwd(ab.MODS["v11"], do, q, k, v, o16, lse, tabs, causal, dsum=dsum)
+            out = ab.cqs_bwd(ab.MODS["v12b"], do, q, k, v, o16, lse, tabs, causal, flags=0, dsum=dsum)
+            _assert_match(out, ref, f"{what} views, dsoftmax_sum given={dsum is not None}, causal={causal}")
+
+
+@cuda
+@pytest.mark.parametrize("causal", [True, False])
+@pytest.mark.parametrize("Lq,Lk", [(1000, 3000), (3000, 1000), (129, 4000), (4000, 129), (3001, 2999)])
+def test_cqs_off_unequal_lengths(Lq, Lk, causal):
+    """CQS off sends every eligible call through the Use_runs=false ALIGNED kernel: seqlen_q != seqlen_k
+    (bottom-right causal alignment, ragged both ways) == v11."""
+    ab = _harness()
+    g = torch.Generator(device="cuda").manual_seed(Lq + Lk)
+    q, do = (torch.randn(1, Lq, H, 64, device=DEV, dtype=torch.float16, generator=g) for _ in range(2))
+    k, v = (torch.randn(1, Lk, H, 64, device=DEV, dtype=torch.float16, generator=g) for _ in range(2))
+    o16, lse = ab.plain_fwd(ab.MODS["v11"], q, k, v, causal)
+    ref = ab.cqs_bwd(ab.MODS["v11"], do, q, k, v, o16, lse, None, causal)
+    out = ab.cqs_bwd(ab.MODS["v12b"], do, q, k, v, o16, lse, None, causal)
+    for name, a, b in zip(("dk", "dv"), out[1:], ref[1:]):
+        assert torch.equal(a, b), f"Lq={Lq} Lk={Lk} causal={causal}: {name} differs from v11"
+    d = (out[0].float() - ref[0].float()).abs().max().item()
+    assert d <= _dq_tol(ref[0]) and torch.isfinite(out[0]).all()
+
+
+@cuda
+@pytest.mark.parametrize("causal,window", [(True, (256, 0)), (False, (256, 128))])
+def test_window_calls_match_v11(causal, window):
+    """F23 (host gate): a windowed call is local (causal + window has params.is_causal == false) and runs on
+    LEGACY; the census is no longer allocated for it. CQS on and off: == v11."""
+    ab = _harness()
+    t = _task(32768, 7, 1, 3)
+    L = int(t.local_size)
+    tabs = ab.task_tables(t)
+    q, k, v, do = _inputs(L, 64, seed=4)
+    o16, lse = ab.cqs_fwd(ab.MODS["v11"], q, k, v, tabs, causal, window=window)
+    ref = ab.cqs_bwd(ab.MODS["v11"], do, q, k, v, o16, lse, tabs, causal, window=window)
+    out = ab.cqs_bwd(ab.MODS["v12b"], do, q, k, v, o16, lse, tabs, causal, flags=0, window=window)
+    _assert_match(out, ref, f"CQS on, window={window} causal={causal}")
+    o16p, lsep = ab.plain_fwd(ab.MODS["v11"], q, k, v, causal)
+    ref = ab.cqs_bwd(ab.MODS["v11"], do, q, k, v, o16p, lsep, None, causal, window=window)
+    out = ab.cqs_bwd(ab.MODS["v12b"], do, q, k, v, o16p, lsep, None, causal, window=window)
+    _assert_match(out, ref, f"CQS off, window={window} causal={causal}")
+
+
+@cuda
+@pytest.mark.parametrize("value", ["true", "on", " 1", "10", "2"])
+def test_dpsum_env_parse_rejects_other_values(value, monkeypatch):
+    """F23: CQSA_V12B_DPSUM_SMEM accepts only "0" and "1" (unset = per-path default); anything else raises
+    instead of silently selecting the global source."""
+    ab = _harness()
+    t = _task(32768, 7, 1, 3)
+    L = int(t.local_size)
+    tabs = ab.task_tables(t)
+    q, k, v, do = _inputs(L, 64, seed=1)
+    o16, lse = ab.cqs_fwd(ab.MODS["v11"], q, k, v, tabs, True)
+    monkeypatch.setenv("CQSA_V12B_DPSUM_SMEM", value)
+    with pytest.raises(RuntimeError, match="CQSA_V12B_DPSUM_SMEM"):
+        ab.cqs_bwd(ab.MODS["v12b"], do, q, k, v, o16, lse, tabs, True, flags=0)

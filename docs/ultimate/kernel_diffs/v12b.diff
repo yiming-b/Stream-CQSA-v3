@@ -73,7 +73,7 @@ diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__py
 +exit $rc
 diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__pycache__' '--exclude=stream_cqsa' '--exclude=frozen' v11/csrc/flash_attn/flash_api.cpp v12b/csrc/flash_attn/flash_api.cpp
 --- v11/csrc/flash_attn/flash_api.cpp	2026-09-11 23:16:22.128645000 -0400
-+++ v12b/csrc/flash_attn/flash_api.cpp	2026-09-23 13:25:18.667244775 -0400
++++ v12b/csrc/flash_attn/flash_api.cpp	2026-09-23 15:45:12.673656000 -0400
 @@ -6,6 +6,7 @@
  #include <torch/python.h>
  #include <torch/nn/functional.h>
@@ -117,7 +117,7 @@ diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__py
  
      #ifdef FLASHATTENTION_DISABLE_BACKWARD
          TORCH_CHECK(false, "This flash attention build does not support backward.");
-@@ -1905,6 +1916,26 @@
+@@ -1905,6 +1916,30 @@
      }
      params.dq_accum_split_stride = !deterministic ? 0 : dq_accum.stride(0);
  
@@ -131,7 +131,11 @@ diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__py
 +        && params.cqs_blk_and != nullptr && !params.cqsa_numden_mode
 +        && (cqs_bwd_flags & kCqsBwdForceLegacy) == 0
 +        && p_dropout == 0.f && softcap == 0.f && !alibi_slopes_.has_value()
-+        && (is_causal || (window_size_left < 0 && window_size_right < 0))
++        // F23 review fix: the post-set_params values, as cqs_bwd_aligned_eligible
++        // tests them (a causal call with a window has params.is_causal == false:
++        // local, LEGACY; gating on the is_causal argument allocated a census the
++        // launcher then discarded).
++        && (params.is_causal || (params.window_size_left < 0 && params.window_size_right < 0))
 +        && (head_size == 64 || head_size == 128)) {
 +        // Sized for any column-block width >= 64; the route word is padded to
 +        // 8 bytes so the int2 runs that follow it are aligned.
@@ -144,7 +148,7 @@ diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__py
      auto launch = &run_mha_bwd;
  
      auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
-@@ -1944,6 +1975,48 @@
+@@ -1944,6 +1979,48 @@
      return { dq, dk, dv, softmax_d };
  }
  
@@ -193,7 +197,7 @@ diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__py
  std::vector<at::Tensor>
  mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads, x head_size
                 const at::Tensor &q,   // total_q x num_heads x head_size, total_q := \sum_{i=0}^{b} s_i
-@@ -2484,7 +2557,14 @@
+@@ -2484,7 +2561,14 @@
            pybind11::arg("cqs_blk_or") = pybind11::none(),
            pybind11::arg("cqs_blk_and") = pybind11::none(),
            pybind11::arg("cqs_blk_size") = pybind11::none(),
@@ -394,8 +398,8 @@ diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__py
 +}  // namespace FLASH_NAMESPACE
 diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__pycache__' '--exclude=stream_cqsa' '--exclude=frozen' v11/csrc/flash_attn/src/flash_bwd_aligned.h v12b/csrc/flash_attn/src/flash_bwd_aligned.h
 --- v11/csrc/flash_attn/src/flash_bwd_aligned.h	1969-12-31 19:00:00.000000000 -0500
-+++ v12b/csrc/flash_attn/src/flash_bwd_aligned.h	2026-09-23 14:48:13.150890000 -0400
-@@ -0,0 +1,1028 @@
++++ v12b/csrc/flash_attn/src/flash_bwd_aligned.h	2026-09-23 15:47:12.655235000 -0400
+@@ -0,0 +1,1033 @@
 +/******************************************************************************
 + * next/ v12b: the ALIGNED backward (and, without a run table, the CQS-off one).
 + *
@@ -1373,8 +1377,13 @@ diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__py
 +    dim3 grid_n(gridDimx, params.b, params.h);
 +    const bool is_even_MN = params.seqlen_q % Kernel_traits::kBlockM == 0 && params.seqlen_k % Kernel_traits::kBlockN == 0;
 +    // A/B switch for the dP_sum source, read per call (unset: the per-path defaults above).
++    // F23 review fix: only "0" and "1" are accepted (any other value, e.g.
++    // "true", used to select the global source silently and mislabel an A/B arm).
 +    const char *dps_env = std::getenv("CQSA_V12B_DPSUM_SMEM");
-+    const bool dpsum_smem = dps_env != nullptr && dps_env[0] != '\0'
++    const bool dps_set = dps_env != nullptr && dps_env[0] != '\0';
++    TORCH_CHECK(!dps_set || ((dps_env[0] == '0' || dps_env[0] == '1') && dps_env[1] == '\0'),
++                "CQSA_V12B_DPSUM_SMEM must be 0 or 1 (or unset for the per-path default)");
++    const bool dpsum_smem = dps_set
 +        ? dps_env[0] == '1'
 +        : (params.cqs_enabled ? kCqsBwdDpsumSmemCqsOn : kCqsBwdDpsumSmemCqsOff);
 +    BOOL_SWITCH(is_even_MN, IsEvenMNConst, [&] {

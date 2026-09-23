@@ -8,7 +8,11 @@ instantiation computes the call and its out (fp32 and fp16) and lse are bit-iden
 the census against a numpy reference (routes and runs), bit-identity with v11 for aligned real tasks (c = 7,
 31, 73; itr 1-2; ragged L), zero, all-ones and plain calls, causal and non-causal, D = 64 and 128, both
 forced row-block orders (the default is descending for causal calls), in-place segmented reads, automatic
-LEGACY routing of mixed patterns, and a float64 spot check. Helpers come from benchmarks/ultimate/fwd_ab.py; everything GPU skips when the v11/v12f
+LEGACY routing of mixed patterns, and a float64 spot check. F23 regressions (review fixes): sliding-window /
+local calls (causal + window, non-causal (w, w)) route to LEGACY and match v11 and a masked float64 reference
+(the blocker: they used to reach the non-causal ALIGNED kernel); run-table overflow (> 15 runs per row block)
+through the kernels, and exactly 15 runs staying ALIGNED; the finite-V caveat of bit-identity pinned; every
+identity check writes into NaN-pre-filled output buffers. Helpers come from benchmarks/ultimate/fwd_ab.py; everything GPU skips when the v11/v12f
 extensions are absent (next/kernel/{stable,v12f} on PYTHONPATH). The census-reference test needs no GPU.
 """
 import functools, os, sys
@@ -53,10 +57,12 @@ def _task(ab, N, c, itr=1, pick=0):
     return tasks[pick % len(tasks)]
 
 
-def _compare(ab, tabs, L, D, causal, flags=0, seed=0):
+def _compare(ab, tabs, L, D, causal, flags=0, seed=0, window=(-1, -1)):
+    """v12f vs v11 on one call; both write into NaN-pre-filled buffers (F23), so a kernel that skips a write
+    cannot pass by inheriting the freed buffer of an identical earlier call."""
     q, k, v = _qkv(L, D, seed)
-    ref = ab.cqs_fwd(ab.MODS["v11"], q, k, v, tabs, causal)
-    out = ab.cqs_fwd(ab.MODS["v12f"], q, k, v, tabs, causal, flags=flags)
+    ref = ab.cqs_fwd(ab.MODS["v11"], q, k, v, tabs, causal, window=window, fill=float("nan"))
+    out = ab.cqs_fwd(ab.MODS["v12f"], q, k, v, tabs, causal, flags=flags, window=window, fill=float("nan"))
     return out, ref
 
 
@@ -256,3 +262,101 @@ def test_float64_spot_check():
     if dead.any():
         assert (out[0, rows[dead]] == 0).all()
         assert torch.isinf(lse[0, :, rows[dead]]).all()
+
+
+# ------------------------------------------------------------------------------------------------ F23 regressions
+def _ref64_rows(q, k, v, bits, causal, window, rows):
+    """float64 masked attention for the sampled rows: group bits, causal, sliding window (left, right; -1 = none,
+    causal forces right = 0, as mha_fwd_impl does). Returns (out [R, H, D], dead [R])."""
+    L, D = q.shape[1], q.shape[-1]
+    left, right = window
+    if causal:
+        right = 0
+    qd, kd, vd = (x[0].double() for x in (q, k, v))
+    s = torch.einsum("rhd,khd->hrk", qd[rows], kd) * D ** -0.5
+    cols = torch.arange(L, device=DEV)
+    masked = (bits[rows][:, None] & bits[None, :]) != 0
+    if right >= 0:
+        masked |= cols[None, :] > rows[:, None] + right
+    if left >= 0:
+        masked |= cols[None, :] < rows[:, None] - left
+    s = s.masked_fill(masked[None], float("-inf"))
+    dead = masked.all(dim=1)
+    p = torch.softmax(s.masked_fill(dead[None, :, None], 0.0), dim=-1).masked_fill(dead[None, :, None], 0.0)
+    return torch.einsum("hrk,khd->rhd", p, vd), dead
+
+
+@cuda
+@pytest.mark.parametrize("D", [64, 128])
+@pytest.mark.parametrize("causal,window", [(True, (256, 0)), (True, (1000, -1)), (False, (256, 128)),
+                                           (False, (300, -1)), (False, (-1, 200))])
+def test_window_calls_route_to_legacy(causal, window, D):
+    """F23 blocker: a windowed (local) call must never reach ALIGNED. Causal + window has params.is_causal ==
+    false after set_params_fprop; the old gate tested the is_causal ARGUMENT and ran it on the non-causal
+    ALIGNED kernel (no window, no causal mask: max error 3.6 on vis1). v12f == v11 bit for bit (LEGACY is
+    v11's code), == forced LEGACY, and matches a masked float64 reference on sampled rows."""
+    ab = _harness()
+    t = _task(ab, 32768, 7, 1, 3)
+    L = int(t.local_size)
+    for what, tabs in (("zero", ab.tables(torch.zeros(L, dtype=torch.int64))), ("real", ab.task_tables(t))):
+        out, ref = _compare(ab, tabs, L, D, causal, window=window, seed=5)
+        _assert_equal(out, ref, f"{what} window={window} causal={causal} D={D}")
+        q, k, v = _qkv(L, D, 5)
+        forced = ab.cqs_fwd(ab.MODS["v12f"], q, k, v, tabs, causal, flags=ab.FORCE_LEGACY, window=window,
+                            fill=float("nan"))
+        _assert_equal(out, forced, f"{what} window={window}: default vs forced LEGACY")
+        rows = torch.unique(torch.cat([torch.arange(0, L, 331), torch.tensor([0, 255, 256, 1000, L - 1])])).to(DEV)
+        ref64, dead = _ref64_rows(q, k, v, tabs[0], causal, window, rows)
+        got = out[0][0, rows].double()
+        live = ~dead
+        rel = ((got[live] - ref64[live]).norm() / ref64[live].norm()).item()
+        assert rel < 2e-3, f"{what} window={window} causal={causal} D={D}: norm-relative error vs float64 {rel:.2e}"
+
+
+@cuda
+@pytest.mark.parametrize("D", [64, 128])
+@pytest.mark.parametrize("causal", [True, False])
+@pytest.mark.parametrize("n_groups,overflow", [(30, False), (32, True), (40, True), (41, True)])
+def test_run_table_overflow_through_kernels(n_groups, overflow, causal, D):
+    """Alternating owner / non-owner 128-token groups: a non-owner row block has n_groups/2 isolated live runs.
+    15 runs (n_groups = 30) fit the 16-slot table (route 0, ALIGNED); 16+ set the overflow bit (route 2, no
+    mixed tile) and the call must run on LEGACY, end to end, equal to v11. n_groups = 41 ends on an owner group
+    with a ragged 57-token tail (Is_even_MN = false)."""
+    ab = _harness()
+    bits = torch.repeat_interleave(torch.arange(n_groups) % 2, 128).to(torch.int64)
+    if n_groups == 41:
+        bits = bits[: 40 * 128 + 57]
+    L = bits.numel()
+    tabs = ab.tables(bits)
+    route, runs, tile = ab.census(ab.MODS["v12f"], tabs, causal, D)
+    ref_route, _ = ab.census_ref(bits.numpy(), *tile, causal=causal)
+    assert route == ref_route
+    assert not (route & 1), "a 128-aligned comb has no mixed tile"
+    assert bool(route & 2) == overflow, f"n_groups={n_groups}: route {route}"   # causal: the last row blocks
+    out, ref = _compare(ab, tabs, L, D, causal, seed=n_groups)
+    _assert_equal(out, ref, f"comb n_groups={n_groups} route={route} causal={causal} D={D}")
+
+
+@cuda
+def test_nonfinite_v_in_dead_tile_caveat():
+    """Pins the documented caveat of bit-identity (F23): it holds for FINITE K/V. v11 runs the fully masked
+    diagonal tile of a non-owner row block as P = 0 then P @ V, so an inf in a masked key's V row turns v11's
+    rows NaN; ALIGNED never loads that tile, so v12f's rows stay finite and match the masked reference. Rows
+    128-383 (group 1) never attend keys 128-383; rows 384-511 (owner) attend key 200."""
+    ab = _harness()
+    L, D = 512, 64
+    bits = torch.tensor([0] * 128 + [1] * 256 + [0] * 128, dtype=torch.int64)
+    tabs = ab.tables(bits)
+    assert ab.census(ab.MODS["v12f"], tabs, True, D)[0] == 0
+    q, k, v = _qkv(L, D, seed=2)
+    v[0, 200, 0, 3] = float("inf")
+    out = ab.cqs_fwd(ab.MODS["v12f"], q, k, v, tabs, True, flags=0, fill=float("nan"))
+    ref = ab.cqs_fwd(ab.MODS["v11"], q, k, v, tabs, True, fill=float("nan"))
+    o12, o11 = out[0][0], ref[0][0]
+    assert torch.isfinite(o12[:384]).all(), "v12f: rows that never attend key 200 must stay finite"
+    fin = torch.isfinite(o11) & torch.isfinite(o12)
+    assert torch.equal(o12[fin], o11[fin]), "finite elements must agree with v11"
+    rows = torch.arange(0, 384, device=DEV)
+    ref64, dead = _ref64_rows(q, k, v, tabs[0], True, (-1, -1), rows)
+    rel = ((o12[rows][~dead].double() - ref64[~dead]).norm() / ref64[~dead].norm()).item()
+    assert rel < 2e-3, f"v12f vs masked float64 reference on rows 0-383: {rel:.2e}"

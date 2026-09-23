@@ -1,0 +1,120 @@
+/scratch/gpfs/AKEY/yb2807/VENVs/CQSA311/bin/python
+della-l07g4
+NVIDIA A100-SXM4-80GB, 210 MHz, 1410 MHz, 81920 MiB
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/stream_cqsa/__init__.py 2.10.0+cu130
+{"gpu": "NVIDIA A100-SXM4-80GB", "torch": "2.10.0+cu130", "node": "della-l07g4", "slurm_job": "14308401", "modules": {"v11": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/stable/cqsa_cuda_next_v11.cpython-311-x86_64-linux-gnu.so", "v11x": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v11x/cqsa_cuda_next_v11x.cpython-311-x86_64-linux-gnu.so", "v9": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/stable/cqsa_cuda_next_v9.cpython-311-x86_64-linux-gnu.so"}, "nvidia_smi": "NVIDIA A100-SXM4-80GB, 210 MHz, 1410 MHz, 81920 MiB"}
+/scratch/gpfs/AKEY/yb2807/VENVs/CQSA311/lib/python3.11/site-packages/torch/profiler/profiler.py:217: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+[fwd] causal=1 D= 64 L=56064 v11  plain    17.30 ms  /sdpa 0.878
+[fwd] causal=1 D= 64 L=56064 v11  zero     22.55 ms  /sdpa 1.144
+[fwd] causal=1 D= 64 L=56064 v11  real     17.85 ms  /sdpa 0.906
+[fwd] causal=1 D= 64 L=56064 v11x plain    17.38 ms  /sdpa 0.882  equal_v11=True maxdiff 0.00e+00
+[fwd] causal=1 D= 64 L=56064 v11x zero     19.35 ms  /sdpa 0.982  equal_v11=True maxdiff 0.00e+00
+[fwd] causal=1 D= 64 L=56064 v11x real    (invalid: poison check)  poison_ok=True (rows 66.7%)
+[fwd] causal=0 D= 64 L=56064 v11  plain    33.16 ms  /sdpa 0.970
+[fwd] causal=0 D= 64 L=56064 v11  zero    195.82 ms  /sdpa 5.731
+[fwd] causal=0 D= 64 L=56064 v11  real    151.17 ms  /sdpa 4.424
+[fwd] causal=0 D= 64 L=56064 v9   plain    42.42 ms  /sdpa 1.242  equal_v11=True maxdiff 0.00e+00
+[fwd] causal=0 D= 64 L=56064 v9   zero     47.28 ms  /sdpa 1.384  equal_v11=True maxdiff 0.00e+00
+[fwd] causal=0 D= 64 L=56064 v9   real     38.15 ms  /sdpa 1.116  equal_v11=True maxdiff 0.00e+00
+[fwd] causal=0 D= 64 L=56064 v11x plain    33.51 ms  /sdpa 0.981  equal_v11=True maxdiff 0.00e+00
+[fwd] causal=0 D= 64 L=56064 v11x zero     34.73 ms  /sdpa 1.016  equal_v11=True maxdiff 0.00e+00
+[fwd] causal=0 D= 64 L=56064 v11x real    (invalid: poison check)  poison_ok=True (rows 33.3%)
+[fwd] causal=1 D=128 L=56064 v11  plain    29.71 ms  /sdpa 0.917
+[fwd] causal=1 D=128 L=56064 v11  zero     40.52 ms  /sdpa 1.251
+[fwd] causal=1 D=128 L=56064 v11  real     31.84 ms  /sdpa 0.983
+[fwd] causal=1 D=128 L=56064 v11x plain    29.82 ms  /sdpa 0.921  equal_v11=True maxdiff 0.00e+00
+[fwd] causal=1 D=128 L=56064 v11x zero     34.08 ms  /sdpa 1.053  equal_v11=True maxdiff 0.00e+00
+[fwd] causal=1 D=128 L=56064 v11x real    (invalid: poison check)  poison_ok=True (rows 66.7%)
+[fwd] causal=0 D=128 L=56064 v11  plain    56.66 ms  /sdpa 0.949
+[fwd] causal=0 D=128 L=56064 v11  zero    248.16 ms  /sdpa 4.156
+[fwd] causal=0 D=128 L=56064 v11  real    194.37 ms  /sdpa 3.255
+[fwd] causal=0 D=128 L=56064 v9   plain    82.70 ms  /sdpa 1.385  equal_v11=True maxdiff 0.00e+00
+[fwd] causal=0 D=128 L=56064 v9   zero     99.46 ms  /sdpa 1.666  equal_v11=True maxdiff 0.00e+00
+[fwd] causal=0 D=128 L=56064 v9   real     75.91 ms  /sdpa 1.271  equal_v11=True maxdiff 0.00e+00
+[fwd] causal=0 D=128 L=56064 v11x plain    57.26 ms  /sdpa 0.959  equal_v11=True maxdiff 0.00e+00
+[fwd] causal=0 D=128 L=56064 v11x zero     64.34 ms  /sdpa 1.078  equal_v11=True maxdiff 0.00e+00
+[fwd] causal=0 D=128 L=56064 v11x real    (invalid: poison check)  poison_ok=True (rows 33.3%)
+[bwd] L= 14044 v11  plain bwd     5.93 ms /sdpa 1.840  fwd    1.35 /sdpa 0.945  rerun ['1.2e-04', '0.0e+00', '0.0e+00']
+[bwd] L= 14044 v11  zero  bwd     6.49 ms /sdpa 2.015  fwd    2.04 /sdpa 1.428  rerun ['1.2e-04', '0.0e+00', '0.0e+00']
+[bwd] L= 14044 v11  real  bwd     6.26 ms /sdpa 1.942  fwd    3.13 /sdpa 2.191  rerun ['1.2e-04', '0.0e+00', '0.0e+00']
+[bwd] L= 14044 v11x plain bwd     2.97 ms /sdpa 0.923  fwd    1.34 /sdpa 0.934  rerun ['1.2e-04', '0.0e+00', '0.0e+00']  vs v11 ['1.2e-04', '0.0e+00', '0.0e+00'] dk/dv equal=True
+[bwd] L= 14044 v11x zero  bwd     2.98 ms /sdpa 0.926  fwd    1.53 /sdpa 1.068  rerun ['1.2e-04', '0.0e+00', '0.0e+00']  vs v11 ['1.2e-04', '0.0e+00', '0.0e+00'] dk/dv equal=True
+[bwd] L= 14044 v11x real  bwd     2.98 ms /sdpa 0.926  fwd    1.33 /sdpa 0.933  rerun ['1.2e-04', '0.0e+00', '0.0e+00']  vs v11 ['2.7e-01', '2.6e-01', '1.7e-01'] dk/dv equal=False  [NO_CQS ignores the mask: timing only]
+[bwd] L= 28088 v11  plain bwd    22.64 ms /sdpa 1.874  fwd    4.64 /sdpa 0.934  rerun ['1.2e-04', '0.0e+00', '0.0e+00']
+[bwd] L= 28088 v11  zero  bwd    24.78 ms /sdpa 2.051  fwd    6.57 /sdpa 1.323  rerun ['1.2e-04', '0.0e+00', '0.0e+00']
+[bwd] L= 28088 v11  real  bwd    23.12 ms /sdpa 1.914  fwd    8.08 /sdpa 1.628  rerun ['1.2e-04', '0.0e+00', '0.0e+00']
+[bwd] L= 28088 v11x plain bwd    11.36 ms /sdpa 0.940  fwd    4.70 /sdpa 0.947  rerun ['1.2e-04', '0.0e+00', '0.0e+00']  vs v11 ['1.2e-04', '0.0e+00', '0.0e+00'] dk/dv equal=True
+[bwd] L= 28088 v11x zero  bwd    11.37 ms /sdpa 0.941  fwd    5.28 /sdpa 1.063  rerun ['1.2e-04', '0.0e+00', '0.0e+00']  vs v11 ['6.1e-05', '0.0e+00', '0.0e+00'] dk/dv equal=True
+[bwd] L= 28088 v11x real  bwd    11.39 ms /sdpa 0.943  fwd    4.31 /sdpa 0.869  rerun ['1.2e-04', '0.0e+00', '0.0e+00']  vs v11 ['1.6e-01', '1.9e-01', '1.4e-01'] dk/dv equal=False  [NO_CQS ignores the mask: timing only]
+[bwd] L= 56175 v11  plain bwd    87.61 ms /sdpa 1.863  fwd   17.18 /sdpa 0.936  rerun ['1.2e-04', '0.0e+00', '0.0e+00']
+[bwd] L= 56175 v11  zero  bwd    96.14 ms /sdpa 2.044  fwd   23.28 /sdpa 1.269  rerun ['1.2e-04', '0.0e+00', '0.0e+00']
+[bwd] L= 56175 v11  real  bwd    88.84 ms /sdpa 1.889  fwd   24.58 /sdpa 1.340  rerun ['1.2e-04', '0.0e+00', '0.0e+00']
+[bwd] L= 56175 v11x plain bwd    44.53 ms /sdpa 0.947  fwd   17.15 /sdpa 0.935  rerun ['1.2e-04', '0.0e+00', '0.0e+00']  vs v11 ['1.2e-04', '0.0e+00', '0.0e+00'] dk/dv equal=True
+[bwd] L= 56175 v11x zero  bwd    44.55 ms /sdpa 0.947  fwd   19.28 /sdpa 1.051  rerun ['1.2e-04', '0.0e+00', '0.0e+00']  vs v11 ['1.2e-04', '0.0e+00', '0.0e+00'] dk/dv equal=True
+[bwd] L= 56175 v11x real  bwd    44.55 ms /sdpa 0.947  fwd   15.31 /sdpa 0.835  rerun ['1.2e-04', '0.0e+00', '0.0e+00']  vs v11 ['1.2e-01', '1.1e-01', '9.1e-02'] dk/dv equal=False  [NO_CQS ignores the mask: timing only]
+
+==================== FORWARD, aligned c=7 task (fp16, H=8; ms, median of 5) ====================
+FA-2 arm = torch SDPA, FLASH_ATTENTION backend forced (flash_attn not installed; ~5% slower than the package). Kernels: ['void pytorch_flash::flash_fwd_kernel<Flash_fwd_kernel_traits<64, 128, 128, 4, false, false, cutlass::half_t, Flash_kernel_traits<64, 128, 128, 4, cutlass::half_t> >, false, true, false, false, true, true, false, false>(pytorch_flash::Flash_fwd_params)']
+causal   D      L module pattern |       ms    sdpaF  ratio | equal v11   maxdiff | poison
+     1  64  56064    v11   plain |    17.30    19.70  0.878 |                     | 
+     1  64  56064    v11    zero |    22.55    19.70  1.144 |                     | 
+     1  64  56064    v11    real |    17.85    19.70  0.906 |                     | 
+     1  64  56064   v11x   plain |    17.38    19.70  0.882 |      True  0.00e+00 | 
+     1  64  56064   v11x    zero |    19.35    19.70  0.982 |      True  0.00e+00 | 
+     1  64  56064   v11x    real |        -    19.70      - |                     | ok=True rows=66.7%
+     0  64  56064    v11   plain |    33.16    34.17  0.970 |                     | 
+     0  64  56064    v11    zero |   195.82    34.17  5.731 |                     | 
+     0  64  56064    v11    real |   151.17    34.17  4.424 |                     | 
+     0  64  56064     v9   plain |    42.42    34.17  1.242 |      True  0.00e+00 | 
+     0  64  56064     v9    zero |    47.28    34.17  1.384 |      True  0.00e+00 | 
+     0  64  56064     v9    real |    38.15    34.17  1.116 |      True  0.00e+00 | 
+     0  64  56064   v11x   plain |    33.51    34.17  0.981 |      True  0.00e+00 | 
+     0  64  56064   v11x    zero |    34.73    34.17  1.016 |      True  0.00e+00 | 
+     0  64  56064   v11x    real |        -    34.17      - |                     | ok=True rows=33.3%
+     1 128  56064    v11   plain |    29.71    32.38  0.917 |                     | 
+     1 128  56064    v11    zero |    40.52    32.38  1.251 |                     | 
+     1 128  56064    v11    real |    31.84    32.38  0.983 |                     | 
+     1 128  56064   v11x   plain |    29.82    32.38  0.921 |      True  0.00e+00 | 
+     1 128  56064   v11x    zero |    34.08    32.38  1.053 |      True  0.00e+00 | 
+     1 128  56064   v11x    real |        -    32.38      - |                     | ok=True rows=66.7%
+     0 128  56064    v11   plain |    56.66    59.71  0.949 |                     | 
+     0 128  56064    v11    zero |   248.16    59.71  4.156 |                     | 
+     0 128  56064    v11    real |   194.37    59.71  3.255 |                     | 
+     0 128  56064     v9   plain |    82.70    59.71  1.385 |      True  0.00e+00 | 
+     0 128  56064     v9    zero |    99.46    59.71  1.666 |      True  0.00e+00 | 
+     0 128  56064     v9    real |    75.91    59.71  1.271 |      True  0.00e+00 | 
+     0 128  56064   v11x   plain |    57.26    59.71  0.959 |      True  0.00e+00 | 
+     0 128  56064   v11x    zero |    64.34    59.71  1.078 |      True  0.00e+00 | 
+     0 128  56064   v11x    real |        -    59.71      - |                     | ok=True rows=33.3%
+
+-- forward tax split (zero/plain ratios vs SDPA-flash) --
+  causal=1 D=64:  v11/plain 0.878  v11/zero 1.144  v11/real 0.906  v11x/plain 0.882  v11x/zero 0.982
+  causal=0 D=64:  v9/plain 1.242  v9/zero 1.384  v9/real 1.116  v11/plain 0.970  v11/zero 5.731  v11/real 4.424  v11x/plain 0.981  v11x/zero 1.016
+  causal=1 D=128:  v11/plain 0.917  v11/zero 1.251  v11/real 0.983  v11x/plain 0.921  v11x/zero 1.053
+  causal=0 D=128:  v9/plain 1.385  v9/zero 1.666  v9/real 1.271  v11/plain 0.949  v11/zero 4.156  v11/real 3.255  v11x/plain 0.959  v11x/zero 1.078
+
+==================== BACKWARD, classic layout path (0,), causal, D=64 (ms, median of 5) ====================
+     L module pattern |   bwd ms    sdpaF  ratio |   fwd ms  ratio | rerun dq/dk/dv | vs v11 dq/dk/dv | dk,dv equal
+ 14044    v11   plain |     5.93     3.22  1.840 |     1.35  0.945 | 1.2e-04 0.0e+00 0.0e+00 | 
+ 14044    v11    zero |     6.49     3.22  2.015 |     2.04  1.428 | 1.2e-04 0.0e+00 0.0e+00 | 
+ 14044    v11    real |     6.26     3.22  1.942 |     3.13  2.191 | 1.2e-04 0.0e+00 0.0e+00 | 
+ 14044   v11x   plain |     2.97     3.22  0.923 |     1.34  0.934 | 1.2e-04 0.0e+00 0.0e+00 | 1.2e-04 0.0e+00 0.0e+00 | True
+ 14044   v11x    zero |     2.98     3.22  0.926 |     1.53  1.068 | 1.2e-04 0.0e+00 0.0e+00 | 1.2e-04 0.0e+00 0.0e+00 | True
+ 14044   v11x    real |     2.98     3.22  0.926 |     1.33  0.933 | 1.2e-04 0.0e+00 0.0e+00 | 2.7e-01 2.6e-01 1.7e-01 | False  [timing only]
+ 28088    v11   plain |    22.64    12.08  1.874 |     4.64  0.934 | 1.2e-04 0.0e+00 0.0e+00 | 
+ 28088    v11    zero |    24.78    12.08  2.051 |     6.57  1.323 | 1.2e-04 0.0e+00 0.0e+00 | 
+ 28088    v11    real |    23.12    12.08  1.914 |     8.08  1.628 | 1.2e-04 0.0e+00 0.0e+00 | 
+ 28088   v11x   plain |    11.36    12.08  0.940 |     4.70  0.947 | 1.2e-04 0.0e+00 0.0e+00 | 1.2e-04 0.0e+00 0.0e+00 | True
+ 28088   v11x    zero |    11.37    12.08  0.941 |     5.28  1.063 | 1.2e-04 0.0e+00 0.0e+00 | 6.1e-05 0.0e+00 0.0e+00 | True
+ 28088   v11x    real |    11.39    12.08  0.943 |     4.31  0.869 | 1.2e-04 0.0e+00 0.0e+00 | 1.6e-01 1.9e-01 1.4e-01 | False  [timing only]
+ 56175    v11   plain |    87.61    47.03  1.863 |    17.18  0.936 | 1.2e-04 0.0e+00 0.0e+00 | 
+ 56175    v11    zero |    96.14    47.03  2.044 |    23.28  1.269 | 1.2e-04 0.0e+00 0.0e+00 | 
+ 56175    v11    real |    88.84    47.03  1.889 |    24.58  1.340 | 1.2e-04 0.0e+00 0.0e+00 | 
+ 56175   v11x   plain |    44.53    47.03  0.947 |    17.15  0.935 | 1.2e-04 0.0e+00 0.0e+00 | 1.2e-04 0.0e+00 0.0e+00 | True
+ 56175   v11x    zero |    44.55    47.03  0.947 |    19.28  1.051 | 1.2e-04 0.0e+00 0.0e+00 | 1.2e-04 0.0e+00 0.0e+00 | True
+ 56175   v11x    real |    44.55    47.03  0.947 |    15.31  0.835 | 1.2e-04 0.0e+00 0.0e+00 | 1.2e-01 1.1e-01 9.1e-02 | False  [timing only]
+
+route rule: NO_CQS backward / SDPA-flash backward = 0.923, 0.940, 0.947 (L = 14044, 28088, 56175); worst 0.947 -> fix the fused kernel (<= 1.25x)
+
+wrote /scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/exp_build_ab.json  (25 s)

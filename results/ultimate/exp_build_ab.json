@@ -1,0 +1,1211 @@
+{
+ "info": {
+  "gpu": "NVIDIA A100-SXM4-80GB",
+  "torch": "2.10.0+cu130",
+  "node": "della-l07g4",
+  "slurm_job": "14308401",
+  "modules": {
+   "v11": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/stable/cqsa_cuda_next_v11.cpython-311-x86_64-linux-gnu.so",
+   "v11x": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v11x/cqsa_cuda_next_v11x.cpython-311-x86_64-linux-gnu.so",
+   "v9": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/stable/cqsa_cuda_next_v9.cpython-311-x86_64-linux-gnu.so"
+  },
+  "nvidia_smi": "NVIDIA A100-SXM4-80GB, 210 MHz, 1410 MHz, 81920 MiB"
+ },
+ "fa2_arm": "torch SDPA with SDPBackend.FLASH_ATTENTION forced (flash_attn not installed in CQSA311)",
+ "timing": "1 warm-up + 5 timed runs, CUDA events, median (min also stored)",
+ "iters": 5,
+ "H": 8,
+ "dtype": "float16",
+ "v11x": "v11 + -DCQSA_NO_ELEMENT_PATH (fwd) + -DCQSA_BWD_NO_CQS (bwd) + -lineinfo",
+ "smoke": false,
+ "fwd": [
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": true,
+   "D": 64,
+   "module": "v11",
+   "pattern": "plain",
+   "valid": true,
+   "sdpa_flash_ms": 19.703807830810547,
+   "sdpa_flash_min_ms": 19.67513656616211,
+   "ms": 17.301631927490234,
+   "min_ms": 17.12761688232422,
+   "ratio_vs_sdpa": 0.8780857018122118
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": true,
+   "D": 64,
+   "module": "v11",
+   "pattern": "zero",
+   "valid": true,
+   "sdpa_flash_ms": 19.703807830810547,
+   "sdpa_flash_min_ms": 19.67513656616211,
+   "ms": 22.54694366455078,
+   "min_ms": 22.465408325195312,
+   "ratio_vs_sdpa": 1.1442937252612901
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": true,
+   "D": 64,
+   "module": "v11",
+   "pattern": "real",
+   "valid": true,
+   "sdpa_flash_ms": 19.703807830810547,
+   "sdpa_flash_min_ms": 19.67513656616211,
+   "ms": 17.846752166748047,
+   "min_ms": 17.814176559448242,
+   "ratio_vs_sdpa": 0.9057514324130461
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": true,
+   "D": 64,
+   "module": "v11x",
+   "pattern": "plain",
+   "valid": true,
+   "sdpa_flash_ms": 19.703807830810547,
+   "sdpa_flash_min_ms": 19.67513656616211,
+   "ms": 17.37785530090332,
+   "min_ms": 17.229248046875,
+   "ratio_vs_sdpa": 0.8819541608465056,
+   "maxdiff_out_vs_v11": 0.0,
+   "maxdiff_lse_vs_v11": 0.0,
+   "equal_vs_v11": true
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": true,
+   "D": 64,
+   "module": "v11x",
+   "pattern": "zero",
+   "valid": true,
+   "sdpa_flash_ms": 19.703807830810547,
+   "sdpa_flash_min_ms": 19.67513656616211,
+   "ms": 19.347679138183594,
+   "min_ms": 19.12575912475586,
+   "ratio_vs_sdpa": 0.9819258949496006,
+   "maxdiff_out_vs_v11": 0.0,
+   "maxdiff_lse_vs_v11": 0.0,
+   "equal_vs_v11": true
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": true,
+   "D": 64,
+   "module": "v11x",
+   "pattern": "real",
+   "valid": false,
+   "sdpa_flash_ms": 19.703807830810547,
+   "sdpa_flash_min_ms": 19.67513656616211,
+   "poison_rows_frac": 0.6666666269302368,
+   "poison_out_nan": true,
+   "poison_lse_ok": true,
+   "poison_lse_inf_rows_frac": 0.0,
+   "clean_rows_equal_v11": true,
+   "poison_ok": true
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": false,
+   "D": 64,
+   "module": "v11",
+   "pattern": "plain",
+   "valid": true,
+   "sdpa_flash_ms": 34.16886520385742,
+   "sdpa_flash_min_ms": 34.16815948486328,
+   "ms": 33.15856170654297,
+   "min_ms": 33.15158462524414,
+   "ratio_vs_sdpa": 0.9704320441639837
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": false,
+   "D": 64,
+   "module": "v11",
+   "pattern": "zero",
+   "valid": true,
+   "sdpa_flash_ms": 34.16886520385742,
+   "sdpa_flash_min_ms": 34.16815948486328,
+   "ms": 195.82354736328125,
+   "min_ms": 195.5879669189453,
+   "ratio_vs_sdpa": 5.731052119962537
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": false,
+   "D": 64,
+   "module": "v11",
+   "pattern": "real",
+   "valid": true,
+   "sdpa_flash_ms": 34.16886520385742,
+   "sdpa_flash_min_ms": 34.16815948486328,
+   "ms": 151.17222595214844,
+   "min_ms": 151.11666870117188,
+   "ratio_vs_sdpa": 4.4242682644047004
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": false,
+   "D": 64,
+   "module": "v9",
+   "pattern": "plain",
+   "valid": true,
+   "sdpa_flash_ms": 34.16886520385742,
+   "sdpa_flash_min_ms": 34.16815948486328,
+   "ms": 42.42291259765625,
+   "min_ms": 42.400638580322266,
+   "ratio_vs_sdpa": 1.2415663307679006,
+   "maxdiff_out_vs_v11": 0.0,
+   "maxdiff_lse_vs_v11": 0.0,
+   "equal_vs_v11": true
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": false,
+   "D": 64,
+   "module": "v9",
+   "pattern": "zero",
+   "valid": true,
+   "sdpa_flash_ms": 34.16886520385742,
+   "sdpa_flash_min_ms": 34.16815948486328,
+   "ms": 47.28086471557617,
+   "min_ms": 47.20915222167969,
+   "ratio_vs_sdpa": 1.3837411466108187,
+   "maxdiff_out_vs_v11": 0.0,
+   "maxdiff_lse_vs_v11": 0.0,
+   "equal_vs_v11": true
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": false,
+   "D": 64,
+   "module": "v9",
+   "pattern": "real",
+   "valid": true,
+   "sdpa_flash_ms": 34.16886520385742,
+   "sdpa_flash_min_ms": 34.16815948486328,
+   "ms": 38.147071838378906,
+   "min_ms": 38.05321502685547,
+   "ratio_vs_sdpa": 1.116427824301065,
+   "maxdiff_out_vs_v11": 0.0,
+   "maxdiff_lse_vs_v11": 0.0,
+   "equal_vs_v11": true
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": false,
+   "D": 64,
+   "module": "v11x",
+   "pattern": "plain",
+   "valid": true,
+   "sdpa_flash_ms": 34.16886520385742,
+   "sdpa_flash_min_ms": 34.16815948486328,
+   "ms": 33.513118743896484,
+   "min_ms": 33.482975006103516,
+   "ratio_vs_sdpa": 0.9808086555977601,
+   "maxdiff_out_vs_v11": 0.0,
+   "maxdiff_lse_vs_v11": 0.0,
+   "equal_vs_v11": true
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": false,
+   "D": 64,
+   "module": "v11x",
+   "pattern": "zero",
+   "valid": true,
+   "sdpa_flash_ms": 34.16886520385742,
+   "sdpa_flash_min_ms": 34.16815948486328,
+   "ms": 34.728607177734375,
+   "min_ms": 34.72342300415039,
+   "ratio_vs_sdpa": 1.0163816378020585,
+   "maxdiff_out_vs_v11": 0.0,
+   "maxdiff_lse_vs_v11": 0.0,
+   "equal_vs_v11": true
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": false,
+   "D": 64,
+   "module": "v11x",
+   "pattern": "real",
+   "valid": false,
+   "sdpa_flash_ms": 34.16886520385742,
+   "sdpa_flash_min_ms": 34.16815948486328,
+   "poison_rows_frac": 0.3333333134651184,
+   "poison_out_nan": true,
+   "poison_lse_ok": true,
+   "poison_lse_inf_rows_frac": 0.0,
+   "clean_rows_equal_v11": true,
+   "poison_ok": true
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": true,
+   "D": 128,
+   "module": "v11",
+   "pattern": "plain",
+   "valid": true,
+   "sdpa_flash_ms": 32.380767822265625,
+   "sdpa_flash_min_ms": 32.15305709838867,
+   "ms": 29.70697593688965,
+   "min_ms": 29.5250244140625,
+   "ratio_vs_sdpa": 0.9174265446683625
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": true,
+   "D": 128,
+   "module": "v11",
+   "pattern": "zero",
+   "valid": true,
+   "sdpa_flash_ms": 32.380767822265625,
+   "sdpa_flash_min_ms": 32.15305709838867,
+   "ms": 40.51500701904297,
+   "min_ms": 40.424129486083984,
+   "ratio_vs_sdpa": 1.251205877557483
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": true,
+   "D": 128,
+   "module": "v11",
+   "pattern": "real",
+   "valid": true,
+   "sdpa_flash_ms": 32.380767822265625,
+   "sdpa_flash_min_ms": 32.15305709838867,
+   "ms": 31.835168838500977,
+   "min_ms": 31.80099105834961,
+   "ratio_vs_sdpa": 0.9831505235836475
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": true,
+   "D": 128,
+   "module": "v11x",
+   "pattern": "plain",
+   "valid": true,
+   "sdpa_flash_ms": 32.380767822265625,
+   "sdpa_flash_min_ms": 32.15305709838867,
+   "ms": 29.819263458251953,
+   "min_ms": 29.585920333862305,
+   "ratio_vs_sdpa": 0.9208942672986175,
+   "maxdiff_out_vs_v11": 0.0,
+   "maxdiff_lse_vs_v11": 0.0,
+   "equal_vs_v11": true
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": true,
+   "D": 128,
+   "module": "v11x",
+   "pattern": "zero",
+   "valid": true,
+   "sdpa_flash_ms": 32.380767822265625,
+   "sdpa_flash_min_ms": 32.15305709838867,
+   "ms": 34.08176040649414,
+   "min_ms": 33.781150817871094,
+   "ratio_vs_sdpa": 1.0525309527422286,
+   "maxdiff_out_vs_v11": 0.0,
+   "maxdiff_lse_vs_v11": 0.0,
+   "equal_vs_v11": true
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": true,
+   "D": 128,
+   "module": "v11x",
+   "pattern": "real",
+   "valid": false,
+   "sdpa_flash_ms": 32.380767822265625,
+   "sdpa_flash_min_ms": 32.15305709838867,
+   "poison_rows_frac": 0.6666666269302368,
+   "poison_out_nan": true,
+   "poison_lse_ok": true,
+   "poison_lse_inf_rows_frac": 0.0,
+   "clean_rows_equal_v11": true,
+   "poison_ok": true
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": false,
+   "D": 128,
+   "module": "v11",
+   "pattern": "plain",
+   "valid": true,
+   "sdpa_flash_ms": 59.7059211730957,
+   "sdpa_flash_min_ms": 59.11040115356445,
+   "ms": 56.66022491455078,
+   "min_ms": 56.65184020996094,
+   "ratio_vs_sdpa": 0.9489883716940732
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": false,
+   "D": 128,
+   "module": "v11",
+   "pattern": "zero",
+   "valid": true,
+   "sdpa_flash_ms": 59.7059211730957,
+   "sdpa_flash_min_ms": 59.11040115356445,
+   "ms": 248.16082763671875,
+   "min_ms": 247.99098205566406,
+   "ratio_vs_sdpa": 4.156385543692832
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": false,
+   "D": 128,
+   "module": "v11",
+   "pattern": "real",
+   "valid": true,
+   "sdpa_flash_ms": 59.7059211730957,
+   "sdpa_flash_min_ms": 59.11040115356445,
+   "ms": 194.36627197265625,
+   "min_ms": 194.26182556152344,
+   "ratio_vs_sdpa": 3.2553935715883457
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": false,
+   "D": 128,
+   "module": "v9",
+   "pattern": "plain",
+   "valid": true,
+   "sdpa_flash_ms": 59.7059211730957,
+   "sdpa_flash_min_ms": 59.11040115356445,
+   "ms": 82.70361328125,
+   "min_ms": 82.58975982666016,
+   "ratio_vs_sdpa": 1.3851827700887624,
+   "maxdiff_out_vs_v11": 0.0,
+   "maxdiff_lse_vs_v11": 0.0,
+   "equal_vs_v11": true
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": false,
+   "D": 128,
+   "module": "v9",
+   "pattern": "zero",
+   "valid": true,
+   "sdpa_flash_ms": 59.7059211730957,
+   "sdpa_flash_min_ms": 59.11040115356445,
+   "ms": 99.45772552490234,
+   "min_ms": 99.21804809570312,
+   "ratio_vs_sdpa": 1.6657933345766607,
+   "maxdiff_out_vs_v11": 0.0,
+   "maxdiff_lse_vs_v11": 0.0,
+   "equal_vs_v11": true
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": false,
+   "D": 128,
+   "module": "v9",
+   "pattern": "real",
+   "valid": true,
+   "sdpa_flash_ms": 59.7059211730957,
+   "sdpa_flash_min_ms": 59.11040115356445,
+   "ms": 75.9109115600586,
+   "min_ms": 75.7741470336914,
+   "ratio_vs_sdpa": 1.2714134556266603,
+   "maxdiff_out_vs_v11": 0.0,
+   "maxdiff_lse_vs_v11": 0.0,
+   "equal_vs_v11": true
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": false,
+   "D": 128,
+   "module": "v11x",
+   "pattern": "plain",
+   "valid": true,
+   "sdpa_flash_ms": 59.7059211730957,
+   "sdpa_flash_min_ms": 59.11040115356445,
+   "ms": 57.26464080810547,
+   "min_ms": 56.84956741333008,
+   "ratio_vs_sdpa": 0.9591115869745545,
+   "maxdiff_out_vs_v11": 0.0,
+   "maxdiff_lse_vs_v11": 0.0,
+   "equal_vs_v11": true
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": false,
+   "D": 128,
+   "module": "v11x",
+   "pattern": "zero",
+   "valid": true,
+   "sdpa_flash_ms": 59.7059211730957,
+   "sdpa_flash_min_ms": 59.11040115356445,
+   "ms": 64.33712005615234,
+   "min_ms": 64.32546997070312,
+   "ratio_vs_sdpa": 1.0775668274111398,
+   "maxdiff_out_vs_v11": 0.0,
+   "maxdiff_lse_vs_v11": 0.0,
+   "equal_vs_v11": true
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56064,
+   "L_mod_128": 0,
+   "path": [
+    2
+   ],
+   "causal": false,
+   "D": 128,
+   "module": "v11x",
+   "pattern": "real",
+   "valid": false,
+   "sdpa_flash_ms": 59.7059211730957,
+   "sdpa_flash_min_ms": 59.11040115356445,
+   "poison_rows_frac": 0.3333333134651184,
+   "poison_out_nan": true,
+   "poison_lse_ok": true,
+   "poison_lse_inf_rows_frac": 0.0,
+   "clean_rows_equal_v11": true,
+   "poison_ok": true
+  }
+ ],
+ "bwd": [
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 32768,
+   "L": 14044,
+   "L_mod_128": 92,
+   "path": [
+    0
+   ],
+   "causal": true,
+   "D": 64,
+   "module": "v11",
+   "pattern": "plain",
+   "valid": true,
+   "sdpa_flash_bwd_ms": 3.22271990776062,
+   "sdpa_flash_bwd_min_ms": 3.2212159633636475,
+   "sdpa_flash_fwd_ms": 1.4302079677581787,
+   "bwd_ms": 5.928544044494629,
+   "bwd_min_ms": 5.917280197143555,
+   "bwd_ratio_vs_sdpa": 1.8396088441375633,
+   "rerun_maxdiff_dq_dk_dv": [
+    0.0001220703125,
+    0.0,
+    0.0
+   ],
+   "fwd_ms": 1.351423978805542,
+   "fwd_min_ms": 1.3137919902801514,
+   "fwd_ratio_vs_sdpa": 0.9449143126533346
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 32768,
+   "L": 14044,
+   "L_mod_128": 92,
+   "path": [
+    0
+   ],
+   "causal": true,
+   "D": 64,
+   "module": "v11",
+   "pattern": "zero",
+   "valid": true,
+   "sdpa_flash_bwd_ms": 3.22271990776062,
+   "sdpa_flash_bwd_min_ms": 3.2212159633636475,
+   "sdpa_flash_fwd_ms": 1.4302079677581787,
+   "bwd_ms": 6.4937920570373535,
+   "bwd_min_ms": 6.488671779632568,
+   "bwd_ratio_vs_sdpa": 2.015003550696316,
+   "rerun_maxdiff_dq_dk_dv": [
+    0.0001220703125,
+    0.0,
+    0.0
+   ],
+   "fwd_ms": 2.042912006378174,
+   "fwd_min_ms": 2.0297598838806152,
+   "fwd_ratio_vs_sdpa": 1.4284020593035822
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 32768,
+   "L": 14044,
+   "L_mod_128": 92,
+   "path": [
+    0
+   ],
+   "causal": true,
+   "D": 64,
+   "module": "v11",
+   "pattern": "real",
+   "valid": true,
+   "sdpa_flash_bwd_ms": 3.22271990776062,
+   "sdpa_flash_bwd_min_ms": 3.2212159633636475,
+   "sdpa_flash_fwd_ms": 1.4302079677581787,
+   "bwd_ms": 6.259391784667969,
+   "bwd_min_ms": 6.24889612197876,
+   "bwd_ratio_vs_sdpa": 1.9422698725988412,
+   "rerun_maxdiff_dq_dk_dv": [
+    0.0001220703125,
+    0.0,
+    0.0
+   ],
+   "fwd_ms": 3.1328959465026855,
+   "fwd_min_ms": 3.119904041290283,
+   "fwd_ratio_vs_sdpa": 2.1905177548503207
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 32768,
+   "L": 14044,
+   "L_mod_128": 92,
+   "path": [
+    0
+   ],
+   "causal": true,
+   "D": 64,
+   "module": "v11x",
+   "pattern": "plain",
+   "valid": true,
+   "sdpa_flash_bwd_ms": 3.22271990776062,
+   "sdpa_flash_bwd_min_ms": 3.2212159633636475,
+   "sdpa_flash_fwd_ms": 1.4302079677581787,
+   "bwd_ms": 2.9741439819335938,
+   "bwd_min_ms": 2.9712960720062256,
+   "bwd_ratio_vs_sdpa": 0.922867660565713,
+   "rerun_maxdiff_dq_dk_dv": [
+    0.0001220703125,
+    0.0,
+    0.0
+   ],
+   "fwd_ms": 1.3362239599227905,
+   "fwd_min_ms": 1.2929600477218628,
+   "fwd_ratio_vs_sdpa": 0.9342864744469952,
+   "maxdiff_dq_dk_dv_vs_v11": [
+    0.0001220703125,
+    0.0,
+    0.0
+   ],
+   "dk_dv_equal_vs_v11": true
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 32768,
+   "L": 14044,
+   "L_mod_128": 92,
+   "path": [
+    0
+   ],
+   "causal": true,
+   "D": 64,
+   "module": "v11x",
+   "pattern": "zero",
+   "valid": true,
+   "sdpa_flash_bwd_ms": 3.22271990776062,
+   "sdpa_flash_bwd_min_ms": 3.2212159633636475,
+   "sdpa_flash_fwd_ms": 1.4302079677581787,
+   "bwd_ms": 2.9837119579315186,
+   "bwd_min_ms": 2.9828479290008545,
+   "bwd_ratio_vs_sdpa": 0.9258365738662093,
+   "rerun_maxdiff_dq_dk_dv": [
+    0.0001220703125,
+    0.0,
+    0.0
+   ],
+   "fwd_ms": 1.5267839431762695,
+   "fwd_min_ms": 1.5140479803085327,
+   "fwd_ratio_vs_sdpa": 1.067525826729571,
+   "maxdiff_dq_dk_dv_vs_v11": [
+    0.0001220703125,
+    0.0,
+    0.0
+   ],
+   "dk_dv_equal_vs_v11": true
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 32768,
+   "L": 14044,
+   "L_mod_128": 92,
+   "path": [
+    0
+   ],
+   "causal": true,
+   "D": 64,
+   "module": "v11x",
+   "pattern": "real",
+   "valid": false,
+   "sdpa_flash_bwd_ms": 3.22271990776062,
+   "sdpa_flash_bwd_min_ms": 3.2212159633636475,
+   "sdpa_flash_fwd_ms": 1.4302079677581787,
+   "bwd_ms": 2.9832959175109863,
+   "bwd_min_ms": 2.979487895965576,
+   "bwd_ratio_vs_sdpa": 0.9257074778130492,
+   "rerun_maxdiff_dq_dk_dv": [
+    0.0001220703125,
+    0.0,
+    0.0
+   ],
+   "fwd_ms": 1.3336960077285767,
+   "fwd_min_ms": 1.2882879972457886,
+   "fwd_ratio_vs_sdpa": 0.932518932766902,
+   "maxdiff_dq_dk_dv_vs_v11": [
+    0.274505615234375,
+    0.2613525390625,
+    0.16568756103515625
+   ],
+   "dk_dv_equal_vs_v11": false
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 65536,
+   "L": 28088,
+   "L_mod_128": 56,
+   "path": [
+    0
+   ],
+   "causal": true,
+   "D": 64,
+   "module": "v11",
+   "pattern": "plain",
+   "valid": true,
+   "sdpa_flash_bwd_ms": 12.079520225524902,
+   "sdpa_flash_bwd_min_ms": 12.076831817626953,
+   "sdpa_flash_fwd_ms": 4.964352130889893,
+   "bwd_ms": 22.641759872436523,
+   "bwd_min_ms": 22.615360260009766,
+   "bwd_ratio_vs_sdpa": 1.8743923144060675,
+   "rerun_maxdiff_dq_dk_dv": [
+    0.0001220703125,
+    0.0,
+    0.0
+   ],
+   "fwd_ms": 4.6372480392456055,
+   "fwd_min_ms": 4.609375953674316,
+   "fwd_ratio_vs_sdpa": 0.934109409844452
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 65536,
+   "L": 28088,
+   "L_mod_128": 56,
+   "path": [
+    0
+   ],
+   "causal": true,
+   "D": 64,
+   "module": "v11",
+   "pattern": "zero",
+   "valid": true,
+   "sdpa_flash_bwd_ms": 12.079520225524902,
+   "sdpa_flash_bwd_min_ms": 12.076831817626953,
+   "sdpa_flash_fwd_ms": 4.964352130889893,
+   "bwd_ms": 24.77686309814453,
+   "bwd_min_ms": 24.76323127746582,
+   "bwd_ratio_vs_sdpa": 2.0511462902135156,
+   "rerun_maxdiff_dq_dk_dv": [
+    0.0001220703125,
+    0.0,
+    0.0
+   ],
+   "fwd_ms": 6.56601619720459,
+   "fwd_min_ms": 6.5643839836120605,
+   "fwd_ratio_vs_sdpa": 1.3226330494061043
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 65536,
+   "L": 28088,
+   "L_mod_128": 56,
+   "path": [
+    0
+   ],
+   "causal": true,
+   "D": 64,
+   "module": "v11",
+   "pattern": "real",
+   "valid": true,
+   "sdpa_flash_bwd_ms": 12.079520225524902,
+   "sdpa_flash_bwd_min_ms": 12.076831817626953,
+   "sdpa_flash_fwd_ms": 4.964352130889893,
+   "bwd_ms": 23.12214469909668,
+   "bwd_min_ms": 23.0579833984375,
+   "bwd_ratio_vs_sdpa": 1.9141608497196694,
+   "rerun_maxdiff_dq_dk_dv": [
+    0.0001220703125,
+    0.0,
+    0.0
+   ],
+   "fwd_ms": 8.079615592956543,
+   "fwd_min_ms": 8.05065631866455,
+   "fwd_ratio_vs_sdpa": 1.6275266902769483
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 65536,
+   "L": 28088,
+   "L_mod_128": 56,
+   "path": [
+    0
+   ],
+   "causal": true,
+   "D": 64,
+   "module": "v11x",
+   "pattern": "plain",
+   "valid": true,
+   "sdpa_flash_bwd_ms": 12.079520225524902,
+   "sdpa_flash_bwd_min_ms": 12.076831817626953,
+   "sdpa_flash_fwd_ms": 4.964352130889893,
+   "bwd_ms": 11.359871864318848,
+   "bwd_min_ms": 11.355999946594238,
+   "bwd_ratio_vs_sdpa": 0.9404240940227588,
+   "rerun_maxdiff_dq_dk_dv": [
+    0.0001220703125,
+    0.0,
+    0.0
+   ],
+   "fwd_ms": 4.702784061431885,
+   "fwd_min_ms": 4.677760124206543,
+   "fwd_ratio_vs_sdpa": 0.9473107340975185,
+   "maxdiff_dq_dk_dv_vs_v11": [
+    0.0001220703125,
+    0.0,
+    0.0
+   ],
+   "dk_dv_equal_vs_v11": true
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 65536,
+   "L": 28088,
+   "L_mod_128": 56,
+   "path": [
+    0
+   ],
+   "causal": true,
+   "D": 64,
+   "module": "v11x",
+   "pattern": "zero",
+   "valid": true,
+   "sdpa_flash_bwd_ms": 12.079520225524902,
+   "sdpa_flash_bwd_min_ms": 12.076831817626953,
+   "sdpa_flash_fwd_ms": 4.964352130889893,
+   "bwd_ms": 11.371935844421387,
+   "bwd_min_ms": 11.369471549987793,
+   "bwd_ratio_vs_sdpa": 0.9414228075376422,
+   "rerun_maxdiff_dq_dk_dv": [
+    0.0001220703125,
+    0.0,
+    0.0
+   ],
+   "fwd_ms": 5.279263973236084,
+   "fwd_min_ms": 5.151199817657471,
+   "fwd_ratio_vs_sdpa": 1.0634346303491855,
+   "maxdiff_dq_dk_dv_vs_v11": [
+    6.103515625e-05,
+    0.0,
+    0.0
+   ],
+   "dk_dv_equal_vs_v11": true
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 65536,
+   "L": 28088,
+   "L_mod_128": 56,
+   "path": [
+    0
+   ],
+   "causal": true,
+   "D": 64,
+   "module": "v11x",
+   "pattern": "real",
+   "valid": false,
+   "sdpa_flash_bwd_ms": 12.079520225524902,
+   "sdpa_flash_bwd_min_ms": 12.076831817626953,
+   "sdpa_flash_fwd_ms": 4.964352130889893,
+   "bwd_ms": 11.386591911315918,
+   "bwd_min_ms": 11.368927955627441,
+   "bwd_ratio_vs_sdpa": 0.9426361062962768,
+   "rerun_maxdiff_dq_dk_dv": [
+    0.0001220703125,
+    0.0,
+    0.0
+   ],
+   "fwd_ms": 4.312352180480957,
+   "fwd_min_ms": 4.296351909637451,
+   "fwd_ratio_vs_sdpa": 0.8686636376271599,
+   "maxdiff_dq_dk_dv_vs_v11": [
+    0.1603851318359375,
+    0.18680953979492188,
+    0.13567352294921875
+   ],
+   "dk_dv_equal_vs_v11": false
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56175,
+   "L_mod_128": 111,
+   "path": [
+    0
+   ],
+   "causal": true,
+   "D": 64,
+   "module": "v11",
+   "pattern": "plain",
+   "valid": true,
+   "sdpa_flash_bwd_ms": 47.029502868652344,
+   "sdpa_flash_bwd_min_ms": 47.01987075805664,
+   "sdpa_flash_fwd_ms": 18.343263626098633,
+   "bwd_ms": 87.610595703125,
+   "bwd_min_ms": 87.59033966064453,
+   "bwd_ratio_vs_sdpa": 1.8628858558809498,
+   "rerun_maxdiff_dq_dk_dv": [
+    0.0001220703125,
+    0.0,
+    0.0
+   ],
+   "fwd_ms": 17.176319122314453,
+   "fwd_min_ms": 17.120960235595703,
+   "fwd_ratio_vs_sdpa": 0.9363829399407496
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56175,
+   "L_mod_128": 111,
+   "path": [
+    0
+   ],
+   "causal": true,
+   "D": 64,
+   "module": "v11",
+   "pattern": "zero",
+   "valid": true,
+   "sdpa_flash_bwd_ms": 47.029502868652344,
+   "sdpa_flash_bwd_min_ms": 47.01987075805664,
+   "sdpa_flash_fwd_ms": 18.343263626098633,
+   "bwd_ms": 96.14096069335938,
+   "bwd_min_ms": 96.0547866821289,
+   "bwd_ratio_vs_sdpa": 2.0442691253162795,
+   "rerun_maxdiff_dq_dk_dv": [
+    0.0001220703125,
+    0.0,
+    0.0
+   ],
+   "fwd_ms": 23.27552032470703,
+   "fwd_min_ms": 23.17068862915039,
+   "fwd_ratio_vs_sdpa": 1.2688865405385565
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56175,
+   "L_mod_128": 111,
+   "path": [
+    0
+   ],
+   "causal": true,
+   "D": 64,
+   "module": "v11",
+   "pattern": "real",
+   "valid": true,
+   "sdpa_flash_bwd_ms": 47.029502868652344,
+   "sdpa_flash_bwd_min_ms": 47.01987075805664,
+   "sdpa_flash_fwd_ms": 18.343263626098633,
+   "bwd_ms": 88.8404769897461,
+   "bwd_min_ms": 88.76537322998047,
+   "bwd_ratio_vs_sdpa": 1.8890371271383986,
+   "rerun_maxdiff_dq_dk_dv": [
+    0.0001220703125,
+    0.0,
+    0.0
+   ],
+   "fwd_ms": 24.57708740234375,
+   "fwd_min_ms": 24.520671844482422,
+   "fwd_ratio_vs_sdpa": 1.3398426748539822
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56175,
+   "L_mod_128": 111,
+   "path": [
+    0
+   ],
+   "causal": true,
+   "D": 64,
+   "module": "v11x",
+   "pattern": "plain",
+   "valid": true,
+   "sdpa_flash_bwd_ms": 47.029502868652344,
+   "sdpa_flash_bwd_min_ms": 47.01987075805664,
+   "sdpa_flash_fwd_ms": 18.343263626098633,
+   "bwd_ms": 44.52751922607422,
+   "bwd_min_ms": 44.51747131347656,
+   "bwd_ratio_vs_sdpa": 0.9467997004015573,
+   "rerun_maxdiff_dq_dk_dv": [
+    0.0001220703125,
+    0.0,
+    0.0
+   ],
+   "fwd_ms": 17.14556884765625,
+   "fwd_min_ms": 17.124223709106445,
+   "fwd_ratio_vs_sdpa": 0.9347065602470919,
+   "maxdiff_dq_dk_dv_vs_v11": [
+    0.0001220703125,
+    0.0,
+    0.0
+   ],
+   "dk_dv_equal_vs_v11": true
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56175,
+   "L_mod_128": 111,
+   "path": [
+    0
+   ],
+   "causal": true,
+   "D": 64,
+   "module": "v11x",
+   "pattern": "zero",
+   "valid": true,
+   "sdpa_flash_bwd_ms": 47.029502868652344,
+   "sdpa_flash_bwd_min_ms": 47.01987075805664,
+   "sdpa_flash_fwd_ms": 18.343263626098633,
+   "bwd_ms": 44.54655838012695,
+   "bwd_min_ms": 44.52956771850586,
+   "bwd_ratio_vs_sdpa": 0.9472045346628487,
+   "rerun_maxdiff_dq_dk_dv": [
+    0.0001220703125,
+    0.0,
+    0.0
+   ],
+   "fwd_ms": 19.283872604370117,
+   "fwd_min_ms": 19.149887084960938,
+   "fwd_ratio_vs_sdpa": 1.0512781693293223,
+   "maxdiff_dq_dk_dv_vs_v11": [
+    0.0001220703125,
+    0.0,
+    0.0
+   ],
+   "dk_dv_equal_vs_v11": true
+  },
+  {
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "N": 131072,
+   "L": 56175,
+   "L_mod_128": 111,
+   "path": [
+    0
+   ],
+   "causal": true,
+   "D": 64,
+   "module": "v11x",
+   "pattern": "real",
+   "valid": false,
+   "sdpa_flash_bwd_ms": 47.029502868652344,
+   "sdpa_flash_bwd_min_ms": 47.01987075805664,
+   "sdpa_flash_fwd_ms": 18.343263626098633,
+   "bwd_ms": 44.552032470703125,
+   "bwd_min_ms": 44.549312591552734,
+   "bwd_ratio_vs_sdpa": 0.9473209316103449,
+   "rerun_maxdiff_dq_dk_dv": [
+    0.0001220703125,
+    0.0,
+    0.0
+   ],
+   "fwd_ms": 15.311712265014648,
+   "fwd_min_ms": 15.27616024017334,
+   "fwd_ratio_vs_sdpa": 0.8347321707370154,
+   "maxdiff_dq_dk_dv_vs_v11": [
+    0.12187957763671875,
+    0.107208251953125,
+    0.0910186767578125
+   ],
+   "dk_dv_equal_vs_v11": false
+  }
+ ],
+ "sdpa_flash_kernel_names": [
+  "void pytorch_flash::flash_fwd_kernel<Flash_fwd_kernel_traits<64, 128, 128, 4, false, false, cutlass::half_t, Flash_kernel_traits<64, 128, 128, 4, cutlass::half_t> >, false, true, false, false, true, true, false, false>(pytorch_flash::Flash_fwd_params)"
+ ],
+ "elapsed_s": 25.080082178115845
+}

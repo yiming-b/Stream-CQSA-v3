@@ -431,7 +431,8 @@ def test_planner_device_rates_and_heterogeneous_worlds(monkeypatch, tmp_path):
     # the multi-device time follows the driver's scheduler: splitting beats whole tasks at 7 on 4, slower
     # ranks cost time, and whole tasks on equal ranks are the previous ceil(n/world)/n model
     args = (1 << 22, 1, 8, 64, 1, True, "gpu", False, 1)
-    whole, split = CostModel(dist_split="none"), CostModel()
+    whole, split = CostModel(), CostModel(dist_split="children")
+    assert whole.dist_split == "none"                                   # until the residual is refitted
     t1 = split.cqsa_time(*args, world=1)
     t_rr, t_lpt = whole.cqsa_time(*args, world=4), split.cqsa_time(*args, world=4)
     assert t_lpt < t_rr

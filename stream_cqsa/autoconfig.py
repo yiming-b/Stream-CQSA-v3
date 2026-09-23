@@ -297,9 +297,13 @@ class CostModel:
     dist_merge_bytes_per_tok: int = 16 * 8 * 64  # fp32 out + weights, per token (H*D*4 + ...), all_reduce volume
     dist_imbalance: float = 1.35     # per-rank straggling + host-stage contention (4 GPUs sharing one host; measured 62 s vs 40 s ideal at 4M)
     dist_fixed_s: float = 0.4        # per-call cost of the collective path (barriers, NCCL warm-up, task-list build)
-    # How the driver assigns subproblems (distributed.py): "children" = cost-aware LPT with child-refinement
-    # splits (the default scheduler), "none" = whole subproblems (round-robin's ceil(n/world)/n on equal ranks).
-    dist_split: str = "children"
+    # The assignment model of the multi-device share (scheduler.equal_task_share): "none" = whole subproblems
+    # by LPT on the ranks' rates (round-robin's ceil(n/world)/n on equal ranks), "children" = the driver's
+    # default lpt + child-refinement splits. "none" until dist_imbalance is refitted: the 1.35 residual was
+    # fitted on round-robin rows, where the model was already optimistic at 2 GPUs (26.2 s predicted vs 34.6 s
+    # measured at 2M, c=7), and with the split share it would flip the measured 2-GPU verdict (monolithic wins
+    # at c=7; tests/test_devkit_autoconfig.py). The D1 job (dist_sched_*.json) is the data for the refit.
+    dist_split: str = "none"
 
     def mono_time(self, N: int, B: int, H: int, causal: bool, direction: str = "fwd") -> float:
         pairs = B * H * N * N * (0.5 if causal else 1.0)

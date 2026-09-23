@@ -1,0 +1,1734 @@
+diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__pycache__' '--exclude=stream_cqsa' '--exclude=frozen' v11/build.sh v12b/build.sh
+--- v11/build.sh	1969-12-31 19:00:00.000000000 -0500
++++ v12b/build.sh	2026-09-23 13:27:28.471694129 -0400
+@@ -0,0 +1,66 @@
++#!/bin/bash
++# Build v12b (ultimate program P2: ALIGNED run-table backward + LEGACY v11 backward).
++#   TAG=b1 bash next/kernel/v12b/build.sh          # incremental: reuses up-to-date objects
++#   CLEAN=1 TAG=b1 bash next/kernel/v12b/build.sh  # from scratch
++# Detached on della-vis1 (nvcc 13.0):
++#   TAG=b1 CLEAN=1 nohup setsid bash next/kernel/v12b/build.sh > /dev/null 2>&1 &
++# The forward is v11x's (-DCQSA_NO_ELEMENT_PATH: plain/zero patterns only, a real
++# pattern's forward comes back NaN) -- this package measures the backward only,
++# and it keeps the forward units short. The backward is NOT built with
++# CQSA_BWD_NO_CQS: its CQS-on path is the census + ALIGNED kernel + LEGACY (v11).
++set -uo pipefail
++DEV=/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev
++TAG=${TAG:-b1}
++source $DEV/env.sh
++export CUDA_HOME=/usr/local/cuda-13.0
++export PATH=$CUDA_HOME/bin:$PATH
++export FLASH_ATTN_CUDA_ARCHS=80
++export TORCH_CUDA_ARCH_LIST="8.0"
++export CQSA_KERNEL_SET=${CQSA_KERNEL_SET:-a100_fp16_hdim64_128}
++# Forced, not defaulted: the session environment carries MAX_JOBS=4.
++export MAX_JOBS=${MAX_JOBS_V12B:-8}
++export NVCC_THREADS=4
++unset CQSA_BWD_NO_CQS
++export CQSA_NO_ELEMENT_PATH=1
++export CQSA_NVCC_TIME_CSV=$DEV/next/logs/build_v12b_${TAG}_nvcc_time.csv
++LOG=$DEV/next/logs/06_build_v12b_${TAG}.log
++WATCH_LOG=$DEV/next/logs/watchdog_v12b_${TAG}.log
++rm -f "$CQSA_NVCC_TIME_CSV"
++cd $DEV/next/kernel/v12b
++[ "${CLEAN:-0}" = 1 ] && rm -rf build
++rm -f cqsa_cuda_next_v12b*.so
++{
++  echo "build v12b $TAG: kernel_set=$CQSA_KERNEL_SET MAX_JOBS=$MAX_JOBS NVCC_THREADS=$NVCC_THREADS clean=${CLEAN:-0} host=$(hostname) load=$(cut -d' ' -f1-3 /proc/loadavg)  $(date)"
++  echo "flags: CQSA_NO_ELEMENT_PATH=1 (fwd) -lineinfo -Xptxas -v -time $CQSA_NVCC_TIME_CSV"
++  nvcc --version | tail -1
++} > "$LOG"
++# LEGACY's backward took ~9 min per unit in v11's build; 45 min flags a hang, not a slow unit.
++# Unlike next/kernel/watchdog.sh this one only touches ptxas processes descended from THIS build
++# (other agents build on vis1 at the same time: the v12f build, the v2 wheel build).
++t0=$(date +%s)
++python setup.py build_ext --inplace >> "$LOG" 2>&1 &
++BUILD=$!
++(
++  while kill -0 $BUILD 2>/dev/null; do
++    for pid in $(pgrep -x ptxas); do
++      p=$pid; mine=0
++      while [ -n "$p" ] && [ "$p" -gt 1 ]; do
++        [ "$p" = "$BUILD" ] && { mine=1; break; }
++        p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
++      done
++      [ $mine = 1 ] || continue
++      mins=$(ps -o etimes= -p "$pid" 2>/dev/null | awk '{print int($1/60)}')
++      if [ -n "$mins" ] && [ "$mins" -ge 45 ]; then
++        echo "$(date) killing ptxas $pid after $mins min"; kill -9 "$pid"
++      fi
++    done
++    sleep 60
++  done
++) > "$WATCH_LOG" 2>&1 &
++WD=$!
++wait $BUILD
++rc=$?
++echo "build v12b $TAG finished rc=$rc in $(( $(date +%s) - t0 )) s  $(date)" | tee -a "$LOG"
++kill $WD 2>/dev/null
++ls -la $DEV/next/kernel/v12b/cqsa_cuda_next_v12b*.so 2>&1 | tee -a "$LOG"
++exit $rc
+diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__pycache__' '--exclude=stream_cqsa' '--exclude=frozen' v11/csrc/flash_attn/flash_api.cpp v12b/csrc/flash_attn/flash_api.cpp
+--- v11/csrc/flash_attn/flash_api.cpp	2026-09-11 23:16:22.128645000 -0400
++++ v12b/csrc/flash_attn/flash_api.cpp	2026-09-23 13:25:18.667244775 -0400
+@@ -6,6 +6,7 @@
+ #include <torch/python.h>
+ #include <torch/nn/functional.h>
+ #include <c10/cuda/CUDAGuard.h>
++#include <c10/cuda/CUDAException.h>  // C10_CUDA_CHECK (next/ v12b census entry)
+ #include <c10/cuda/CUDAStream.h>
+ #include <ATen/cuda/CUDAGeneratorImpl.h>  // For at::Generator and at::PhiloxCudaState
+ #include "philox_unpack.cuh"  // For at::cuda::philox::unpack
+@@ -16,6 +17,7 @@
+ #include "namespace_config.h"
+ #include "hardware_info.h"
+ #include "flash.h"
++#include "cqs_census_bwd.h"
+ #include "static_switch.h"
+ #include <array>
+ #include <algorithm>
+@@ -458,8 +460,15 @@
+     params.cqsa_ext_dpsum = false;
+ 
+     params.deterministic = deterministic;
++
++    // next/ v12b: no census unless mha_bwd allocates one (LEGACY alone).
++    params.cqs_bwd_route = nullptr;
++    params.cqs_bwd_runs = nullptr;
+ }
+ 
++// next/ v12b: cqs_bwd_flags of bwd.
++constexpr int kCqsBwdForceLegacy = 1;   // skip the census: v11's CQS backward (A/B and tests)
++
+ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split_kernel=false) {
+ #ifdef CQSA_MINIMAL_FWD_KERNELS
+ #ifndef CQSA_MINIMAL_BOTH_DTYPES
+@@ -1690,7 +1699,9 @@
+         std::optional<int64_t> cqs_blk_size_ = std::nullopt,
+         // Precomputed rowsum(dO * O), [batch, heads, seqlen_q]. When given, the
+         // preprocess pass is skipped and `out` is never read.
+-        std::optional<at::Tensor> dsoftmax_sum_ = std::nullopt){
++        std::optional<at::Tensor> dsoftmax_sum_ = std::nullopt,
++        // next/ v12b: kCqsBwdForceLegacy runs v11's CQS backward without a census.
++        const int64_t cqs_bwd_flags = 0){
+ 
+     #ifdef FLASHATTENTION_DISABLE_BACKWARD
+         TORCH_CHECK(false, "This flash attention build does not support backward.");
+@@ -1905,6 +1916,26 @@
+     }
+     params.dq_accum_split_stride = !deterministic ? 0 : dq_accum.stride(0);
+ 
++    // next/ v12b: the census and the ALIGNED backward serve the group-bits mode
++    // with summaries in the production configuration (the same conditions as
++    // cqs_bwd_aligned_eligible in flash_bwd_aligned.h, which the launcher
++    // re-checks); anything else, and a forced LEGACY call, keeps
++    // params.cqs_bwd_route null and runs v11's backward.
++    at::Tensor cqs_census;
++    if (params.cqs_enabled && params.cqs_group_bits != nullptr && params.cqs_blk_or != nullptr
++        && params.cqs_blk_and != nullptr && !params.cqsa_numden_mode
++        && (cqs_bwd_flags & kCqsBwdForceLegacy) == 0
++        && p_dropout == 0.f && softcap == 0.f && !alibi_slopes_.has_value()
++        && (is_causal || (window_size_left < 0 && window_size_right < 0))
++        && (head_size == 64 || head_size == 128)) {
++        // Sized for any column-block width >= 64; the route word is padded to
++        // 8 bytes so the int2 runs that follow it are aligned.
++        const int max_n_blocks = (seqlen_k + 63) / 64;
++        cqs_census = torch::empty({2 + max_n_blocks * kCqsBwdRunSlots * 2}, opts.dtype(torch::kInt32));
++        params.cqs_bwd_route = cqs_census.data_ptr<int>();
++        params.cqs_bwd_runs = reinterpret_cast<const int2 *>(params.cqs_bwd_route + 2);
++    }
++
+     auto launch = &run_mha_bwd;
+ 
+     auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
+@@ -1944,6 +1975,48 @@
+     return { dq, dk, dv, softmax_d };
+ }
+ 
++// next/ v12b: the census the CQS backward runs, exposed for tests. Returns the
++// route word (int32 [1]: 0 = ALIGNED, else kCqsBwdRoute* bits), the run table
++// (int32 [ceil(L / block_n), kCqsBwdRunSlots, 2], {hi, lo} runs of m blocks in
++// descending m closed by {-1, -1}) for tiles of block_m x block_n, the
++// backward's tile shape on this device (run_mha_bwd_hdim64/128 in
++// flash_bwd_launch_template.h: 128x128 / 64x128 with >= 144 KB of smem per
++// block, else 64x128 / 64x64), given as int32 [2] on the CPU.
++std::vector<at::Tensor>
++mha_bwd_cqs_census(const at::Tensor &cqs_group_bits, const at::Tensor &cqs_blk_or, const at::Tensor &cqs_blk_and,
++                   const bool is_causal, const int64_t head_size) {
++    at::cuda::CUDAGuard device_guard{cqs_group_bits.device()};
++    for (const at::Tensor *t : {&cqs_group_bits, &cqs_blk_or, &cqs_blk_and}) {
++        CHECK_DEVICE((*t)); CHECK_CONTIGUOUS((*t));
++        TORCH_CHECK(t->dtype() == torch::kInt64, "cqs group bits and summaries must be int64");
++    }
++    const int L = static_cast<int>(cqs_group_bits.numel());
++    TORCH_CHECK(L > 0, "empty group bits");
++    TORCH_CHECK(cqs_blk_or.numel() == cqs_blk_and.numel() && cqs_blk_or.numel() >= (L + 63) / 64,
++                "cqs block summaries (64 tokens each) too short");
++    TORCH_CHECK(head_size == 64 || head_size == 128, "the ALIGNED backward exists for head dims 64 and 128");
++    int device;
++    C10_CUDA_CHECK(cudaGetDevice(&device));
++    int max_smem_per_block;
++    C10_CUDA_CHECK(cudaDeviceGetAttribute(&max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
++    const bool big = max_smem_per_block >= 144 * 1024;
++    const int block_m = head_size == 64 ? (big ? 128 : 64) : 64;
++    const int block_n = head_size == 64 ? 128 : (big ? 128 : 64);
++    const int num_n = (L + block_n - 1) / block_n;
++    auto census = torch::empty({2 + num_n * kCqsBwdRunSlots * 2}, cqs_group_bits.options().dtype(torch::kInt32));
++    Flash_bwd_params params = {};
++    params.seqlen_q = params.seqlen_k = L;
++    params.is_causal = is_causal;
++    params.cqs_group_bits = cqs_group_bits.data_ptr<int64_t>();
++    params.cqs_blk_or = cqs_blk_or.data_ptr<int64_t>();
++    params.cqs_blk_and = cqs_blk_and.data_ptr<int64_t>();
++    params.cqs_bwd_route = census.data_ptr<int>();
++    params.cqs_bwd_runs = reinterpret_cast<const int2 *>(params.cqs_bwd_route + 2);
++    run_cqs_bwd_census(params, block_m, block_n, at::cuda::getCurrentCUDAStream().stream());
++    return {census.slice(0, 0, 1), census.slice(0, 2).view({num_n, kCqsBwdRunSlots, 2}),
++            torch::tensor({block_m, block_n}, torch::dtype(torch::kInt32))};
++}
++
+ std::vector<at::Tensor>
+ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads, x head_size
+                const at::Tensor &q,   // total_q x num_heads x head_size, total_q := \sum_{i=0}^{b} s_i
+@@ -2484,7 +2557,14 @@
+           pybind11::arg("cqs_blk_or") = pybind11::none(),
+           pybind11::arg("cqs_blk_and") = pybind11::none(),
+           pybind11::arg("cqs_blk_size") = pybind11::none(),
+-          pybind11::arg("dsoftmax_sum") = pybind11::none());
++          pybind11::arg("dsoftmax_sum") = pybind11::none(),
++          pybind11::arg("cqs_bwd_flags") = 0);
++    m.def("bwd_cqs_census", &FLASH_NAMESPACE::mha_bwd_cqs_census,
++          "The CQS backward's tile census (route word, run table, tile shape); for tests",
++          pybind11::arg("cqs_group_bits"), pybind11::arg("cqs_blk_or"), pybind11::arg("cqs_blk_and"),
++          pybind11::arg("is_causal"), pybind11::arg("head_size"));
++    m.attr("CQS_BWD_FORCE_LEGACY") = FLASH_NAMESPACE::kCqsBwdForceLegacy;
++    m.attr("CQS_BWD_RUN_SLOTS") = FLASH_NAMESPACE::kCqsBwdRunSlots;
+     m.def("varlen_bwd", &FLASH_NAMESPACE::mha_varlen_bwd, "Backward pass (variable length)");
+ #endif
+     m.def("fwd_kvcache", &FLASH_NAMESPACE::mha_fwd_kvcache, "Forward pass, with KV-cache");
+diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__pycache__' '--exclude=stream_cqsa' '--exclude=frozen' v11/csrc/flash_attn/src/cqs_census_bwd.cu v12b/csrc/flash_attn/src/cqs_census_bwd.cu
+--- v11/csrc/flash_attn/src/cqs_census_bwd.cu	1969-12-31 19:00:00.000000000 -0500
++++ v12b/csrc/flash_attn/src/cqs_census_bwd.cu	2026-09-23 13:19:02.090871000 -0400
+@@ -0,0 +1,138 @@
++/******************************************************************************
++ * next/ v12b: tile census for the ALIGNED backward (see cqs_census_bwd.h).
++ * Structure and verdicts as v12f's forward census (cqs_census.cu there),
++ * transposed: one warp per COLUMN block, lanes walk its m tiles downward.
++ ******************************************************************************/
++
++#include "namespace_config.h"
++#include <c10/cuda/CUDAException.h>  // C10_CUDA_CHECK, C10_CUDA_KERNEL_LAUNCH_CHECK
++
++#include "cqs_census_bwd.h"
++
++namespace FLASH_NAMESPACE {
++
++namespace {
++
++constexpr int kSumBlk = 64;          // CQS_BLK_SIZE: tokens per OR/AND summary entry
++constexpr int kCensusWarps = 4;      // one warp per column block
++
++// OR and AND of the group bits of tokens [start, end), start a multiple of
++// kSumBlk. The ragged last summary block (tail_blk, -1 if none) comes from the
++// exact values over its valid tokens instead of the caller's padded entry, so
++// a ragged tile gets an exact verdict: the kernel then skips a fully masked
++// ragged tile instead of routing the whole call to LEGACY.
++__device__ __forceinline__ void range_summary(const int64_t *__restrict__ blk_or, const int64_t *__restrict__ blk_and,
++                                              const int start, const int end, const int tail_blk,
++                                              const int64_t tail_or, const int64_t tail_and,
++                                              int64_t &r_or, int64_t &r_and) {
++    r_or = 0;
++    r_and = ~int64_t(0);
++    for (int b = start / kSumBlk; b * kSumBlk < end; ++b) {
++        if (b == tail_blk) {
++            r_or |= tail_or;
++            r_and &= tail_and;
++        } else {
++            r_or |= blk_or[b];
++            r_and &= blk_and[b];
++        }
++    }
++}
++
++// Grid: one warp per column block of block_n columns (seqlen_q == seqlen_k
++// == L). A tile is live when no (row, col) pair can share a group bit (row OR
++// & col OR == 0), dead when every pair does (row AND & col AND != 0), mixed
++// otherwise. The tiles visited are those of the backward: m in [m_min, m_max)
++// with m_min the causal limit (n * block_n / block_m; 0 without causal), so a
++// column's runs are exactly the tiles ALIGNED computes, in the order v11
++// computes them (descending m).
++__global__ void __launch_bounds__(kCensusWarps * 32)
++cqs_bwd_census_kernel(const int64_t *__restrict__ bits, const int64_t *__restrict__ blk_or,
++                      const int64_t *__restrict__ blk_and, const int L, const int block_m, const int block_n,
++                      const bool causal, int2 *__restrict__ runs, int *__restrict__ route) {
++    __shared__ int64_t s_tail[2];
++    const int lane = threadIdx.x % 32;
++    const int warp = threadIdx.x / 32;
++    const int tail_blk = (L % kSumBlk) != 0 ? L / kSumBlk : -1;
++    if (warp == 0) {
++        int64_t o = 0, a = ~int64_t(0);
++        if (tail_blk >= 0) {
++            for (int t = tail_blk * kSumBlk + lane; t < L; t += 32) { o |= bits[t]; a &= bits[t]; }
++        }
++        #pragma unroll
++        for (int off = 16; off > 0; off /= 2) {
++            o |= __shfl_xor_sync(0xffffffffu, o, off);
++            a &= __shfl_xor_sync(0xffffffffu, a, off);
++        }
++        if (lane == 0) { s_tail[0] = o; s_tail[1] = a; }
++    }
++    __syncthreads();
++    const int num_n = (L + block_n - 1) / block_n;
++    const int n = blockIdx.x * kCensusWarps + warp;
++    if (n >= num_n) { return; }
++    const int64_t tail_or = s_tail[0], tail_and = s_tail[1];
++
++    int64_t col_or, col_and;
++    range_summary(blk_or, blk_and, n * block_n, min((n + 1) * block_n, L), tail_blk, tail_or, tail_and, col_or, col_and);
++    const int m_max = (L + block_m - 1) / block_m;
++    const int m_min = causal ? (n * block_n) / block_m : 0;
++
++    // Lane j classifies tile m = base - j; lane 0 turns the ballot into runs.
++    // Bit j of `above` is the liveness of tile m + 1 (for j = 0: the lowest
++    // tile of the previous group of 32), so a run starts where a live tile has
++    // a dead one above it and ends where a dead tile has a live one above it.
++    int2 *col_runs = runs + n * kCqsBwdRunSlots;
++    int nr = 0, hi = -1;
++    bool overflow = false, mixed = false, prev_live = false;
++    for (int base = m_max - 1; base >= m_min; base -= 32) {
++        const int m = base - lane;
++        bool live = false, mix = false;
++        if (m >= m_min) {
++            int64_t r_or, r_and;
++            range_summary(blk_or, blk_and, m * block_m, min((m + 1) * block_m, L), tail_blk, tail_or, tail_and, r_or, r_and);
++            live = (r_or & col_or) == 0;
++            mix = !live && (r_and & col_and) == 0;
++        }
++        const unsigned live_bits = __ballot_sync(0xffffffffu, live);
++        mixed |= __any_sync(0xffffffffu, mix);
++        if (lane == 0) {
++            const int count = base - m_min + 1;             // valid lanes in this group: j < count
++            const unsigned valid = count >= 32 ? 0xffffffffu : ((1u << count) - 1u);
++            const unsigned above = (live_bits << 1) | unsigned(prev_live);
++            const unsigned starts = live_bits & ~above;
++            unsigned events = starts | (~live_bits & above & valid);
++            while (events) {
++                const int j = __ffs(events) - 1;
++                events &= events - 1;
++                if ((starts >> j) & 1u) {
++                    hi = base - j;
++                } else if (nr < kCqsBwdRunSlots - 1) {
++                    col_runs[nr++] = make_int2(hi, base - j + 1);
++                } else {
++                    overflow = true;
++                }
++            }
++            prev_live = (live_bits >> min(31, base - m_min)) & 1u;
++        }
++    }
++    if (lane == 0) {
++        if (prev_live) {                   // the last run reaches m_min
++            if (nr < kCqsBwdRunSlots - 1) { col_runs[nr++] = make_int2(hi, m_min); } else { overflow = true; }
++        }
++        col_runs[nr] = make_int2(-1, -1);
++        const int why = (mixed ? kCqsBwdRouteMixed : 0) | (overflow ? kCqsBwdRouteOverflow : 0);
++        if (why) { atomicOr(route, why); }
++    }
++}
++
++}  // namespace
++
++void run_cqs_bwd_census(const Flash_bwd_params &params, int block_m, int block_n, cudaStream_t stream) {
++    C10_CUDA_CHECK(cudaMemsetAsync(params.cqs_bwd_route, 0, sizeof(int), stream));
++    const int num_n = (params.seqlen_k + block_n - 1) / block_n;
++    cqs_bwd_census_kernel<<<(num_n + kCensusWarps - 1) / kCensusWarps, kCensusWarps * 32, 0, stream>>>(
++        params.cqs_group_bits, params.cqs_blk_or, params.cqs_blk_and, params.seqlen_q, block_m, block_n,
++        params.is_causal, const_cast<int2 *>(params.cqs_bwd_runs), params.cqs_bwd_route);
++    C10_CUDA_KERNEL_LAUNCH_CHECK();
++}
++
++}  // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__pycache__' '--exclude=stream_cqsa' '--exclude=frozen' v11/csrc/flash_attn/src/cqs_census_bwd.h v12b/csrc/flash_attn/src/cqs_census_bwd.h
+--- v11/csrc/flash_attn/src/cqs_census_bwd.h	1969-12-31 19:00:00.000000000 -0500
++++ v12b/csrc/flash_attn/src/cqs_census_bwd.h	2026-09-23 13:18:40.491632050 -0400
+@@ -0,0 +1,37 @@
++/******************************************************************************
++ * next/ v12b: the backward's tile census (per column block) and run table.
++ *
++ * The transpose of v12f's forward census (next/kernel/v12f/src/cqs_census.h):
++ * the backward is seqk-parallel, one CTA per n_block column looping over the
++ * m blocks from high to low, so the census classifies, per column block, the
++ * m tiles the backward visits and lists the live ones as runs of consecutive
++ * m blocks in descending m -- the order v11's backward visits them in.
++ ******************************************************************************/
++
++#pragma once
++
++#include "namespace_config.h"
++#include "flash.h"
++
++namespace FLASH_NAMESPACE {
++
++// Run-table slots per column block: up to kCqsBwdRunSlots - 1 runs and the
++// {-1, -1} sentinel. A 128-aligned CQS task has 1 run per column block at
++// itr=1 (every row block below the column's own chunk, or all of them for the
++// owner chunk's columns) and a few at itr=2; more runs than slots is recorded
++// as an overflow and the call goes to LEGACY (still exact).
++constexpr int kCqsBwdRunSlots = 16;
++
++// Route bits written by the census (0 = ALIGNED).
++constexpr int kCqsBwdRouteMixed = 1;      // a visited tile is neither fully live nor fully masked
++constexpr int kCqsBwdRouteOverflow = 2;   // a column block has more live runs than slots
++
++// Classify every (m tile, column block) pair the backward visits, from the
++// 64-token OR/AND summaries (exact over the valid tokens: the ragged last
++// summary block is recomputed from the group bits), and write
++// params.cqs_bwd_route and params.cqs_bwd_runs for tiles of block_m x block_n
++// (the backward's Kernel_traits). Zeroes the route first. Stream-ordered, no
++// host sync. Requires seqlen_q == seqlen_k (the group-bits mode).
++void run_cqs_bwd_census(const Flash_bwd_params &params, int block_m, int block_n, cudaStream_t stream);
++
++}  // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__pycache__' '--exclude=stream_cqsa' '--exclude=frozen' v11/csrc/flash_attn/src/flash_bwd_aligned.h v12b/csrc/flash_attn/src/flash_bwd_aligned.h
+--- v11/csrc/flash_attn/src/flash_bwd_aligned.h	1969-12-31 19:00:00.000000000 -0500
++++ v12b/csrc/flash_attn/src/flash_bwd_aligned.h	2026-09-23 13:23:38.872586000 -0400
+@@ -0,0 +1,646 @@
++/******************************************************************************
++ * next/ v12b: the ALIGNED backward (and, without a run table, the CQS-off one).
++ *
++ * On a 128-aligned CQS task every tile the backward visits is fully live or
++ * fully masked (results/ultimate/align_census.json: mixed 0.000%), so the
++ * CQS-on backward needs neither the per-element mask path nor any per-tile
++ * verdict. The census (cqs_census_bwd.cu) lists each column block's live m
++ * blocks as runs in descending m -- the order v11's backward visits them in --
++ * and this kernel is upstream FlashAttention-2's seqk-parallel backward loop
++ * (Is_first = Is_last = false, Seq_parallel = true) driven by that list:
++ * inside a run the body is upstream's; between runs the Q / dO / LSE / dPsum
++ * / dQaccum pointers jump by the gap (pointer arithmetic, no predication), and
++ * the sQ double buffer toggles per VISITED tile instead of by m parity.
++ * Fully masked tiles, including the fully masked diagonal tile of a non-owner
++ * column block, are simply absent; the owner diagonal takes upstream's causal
++ * mask and the ragged tail upstream's !Is_even_MN path. A call whose census
++ * finds a mixed tile (or more runs than slots) runs on LEGACY (v11's CQS
++ * backward, flash_bwd_kernel.h) instead, decided on the device.
++ *
++ * Contract kept from v11 (the engine's): global lse in, caller-supplied
++ * dsoftmax_sum (or the preprocess pass), fp32 dq_accum by atomics, dk/dv
++ * written in Element. Production configuration only: no dropout, local
++ * window, alibi, softcap, varlen or numden mode, d == kHeadDim
++ * (cqs_bwd_aligned_eligible); anything else runs on LEGACY.
++ *
++ * Exactness vs v11's CQS backward: a live tile runs the same instructions on
++ * the same data in the same (descending m) order, so acc_dk / acc_dv are
++ * bit-identical; a dead tile contributes exact zeros in v11 (its GEMMs are
++ * guarded off, or, for a ragged dead tile v11 cannot prove dead, P == 0
++ * everywhere), so leaving it out changes nothing. dQ is accumulated by fp32
++ * atomics across column CTAs in any case (non-deterministic order).
++ ******************************************************************************/
++
++#pragma once
++
++#include "flash_bwd_launch_template.h"
++#include "cqs_census_bwd.h"
++
++namespace FLASH_NAMESPACE {
++
++using namespace cute;
++
++// Use_runs = false: every m block in [m_block_min, m_block_max) (a CQS-off
++// call; this is upstream's loop). Use_runs = true: the column's runs from
++// params.cqs_bwd_runs.
++template<typename Kernel_traits, bool Is_causal, bool Is_even_MN, bool Use_runs, typename Params>
++inline __device__ void compute_dq_dk_dv_1colblock_aligned(const Params &params, const int bidb, const int bidh, const int n_block) {
++    constexpr bool Is_even_K = true;
++
++    using Element = typename Kernel_traits::Element;
++    using ElementAccum = typename Kernel_traits::ElementAccum;
++    using index_t = typename Kernel_traits::index_t;
++
++    // Shared memory.
++    extern __shared__ char smem_[];
++
++    // The thread index.
++    const int tidx = threadIdx.x;
++
++    constexpr int kBlockM = Kernel_traits::kBlockM;
++    constexpr int kBlockN = Kernel_traits::kBlockN;
++    constexpr int kHeadDim = Kernel_traits::kHeadDim;
++    constexpr int MMA_N_SdP = kBlockN / decltype(typename Kernel_traits::TiledMmaSdP{}.template tile_size_mnk<1>())::value;
++    constexpr int AtomLayoutMS = Kernel_traits::AtomLayoutMSdP;
++    constexpr bool Double_buffer = !Kernel_traits::No_double_buffer;
++
++    const BlockInfo</*Varlen=*/!Is_even_MN> binfo(params, bidb);
++    if (n_block * kBlockN >= binfo.actual_seqlen_k) return;
++
++    const int m_block_max = cute::ceil_div(binfo.actual_seqlen_q, kBlockM);
++    const int m_block_min = !Is_causal
++        ? 0
++        : std::max(0, (n_block * kBlockN + binfo.actual_seqlen_q - binfo.actual_seqlen_k - params.window_size_right) / kBlockM);
++
++    // The first m block this CTA visits and the lower end of its run. With
++    // runs, run_idx is the slot of the current run; the table is read again
++    // only at a run boundary.
++    int m_block, run_lo;
++    [[maybe_unused]] int run_idx = 0;
++    if constexpr (Use_runs) {
++        const int2 run0 = params.cqs_bwd_runs[n_block * kCqsBwdRunSlots];
++        m_block = run0.x;
++        run_lo = run0.y;
++    } else {
++        m_block = m_block_max - 1;
++        run_lo = m_block_min;
++    }
++
++    // No live tile in this column (runs), or none at all (ragged corner case
++    // of upstream): dK = dV = 0, as v11 writes for a column whose every tile
++    // is masked. A run's hi is never below m_block_min; no run is -1.
++    if ((Use_runs || !Is_even_MN) && m_block < m_block_min) {
++        const index_t row_offset_dk = binfo.k_offset(params.dk_batch_stride, params.dk_row_stride, bidb)
++          + n_block * kBlockN * params.dk_row_stride + bidh * params.dk_head_stride;
++        const index_t row_offset_dv = binfo.k_offset(params.dv_batch_stride, params.dv_row_stride, bidb)
++          + n_block * kBlockN * params.dv_row_stride + bidh * params.dv_head_stride;
++        Tensor gdK = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.dk_ptr) + row_offset_dk),
++                                 Shape<Int<kBlockN>, Int<kHeadDim>>{},
++                                 make_stride(params.dk_row_stride, _1{}));
++        Tensor gdV = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.dv_ptr) + row_offset_dv),
++                                 Shape<Int<kBlockN>, Int<kHeadDim>>{},
++                                 make_stride(params.dv_row_stride, _1{}));
++        typename Kernel_traits::GmemTiledCopydKV gmem_tiled_copy_dKV;
++        auto gmem_thr_copy_dKV = gmem_tiled_copy_dKV.get_thread_slice(tidx);
++        Tensor tdKgdK = gmem_thr_copy_dKV.partition_D(gdK);
++        Tensor tdVgdV = gmem_thr_copy_dKV.partition_D(gdV);
++        Tensor tdKrdK = make_tensor<Element>(shape(tdKgdK));
++        Tensor tdVrdV = make_tensor<Element>(shape(tdVgdV));
++        clear(tdKrdK);
++        clear(tdVrdV);
++        Tensor cdKV = make_identity_tensor(make_shape(size<0>(gdK), size<1>(gdK)));    // (BLK_N,BLK_K) -> (blk_n,blk_k)
++        Tensor tdKVcdKV = gmem_thr_copy_dKV.partition_D(cdKV);
++        Tensor tdKVpdKV = make_tensor<bool>(make_shape(size<2>(tdKgdK)));
++        #pragma unroll
++        for (int k = 0; k < size(tdKVpdKV); ++k) { tdKVpdKV(k) = get<1>(tdKVcdKV(0, 0, k)) < params.d; }
++        // Clear_OOB_K must be false since we don't want to write zeros to gmem
++        FLASH_NAMESPACE::copy<Is_even_MN, Is_even_K, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
++            gmem_tiled_copy_dKV, tdKrdK, tdKgdK, tdKVcdKV, tdKVpdKV, binfo.actual_seqlen_k - n_block * kBlockN
++        );
++        FLASH_NAMESPACE::copy<Is_even_MN, Is_even_K, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
++            gmem_tiled_copy_dKV, tdVrdV, tdVgdV, tdKVcdKV, tdKVpdKV, binfo.actual_seqlen_k - n_block * kBlockN
++        );
++        return;
++    }
++
++    // Upstream's offsets, taken at the first VISITED m block instead of m_block_max - 1.
++    const index_t row_offset_q = binfo.q_offset(params.q_batch_stride, params.q_row_stride, bidb)
++        + m_block * kBlockM * params.q_row_stride + bidh * params.q_head_stride;
++    const index_t row_offset_k = binfo.k_offset(params.k_batch_stride, params.k_row_stride, bidb)
++        + n_block * kBlockN * params.k_row_stride + (bidh / params.h_h_k_ratio) * params.k_head_stride;
++    const index_t row_offset_v = binfo.k_offset(params.v_batch_stride, params.v_row_stride, bidb)
++        + n_block * kBlockN * params.v_row_stride + (bidh / params.h_h_k_ratio) * params.v_head_stride;
++    const index_t row_offset_do = binfo.q_offset(params.do_batch_stride, params.do_row_stride, bidb)
++        + m_block * kBlockM * params.do_row_stride + bidh * params.do_head_stride;
++    const index_t row_offset_dq_accum = binfo.q_offset(params.seqlen_q_rounded * params.h * params.d_rounded, params.h * params.d_rounded, bidb)
++        + (m_block * kBlockM + (params.cu_seqlens_q == nullptr ? 0 : 128ll * bidb)) * params.h * params.d_rounded + bidh * params.d_rounded
++        // If deterministic, each thread block will do atomicAdd to a different dQ_accum buffer.
++        + (!params.deterministic ? 0 : blockIdx.x * params.dq_accum_split_stride);
++    const index_t row_offset_lse = (params.unpadded_lse? bidh * params.total_q + binfo.q_offset(params.seqlen_q, 1, bidb): (bidb * params.h + bidh) * params.seqlen_q) + m_block * kBlockM;
++    // Regarding 128 * params.b see a comment in mha_varlen_bwd about padding of dq_accum and softmax_d
++    const index_t row_offset_dpsum = (params.unpadded_lse? bidh * (params.total_q + 128 * params.b) + binfo.q_offset(params.seqlen_q_rounded, 1, bidb) + 128 * bidb: (bidb * params.h + bidh) * params.seqlen_q_rounded) + m_block * kBlockM;
++
++    Tensor gQ = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.q_ptr) + row_offset_q),
++                            Shape<Int<kBlockM>, Int<kHeadDim>>{},
++                            make_stride(params.q_row_stride, _1{}));
++    Tensor gK = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.k_ptr) + row_offset_k),
++                            Shape<Int<kBlockN>, Int<kHeadDim>>{},
++                            make_stride(params.k_row_stride, _1{}));
++    Tensor gV = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.v_ptr) + row_offset_v),
++                            Shape<Int<kBlockN>, Int<kHeadDim>>{},
++                            make_stride(params.v_row_stride, _1{}));
++    Tensor gdO = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.do_ptr) + row_offset_do),
++                             Shape<Int<kBlockM>, Int<kHeadDim>>{},
++                             make_stride(params.do_row_stride, _1{}));
++    Tensor gdQaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.dq_accum_ptr) + row_offset_dq_accum),
++                                  Shape<Int<kBlockM>, Int<kHeadDim>>{},
++                                  make_stride(params.h * params.d_rounded, _1{}));
++    Tensor gLSE = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.softmax_lse_ptr) + row_offset_lse),
++                              Shape<Int<kBlockM>>{}, Stride<_1>{});
++    Tensor gdPsum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.dsoftmax_sum) + row_offset_dpsum),
++                                Shape<Int<kBlockM>>{}, Stride<_1>{});
++
++    Tensor sQ = make_tensor(make_smem_ptr(reinterpret_cast<Element *>(smem_)),
++                            typename Kernel_traits::SmemLayoutQdO{});
++    Tensor sQt = make_tensor(sQ.data(), typename Kernel_traits::SmemLayoutQdOtransposed{});
++    Tensor sQtNoSwizzle = make_tensor(sQ.data(), typename Kernel_traits::SmemLayoutQdOtransposedNoSwizzle{});
++    // Double buffer for sQ
++    Tensor sdO = make_tensor(sQ.data() + (Double_buffer ? 2 : 1) * size(sQ), typename Kernel_traits::SmemLayoutQdO{});
++    Tensor sdOt = make_tensor(sdO.data(), typename Kernel_traits::SmemLayoutQdOtransposed{});
++    Tensor sdOtransposedNoSwizzle = make_tensor(sdO.data(),
++                                                typename Kernel_traits::SmemLayoutQdOtransposedNoSwizzle{});
++    Tensor sK = make_tensor(sdO.data() + size(sdO), typename Kernel_traits::SmemLayoutKV{});
++    Tensor sV = make_tensor(sK.data() + size(sK), typename Kernel_traits::SmemLayoutKV{});
++    Tensor sKt = make_tensor(sK.data(), typename Kernel_traits::SmemLayoutKtransposed{});
++    Tensor sKtNoSwizzle = make_tensor(sK.data(), typename Kernel_traits::SmemLayoutKtransposedNoSwizzle{});
++    Tensor sdS = make_tensor(!Kernel_traits::Is_V_in_regs ? sV.data() + size(sV) : sK.data() + size(sK),
++                             typename Kernel_traits::SmemLayoutPdS{});
++    Tensor sdSt = make_tensor(sdS.data(), typename Kernel_traits::SmemLayoutPdStransposed{});
++    Tensor sdStNoSwizzle = make_tensor(sdS.data(), typename Kernel_traits::SmemLayoutPdStransposedNoSwizzle{});
++    Tensor sP = make_tensor(sdS.data() + size(sdS), typename Kernel_traits::SmemLayoutPdS{});
++    Tensor sPt = make_tensor(sP.data(), typename Kernel_traits::SmemLayoutPdStransposed{});
++    Tensor sPtNoSwizzle = make_tensor(sP.data(), typename Kernel_traits::SmemLayoutPdStransposedNoSwizzle{});
++
++    typename Kernel_traits::GmemTiledCopyQKV gmem_tiled_copy_QKV;
++    auto gmem_thr_copy_QKV = gmem_tiled_copy_QKV.get_thread_slice(tidx);
++    // !Is_first: dO goes to smem with the Q/K/V copy.
++    typename Kernel_traits::GmemTiledCopyQKV gmem_tiled_copy_dO;
++    auto gmem_thr_copy_dO = gmem_tiled_copy_dO.get_thread_slice(tidx);
++    // Seq_parallel: dQ is accumulated with atomicAdd.
++    typename Kernel_traits::GmemTiledCopydQaccumAtomicAdd gmem_tiled_copy_dQaccum;
++    auto gmem_thr_copy_dQaccum = gmem_tiled_copy_dQaccum.get_thread_slice(tidx);
++
++    Tensor tQgQ = gmem_thr_copy_QKV.partition_S(gQ);
++    Tensor tQsQ = gmem_thr_copy_QKV.partition_D(sQ);
++    Tensor tdOgdO = gmem_thr_copy_dO.partition_S(gdO);
++    Tensor tdOsdO = gmem_thr_copy_dO.partition_D(sdO);
++    Tensor tKgK = gmem_thr_copy_QKV.partition_S(gK);  // (KCPY, KCPY_N, KCPY_K)
++    Tensor tKsK = gmem_thr_copy_QKV.partition_D(sK);
++    Tensor tVgV = gmem_thr_copy_QKV.partition_S(gV);  // (VCPY, VCPY_N, VCPY_K)
++    Tensor tVsV = gmem_thr_copy_QKV.partition_D(sV);
++    Tensor tdQgdQaccum = gmem_thr_copy_dQaccum.partition_D(gdQaccum);
++
++    typename Kernel_traits::TiledMmaSdP tiled_mma_sdp;
++    auto thr_mma_sdp = tiled_mma_sdp.get_thread_slice(tidx);
++    Tensor tSrQ = thr_mma_sdp.partition_fragment_A(sQ);         // (MMA,MMA_N,MMA_K)
++    Tensor tSrK = thr_mma_sdp.partition_fragment_B(sK);         // (MMA,MMA_N,MMA_K)
++    Tensor tdPrdO = thr_mma_sdp.partition_fragment_A(sdO);      // (MMA,MMA_N,MMA_K)
++    Tensor tdPrV = thr_mma_sdp.partition_fragment_B(sV);        // (MMA,MMA_N,MMA_K)
++
++    typename Kernel_traits::TiledMmadKV tiled_mma_dkv;
++    auto thr_mma_dkv = tiled_mma_dkv.get_thread_slice(tidx);
++    Tensor tdKrdSt = thr_mma_dkv.partition_fragment_A(sdStNoSwizzle); // (MMA, MMA_N, MMA_N)
++    Tensor tdKrQt = thr_mma_dkv.partition_fragment_B(sQtNoSwizzle);   // (MMA, MMA_K, MMA_N)
++    Tensor tdVrPt = thr_mma_dkv.partition_fragment_A(sPtNoSwizzle);   // (MMA, MMA_N, MMA_N)
++    Tensor tdVrdO = thr_mma_dkv.partition_fragment_B(sdOtransposedNoSwizzle); // (MMA, MMA_K, MMA_N)
++
++    typename Kernel_traits::TiledMmadQ tiled_mma_dq;
++    auto thr_mma_dq = tiled_mma_dq.get_thread_slice(tidx);
++    Tensor tdQrdS = thr_mma_dq.partition_fragment_A(sdS);                      // (MMA, MMA_N, MMA_N)
++    Tensor tdQrKt = thr_mma_dq.partition_fragment_B(sKtNoSwizzle);    // (MMA, MMA_K, MMA_N)
++
++    Tensor acc_dk = partition_fragment_C(tiled_mma_dkv, Shape<Int<kBlockN>, Int<kHeadDim>>{});  // MMA, MMA_N, MMA_K
++    Tensor acc_dv = partition_fragment_C(tiled_mma_dkv, Shape<Int<kBlockN>, Int<kHeadDim>>{});  // MMA, MMA_N, MMA_K
++
++    //
++    // Copy Atom retiling
++    //
++
++    auto smem_tiled_copy_QdO = make_tiled_copy_A(typename Kernel_traits::SmemCopyAtom{}, tiled_mma_sdp);
++    auto smem_thr_copy_QdO = smem_tiled_copy_QdO.get_thread_slice(tidx);
++    Tensor tSsQ = smem_thr_copy_QdO.partition_S(sQ);
++    Tensor tdPsdO = smem_thr_copy_QdO.partition_S(sdO);
++
++    auto smem_tiled_copy_KV = make_tiled_copy_B_warpcontiguousN<MMA_N_SdP>(typename Kernel_traits::SmemCopyAtom{}, tiled_mma_sdp);
++    auto smem_thr_copy_KV = smem_tiled_copy_KV.get_thread_slice(tidx);
++    Tensor tSsK = smem_thr_copy_KV.partition_S(sK);
++    Tensor tdPsV = smem_thr_copy_KV.partition_S(sV);
++
++    // Partition sP and sdS to match the accumulator partitioning
++    // This has to be tiled_mma_sdp, not tiled_mma_dkv
++    auto smem_tiled_copy_PdS = make_tiled_copy_C_warpcontiguousN<MMA_N_SdP>(typename Kernel_traits::SmemCopyAtomPdS{}, tiled_mma_sdp);
++    auto smem_thr_copy_PdS = smem_tiled_copy_PdS.get_thread_slice(tidx);
++    Tensor tPsP = smem_thr_copy_PdS.partition_D(sP);      // ((Atom,AtomNum),PIPE_M,PIPE_N)
++    Tensor tdSsdS = smem_thr_copy_PdS.partition_D(sdS);   // ((Atom,AtomNum),PIPE_M,PIPE_N)
++
++    auto smem_tiled_copy_PdSt = make_tiled_copy_A(typename Kernel_traits::SmemCopyAtomTransposed{}, tiled_mma_dkv);
++    auto smem_thr_copy_PdSt = smem_tiled_copy_PdSt.get_thread_slice(tidx);
++    Tensor tdVsPt = smem_thr_copy_PdSt.partition_S(sPt);
++    Tensor tdKsdSt = smem_thr_copy_PdSt.partition_S(sdSt);
++
++    auto smem_tiled_copy_QdOt = make_tiled_copy_B(typename Kernel_traits::SmemCopyAtomTransposed{}, tiled_mma_dkv);
++    auto smem_thr_copy_QdOt = smem_tiled_copy_QdOt.get_thread_slice(tidx);
++    Tensor tdVsdOt = smem_thr_copy_QdOt.partition_S(sdOt);
++    Tensor tdKsQt = smem_thr_copy_QdOt.partition_S(sQt);
++
++    auto smem_tiled_copy_dS = make_tiled_copy_A(typename Kernel_traits::SmemCopyAtom{}, tiled_mma_dq);
++    auto smem_thr_copy_dS = smem_tiled_copy_dS.get_thread_slice(tidx);
++    Tensor tdQsdS = smem_thr_copy_dS.partition_S(sdS);
++
++    auto smem_tiled_copy_Kt = make_tiled_copy_B(typename Kernel_traits::SmemCopyAtomTransposed{}, tiled_mma_dq);
++    auto smem_thr_copy_Kt = smem_tiled_copy_Kt.get_thread_slice(tidx);
++    Tensor tdQsKt = smem_thr_copy_Kt.partition_S(sKt);
++
++    //
++    // PREDICATES
++    //
++
++    Tensor cQ = make_identity_tensor(make_shape(size<0>(sQ), size<1>(sQ)));    // (BLK_M,BLK_K) -> (blk_m,blk_k)
++    Tensor cKV = make_identity_tensor(make_shape(size<0>(sK), size<1>(sK)));    // (BLK_N,BLK_K) -> (blk_n,blk_k)
++    Tensor tQcQ = gmem_thr_copy_QKV.partition_D(cQ);
++    Tensor tKVcKV = gmem_thr_copy_QKV.partition_D(cKV);
++
++    // Is_even_K: the k predicates are never read.
++    Tensor tQpQ = make_tensor<bool>(make_shape(size<2>(tQsQ)));
++    Tensor tKVpKV = make_tensor<bool>(make_shape(size<2>(tKsK)));
++
++    // Prologue
++
++    // The sQ buffer the current tile's Q is in. Upstream derives it from the
++    // parity of m_block, which alternates because every m block is visited;
++    // across a run gap it need not, so with runs it is a toggle per visited tile.
++    [[maybe_unused]] int sQ_cur = m_block % 2;
++    if (Double_buffer && m_block % 2 == 1) {  // Double buffer for sQ
++        tQsQ.data() = tQsQ.data() + size(sQ);
++        tSsQ.data() = tSsQ.data() + size(sQ);
++        tdKsQt.data() = tdKsQt.data() + size(sQ);
++    }
++
++    if (params.deterministic) { __syncthreads(); }
++
++    if (Kernel_traits::Is_V_in_regs) {
++        // Clear the smem tiles to account for predicated off loads
++        FLASH_NAMESPACE::copy<Is_even_MN, Is_even_K, /*Clear_OOB_MN=*/true>(
++            gmem_tiled_copy_QKV, tVgV, tVsV, tKVcKV, tKVpKV, binfo.actual_seqlen_k - n_block * kBlockN
++        );
++        FLASH_NAMESPACE::cp_async_fence();
++    }
++
++    // Clear the smem tiles to account for predicated off loads. Only the first
++    // visited m block can be the ragged last one (descending order).
++    FLASH_NAMESPACE::copy<Is_even_MN, Is_even_K, /*Clear_OOB_MN=*/true>(
++        gmem_tiled_copy_dO, tdOgdO, tdOsdO, tQcQ, tQpQ, binfo.actual_seqlen_q - m_block * kBlockM
++    );
++    FLASH_NAMESPACE::copy<Is_even_MN, Is_even_K, /*Clear_OOB_MN=*/true>(
++        gmem_tiled_copy_QKV, tQgQ, tQsQ, tQcQ, tQpQ, binfo.actual_seqlen_q - m_block * kBlockM
++    );
++
++    Tensor caccS = make_identity_tensor(Shape<Int<kBlockM>, Int<kBlockN>>{});    // (BLK_M,BLK_N) -> (blk_m,blk_n)
++    Tensor taccScS = thr_mma_sdp.partition_C(caccS);                           // (MMA,MMA_N,MMA_N)
++    static_assert(decltype(size<0>(taccScS))::value == 4);
++    // Convert to ((2, 2), MMA_N, MMA_N) then take only the row indices.
++    Tensor taccScS_row = logical_divide(taccScS, Shape<_2>{})(make_coord(0, _), _, 0);
++    Tensor lse = make_tensor<ElementAccum>(Shape<Int<decltype(size(taccScS_row))::value>>{});
++    #pragma unroll
++    for (int mi = 0; mi < size(lse); ++mi) {
++        const int row = get<0>(taccScS_row(mi));
++        lse(mi) = Is_even_MN || row < binfo.actual_seqlen_q - m_block * kBlockM ? gLSE(row) : INFINITY;
++    }
++    // LSE = inf for OOB rows: P is then exactly 0 there (upstream's comment).
++
++    FLASH_NAMESPACE::copy<Is_even_MN, Is_even_K, /*Clear_OOB_MN=*/true>(
++        gmem_tiled_copy_QKV, tKgK, tKsK, tKVcKV, tKVpKV, binfo.actual_seqlen_k - n_block * kBlockN
++    );
++    if (!Kernel_traits::Is_V_in_regs) {
++        FLASH_NAMESPACE::copy<Is_even_MN, Is_even_K, /*Clear_OOB_MN=*/true>(
++            gmem_tiled_copy_QKV, tVgV, tVsV, tKVcKV, tKVpKV, binfo.actual_seqlen_k - n_block * kBlockN
++        );
++    }
++    FLASH_NAMESPACE::cp_async_fence();
++
++    if (Kernel_traits::Is_V_in_regs) {
++        cute::cp_async_wait<1>();
++        __syncthreads();
++        Tensor tdPrV_copy_view = smem_thr_copy_KV.retile_D(tdPrV);
++        CUTE_STATIC_ASSERT_V(size<1>(tdPsV) == size<1>(tdPrV_copy_view));            // M
++        cute::copy(smem_tiled_copy_KV, tdPsV, tdPrV_copy_view);
++    }
++
++    clear(acc_dv);
++    clear(acc_dk);
++
++    for (;;) {
++        // The next m block to visit and the step to it. Without runs this is
++        // upstream's --m_block down to m_block_min. With runs, a run boundary
++        // reads the next run; the load is issued before this tile's first
++        // GEMM, and its value is needed only after the second.
++        int m_next;
++        if constexpr (Use_runs) {
++            if (m_block > run_lo) {
++                m_next = m_block - 1;
++            } else {
++                ++run_idx;
++                const int2 run = params.cqs_bwd_runs[n_block * kCqsBwdRunSlots + run_idx];
++                m_next = run.x;
++                run_lo = run.y;
++            }
++        } else {
++            m_next = m_block - 1;
++        }
++        const bool has_next = Use_runs ? m_next >= 0 : m_block > m_block_min;
++        const int m_step = Use_runs ? m_block - m_next : 1;
++
++        Tensor acc_s = partition_fragment_C(tiled_mma_sdp, Shape<Int<kBlockM>, Int<kBlockN>>{});  // (MMA=4, MMA_N, MMA_N)
++        clear(acc_s);
++        cute::cp_async_wait<0>();
++        __syncthreads();
++
++        Tensor dP_sum = make_fragment_like(lse);
++        #pragma unroll
++        for (int mi = 0; mi < size(lse); ++mi) { dP_sum(mi) = gdPsum(get<0>(taccScS_row(mi))); }
++
++        FLASH_NAMESPACE::gemm(acc_s, tSrQ, tSrK, tSsQ, tSsK, tiled_mma_sdp,
++                    smem_tiled_copy_QdO, smem_tiled_copy_KV, smem_thr_copy_QdO, smem_thr_copy_KV);
++
++        // Reshape acc_s from (MMA=4, MMA_N, MMA_N) to (row=(2, MMA_N), col=(2, MMA_N))
++        Tensor scores = make_tensor(acc_s.data(), FLASH_NAMESPACE::convert_layout_acc_rowcol(acc_s.layout()));
++
++        // Upstream's masking: the ragged last column tile, and with causal the
++        // diagonal tiles. v11's CQS backward masks every tile with its
++        // Mask<> (the same -inf positions here, none elsewhere).
++        if (!Is_causal) {
++            if (!Is_even_MN && (n_block + 1) * kBlockN >= binfo.actual_seqlen_k) {
++                FLASH_NAMESPACE::apply_mask(scores, binfo.actual_seqlen_k,
++                                  n_block * kBlockN + (tidx / 32 / AtomLayoutMS) * MMA_N_SdP * 16);
++            }
++        } else {
++            if (m_block * kBlockM < (n_block + 1) * kBlockN + binfo.actual_seqlen_q - binfo.actual_seqlen_k
++                || (!Is_even_MN && (n_block + 1) * kBlockN >= binfo.actual_seqlen_k)) {
++                FLASH_NAMESPACE::apply_mask_causal(scores, n_block * kBlockN + (tidx / 32 / AtomLayoutMS) * MMA_N_SdP * 16,
++                                         binfo.actual_seqlen_k, m_block * kBlockM + get<0>(taccScS_row(0)),
++                                         binfo.actual_seqlen_q,
++                                         AtomLayoutMS * 16);
++            }
++        }
++
++        // Compute the exponential value.
++        FLASH_NAMESPACE::scale_apply_exp2</*scale_max=*/false>(scores, lse, params.scale_softmax_log2);
++        // Convert scores from fp32 to fp16/bf16
++        Tensor rP = FLASH_NAMESPACE::convert_type<Element>(acc_s);
++        // Reshape rP from (MMA=4, MMA_M, MMA_N) to ((4, 2), MMA_N, MMA_N / 2)
++        // if using m16n8k16 or (4, MMA_N, MMA_N) if using m16n8k8.
++        Tensor tPrP = make_tensor(rP.data(), FLASH_NAMESPACE::convert_layout_acc_Aregs<typename Kernel_traits::TiledMmaSdP>(rP.layout()));
++        Tensor tPaP = smem_thr_copy_PdS.retile_S(tPrP);     // ((Atom,AtomNum), MMA_N, MMA_N)
++        cute::copy(smem_tiled_copy_PdS, tPaP, tPsP);
++
++        Tensor acc_dp = partition_fragment_C(tiled_mma_sdp, Shape<Int<kBlockM>, Int<kBlockN>>{});  // (MMA=4, MMA_N, MMA_N)
++        CUTE_STATIC_ASSERT_V(size<0>(acc_dp) == size<0>(acc_s));                     // MMA
++        CUTE_STATIC_ASSERT_V(size<1>(acc_dp) == size<1>(acc_s));                     // MMA
++        CUTE_STATIC_ASSERT_V(size<2>(acc_dp) == size<2>(acc_s));                     // MMA
++
++        clear(acc_dp);
++        FLASH_NAMESPACE::gemm</*A_in_regs=*/false, /*B_in_regs=*/Kernel_traits::Is_V_in_regs>(
++            acc_dp, tdPrdO, tdPrV, tdPsdO, tdPsV, tiled_mma_sdp,
++            smem_tiled_copy_QdO, smem_tiled_copy_KV, smem_thr_copy_QdO, smem_thr_copy_KV
++        );
++
++        // Reshape acc_dp from (MMA=4, MMA_N, MMA_N) to (row=(2, MMA_N), col=(2, MMA_N))
++        // Standard softmax backward: dR = p * (dP - row_sum(dO * O)). v11's
++        // numden runtime branch is not in this instantiation (LEGACY keeps it).
++        Tensor dS = make_tensor(acc_dp.data(), scores.layout());
++        #pragma unroll
++        for (int mi = 0; mi < size<0>(dS); ++mi) {
++            #pragma unroll
++            for (int ni = 0; ni < size<1>(dS); ++ni) {
++                const float p = scores(mi, ni);
++                dS(mi, ni) = p * (dS(mi, ni) - dP_sum(mi));
++            }
++        }
++
++        Tensor acc_dq = partition_fragment_C(tiled_mma_dq, Shape<Int<kBlockM>, Int<kHeadDim>>{});  // MMA, MMA_N, MMA_K
++        clear(acc_dq);
++
++        // The other sQ buffer: +size when the current one is 0, else -size.
++        const int sQ_offset = (Use_runs ? sQ_cur : m_block % 2) == 0 ? int(size(sQ)) : -int(size(sQ));
++        if (Double_buffer && has_next) {
++            // Double buffer for sQ
++            tQsQ.data() = tQsQ.data() + sQ_offset;
++            tSsQ.data() = tSsQ.data() + sQ_offset;
++            // Advance gQ to the next visited m block
++            tQgQ.data() = tQgQ.data() + (-index_t(m_step) * kBlockM * params.q_row_stride);
++            FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tQgQ, tQsQ, tQcQ, tQpQ);
++            FLASH_NAMESPACE::cp_async_fence();
++        }
++
++        Tensor dS_reshaped = make_tensor(dS.data(), acc_dp.layout());
++        // Convert dS from fp32 to fp16
++        Tensor tdSrdS = FLASH_NAMESPACE::convert_type<Element>(dS_reshaped);
++        Tensor tdSadS = smem_thr_copy_PdS.retile_S(tdSrdS);                                          // ((Atom,AtomNum), MMA_N, MMA_N)
++        cute::copy(smem_tiled_copy_PdS, tdSadS, tdSsdS);
++        __syncthreads();
++
++        FLASH_NAMESPACE::gemm(acc_dv, tdVrPt, tdVrdO, tdVsPt, tdVsdOt, tiled_mma_dkv,
++                    smem_tiled_copy_PdSt, smem_tiled_copy_QdOt, smem_thr_copy_PdSt, smem_thr_copy_QdOt);
++
++        __syncthreads(); // Need syncthreads since we're writing to the same sdO location
++
++        if (has_next) {
++            // Advance gdO to the next visited m block
++            tdOgdO.data() = tdOgdO.data() + (-index_t(m_step) * kBlockM * params.do_row_stride);
++            FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_dO, tdOgdO, tdOsdO, tQcQ, tQpQ);
++            FLASH_NAMESPACE::cp_async_fence();
++        }
++
++        FLASH_NAMESPACE::gemm(acc_dq, tdQrdS, tdQrKt, tdQsdS, tdQsKt, tiled_mma_dq,
++                    smem_tiled_copy_dS, smem_tiled_copy_Kt, smem_thr_copy_dS, smem_thr_copy_Kt);
++
++        if (has_next) {
++            gLSE.data() = gLSE.data() + (-int(m_step * kBlockM));
++            #pragma unroll
++            for (int mi = 0; mi < size(lse); ++mi) { lse(mi) = gLSE(get<0>(taccScS_row(mi))); }
++            gdPsum.data() = gdPsum.data() + (-int(m_step * kBlockM));
++        }
++
++        CUTE_STATIC_ASSERT_V(size(acc_dq) == size(tdQgdQaccum));
++        #pragma unroll
++        for (int i = 0; i < size(acc_dq); ++i) { atomicAdd(&tdQgdQaccum(i), acc_dq(i)); }
++
++        FLASH_NAMESPACE::gemm(acc_dk, tdKrdSt, tdKrQt, tdKsdSt, tdKsQt, tiled_mma_dkv,
++                    smem_tiled_copy_PdSt, smem_tiled_copy_QdOt, smem_thr_copy_PdSt, smem_thr_copy_QdOt);
++        if (Double_buffer) {  // Double buffer for sQ
++            tdKsQt.data() = tdKsQt.data() + sQ_offset;
++        }
++        if (!Double_buffer && has_next) {
++            __syncthreads();
++            // Advance gQ to the next visited m block
++            tQgQ.data() = tQgQ.data() + (-index_t(m_step) * kBlockM * params.q_row_stride);
++            FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tQgQ, tQsQ, tQcQ, tQpQ);
++            FLASH_NAMESPACE::cp_async_fence();
++        }
++
++        if (!has_next) { break; }
++        // dQaccum of the next visited m block (upstream advances it at the top of the iteration).
++        tdQgdQaccum.data() = tdQgdQaccum.data() + (-index_t(m_step) * kBlockM * params.h * params.d_rounded);
++        m_block = m_next;
++        if constexpr (Use_runs) { sQ_cur ^= 1; }
++    }
++
++    // Epilogue
++
++    #pragma unroll
++    for (int i = 0; i < size(acc_dk); ++i) { acc_dk(i) *= params.scale_softmax_rp_dropout; }
++
++    // Convert acc_dv from fp32 to fp16
++    Tensor rdK = FLASH_NAMESPACE::convert_type<Element>(acc_dk);
++    Tensor rdV = FLASH_NAMESPACE::convert_type<Element>(acc_dv);
++
++    Tensor sdK = make_tensor(sK.data(), typename Kernel_traits::SmemLayoutdKV{});  // (SMEM_N, SMEM_K)
++    Tensor sdV = make_tensor(sdK.data() + size(sdK), typename Kernel_traits::SmemLayoutdKV{}); // (SMEM_N, SMEM_K)
++
++    // Partition sdV and sdK to match the accumulator partitioning
++    auto smem_tiled_copy_dKV = make_tiled_copy_C(typename Kernel_traits::SmemCopyAtomdKV{}, tiled_mma_dkv);
++    auto smem_thr_copy_dKV = smem_tiled_copy_dKV.get_thread_slice(tidx);
++    Tensor taccdKrdK = smem_thr_copy_dKV.retile_S(rdK);       // ((Atom,AtomNum), MMA_N, MMA_N)
++    Tensor taccdKsdK = smem_thr_copy_dKV.partition_D(sdK);   // ((Atom,AtomNum),PIPE_M,PIPE_N)
++    Tensor taccdVrdV = smem_thr_copy_dKV.retile_S(rdV);       // ((Atom,AtomNum), MMA_N, MMA_N)
++    Tensor taccdVsdV = smem_thr_copy_dKV.partition_D(sdV);    // ((Atom,AtomNum),PIPE_M,PIPE_N)
++
++    // We need syncthreads here since we're writing to the same location as sK and sV.
++    // Without syncthreads, some thread might modify the location of sK while another thread
++    // is reading it for dQ gemm, leading to a race condition.
++    __syncthreads();
++
++    cute::copy(smem_tiled_copy_dKV, taccdKrdK, taccdKsdK);
++    cute::copy(smem_tiled_copy_dKV, taccdVrdV, taccdVsdV);
++
++    const index_t row_offset_dk = binfo.k_offset(params.dk_batch_stride, params.dk_row_stride, bidb)
++       + n_block * kBlockN * params.dk_row_stride + bidh * params.dk_head_stride;
++    const index_t row_offset_dv = binfo.k_offset(params.dv_batch_stride, params.dv_row_stride, bidb)
++       + n_block * kBlockN * params.dv_row_stride + bidh * params.dv_head_stride;
++    Tensor gdK = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.dk_ptr) + row_offset_dk),
++                             Shape<Int<kBlockN>, Int<kHeadDim>>{},
++                             make_stride(params.dk_row_stride, _1{}));
++    Tensor gdV = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.dv_ptr) + row_offset_dv),
++                             Shape<Int<kBlockN>, Int<kHeadDim>>{},
++                             make_stride(params.dv_row_stride, _1{}));
++
++    typename Kernel_traits::GmemTiledCopydKV gmem_tiled_copy_dKV;
++    auto gmem_thr_copy_dKV = gmem_tiled_copy_dKV.get_thread_slice(tidx);
++    Tensor tdKsdK = gmem_thr_copy_dKV.partition_S(sdK);   // ((Atom,AtomNum),ATOM_M,ATOM_N)
++    Tensor tdKgdK = gmem_thr_copy_dKV.partition_D(gdK);
++    Tensor tdVsdV = gmem_thr_copy_dKV.partition_S(sdV);   // ((Atom,AtomNum),ATOM_M,ATOM_N)
++    Tensor tdVgdV = gmem_thr_copy_dKV.partition_D(gdV);
++
++    __syncthreads();
++    Tensor tdKrdK = make_tensor<Element>(shape(tdKgdK));
++    cute::copy(gmem_tiled_copy_dKV, tdKsdK, tdKrdK);
++    Tensor tdVrdV = make_tensor<Element>(shape(tdVgdV));
++    cute::copy(gmem_tiled_copy_dKV, tdVsdV, tdVrdV);
++    Tensor cdKV = make_identity_tensor(make_shape(size<0>(sdK), size<1>(sdK)));    // (BLK_N,BLK_K) -> (blk_n,blk_k)
++    Tensor tdKVcdKV = gmem_thr_copy_dKV.partition_D(cdKV);
++    Tensor tdKVpdKV = make_tensor<bool>(make_shape(size<2>(tdKgdK)));
++    #pragma unroll
++    for (int k = 0; k < size(tdKVpdKV); ++k) { tdKVpdKV(k) = get<1>(tdKVcdKV(0, 0, k)) < params.d; }
++    // Clear_OOB_K must be false since we don't want to write zeros to gmem
++    FLASH_NAMESPACE::copy<Is_even_MN, Is_even_K, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
++        gmem_tiled_copy_dKV, tdKrdK, tdKgdK, tdKVcdKV, tdKVpdKV, binfo.actual_seqlen_k - n_block * kBlockN
++    );
++    FLASH_NAMESPACE::copy<Is_even_MN, Is_even_K, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
++        gmem_tiled_copy_dKV, tdVrdV, tdVgdV, tdKVcdKV, tdKVpdKV, binfo.actual_seqlen_k - n_block * kBlockN
++    );
++}
++
++// With runs, the CTAs return at once unless the census routed the call here
++// (route 0); LEGACY, launched right after on the same stream, does the reverse.
++template<typename Kernel_traits, bool Is_causal, bool Is_even_MN, bool Use_runs>
++__global__ void flash_bwd_dq_dk_dv_loop_seqk_parallel_aligned_kernel(KERNEL_PARAM_MODIFIER const Flash_bwd_params params) {
++    #if defined(ARCH_SUPPORTS_FLASH)
++        if constexpr (Use_runs) {
++            if (__ldg(params.cqs_bwd_route) != 0) { return; }
++        }
++        // The block index for the batch.
++        const int bidb = blockIdx.y;
++        // The block index for the head.
++        const int bidh = blockIdx.z;
++        // If deterministic, each thread block will do atomicAdd to a different dQ_accum buffer.
++        for (int n_block = blockIdx.x; n_block < (params.seqlen_k + Kernel_traits::kBlockN - 1) / Kernel_traits::kBlockN; n_block += gridDim.x) {
++            compute_dq_dk_dv_1colblock_aligned<Kernel_traits, Is_causal, Is_even_MN, Use_runs>(params, bidb, bidh, n_block);
++        }
++    #else
++        FLASH_UNSUPPORTED_ARCH
++    #endif
++}
++
++// The calls the ALIGNED kernel serves; flash_api.cpp allocates the census only
++// for CQS-on calls that pass this (plus group bits and summaries).
++template<typename Kernel_traits>
++inline bool cqs_bwd_aligned_eligible(const Flash_bwd_params &params) {
++    return !params.cqsa_numden_mode
++        && params.p_dropout >= 1.f                      // keep probability: no dropout
++        && params.alibi_slopes_ptr == nullptr
++        && params.softcap == 0.f
++        && (params.is_causal || (params.window_size_left < 0 && params.window_size_right < 0))
++        && params.cu_seqlens_q == nullptr && params.cu_seqlens_k == nullptr
++        && params.d == Kernel_traits::kHeadDim;
++}
++
++template<typename Kernel_traits, bool Is_causal>
++void run_flash_bwd_aligned_kernel(Flash_bwd_params &params, cudaStream_t stream) {
++    const int gridDimx = bwd_grid_dimx<Kernel_traits>(params);
++    dim3 grid_n(gridDimx, params.b, params.h);
++    const bool is_even_MN = params.seqlen_q % Kernel_traits::kBlockM == 0 && params.seqlen_k % Kernel_traits::kBlockN == 0;
++    constexpr int smem_size_dq_dk_dv = Kernel_traits::kSmemSize1colblock;
++    BOOL_SWITCH(is_even_MN, IsEvenMNConst, [&] {
++        BOOL_SWITCH(params.cqs_enabled, UseRunsConst, [&] {
++            auto kernel = &flash_bwd_dq_dk_dv_loop_seqk_parallel_aligned_kernel<Kernel_traits, Is_causal, IsEvenMNConst, UseRunsConst>;
++            if (smem_size_dq_dk_dv >= 48 * 1024)  {
++                C10_CUDA_CHECK(cudaFuncSetAttribute(
++                    kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size_dq_dk_dv));
++            }
++            kernel<<<grid_n, Kernel_traits::kNThreads, smem_size_dq_dk_dv, stream>>>(params);
++            C10_CUDA_KERNEL_LAUNCH_CHECK();
++        });
++    });
++}
++
++// The whole backward of one call (declared in flash_bwd_launch_template.h):
++// preprocess -> [census] -> ALIGNED and/or LEGACY -> convert_dQ, all on the
++// stream. CQS off and eligible: the ALIGNED loop without a run table. CQS on
++// with a census buffer (flash_api.cpp): census, ALIGNED, then LEGACY, each
++// kernel's CTAs returning at once unless the route picks it. Anything else:
++// LEGACY alone, as v11.
++template<typename Kernel_traits, bool Is_dropout, bool Is_causal>
++void run_flash_bwd_main(Flash_bwd_params &params, cudaStream_t stream) {
++    using T = typename Kernel_traits::Element;
++    run_flash_bwd_preprocess<Kernel_traits>(params, stream);
++    bool aligned = false;
++    if constexpr (!Is_dropout) {
++        aligned = cqs_bwd_aligned_eligible<Kernel_traits>(params)
++            && (!params.cqs_enabled || (params.cqs_bwd_route != nullptr && params.cqs_group_bits != nullptr
++                                        && params.cqs_blk_or != nullptr && params.cqs_blk_and != nullptr));
++    }
++    if (aligned) {
++        if (params.cqs_enabled) {
++            run_cqs_bwd_census(params, Kernel_traits::kBlockM, Kernel_traits::kBlockN, stream);
++        }
++        run_flash_bwd_aligned_kernel<Kernel_traits, Is_causal>(params, stream);
++    } else {
++        params.cqs_bwd_route = nullptr;   // LEGACY alone computes the call
++    }
++    if (!aligned || params.cqs_enabled) {
++        run_mha_bwd_legacy_<T, Kernel_traits::kHeadDim, Is_causal>(params, stream);
++    }
++    run_flash_bwd_convert_dq<Kernel_traits>(params, stream);
++}
++
++}  // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__pycache__' '--exclude=stream_cqsa' '--exclude=frozen' v11/csrc/flash_attn/src/flash_bwd_hdim128_bf16_legacy_sm80.cu v12b/csrc/flash_attn/src/flash_bwd_hdim128_bf16_legacy_sm80.cu
+--- v11/csrc/flash_attn/src/flash_bwd_hdim128_bf16_legacy_sm80.cu	1969-12-31 19:00:00.000000000 -0500
++++ v12b/csrc/flash_attn/src/flash_bwd_hdim128_bf16_legacy_sm80.cu	2026-09-23 13:24:24.657208432 -0400
+@@ -0,0 +1,19 @@
++// next/ v12b: v11's CQS backward dq/dk/dv kernel (LEGACY: per-element mask path,
++// every feature switch), alone in its translation unit so that its long compile
++// is paid only when it changes. Launched by run_mha_bwd_ (flash_bwd_aligned.h).
++#include "namespace_config.h"
++#include "flash_bwd_launch_template.h"
++
++namespace FLASH_NAMESPACE {
++
++template<>
++void run_mha_bwd_legacy_<cutlass::bfloat16_t, 128, false>(Flash_bwd_params &params, cudaStream_t stream) {
++    run_mha_bwd_hdim128<cutlass::bfloat16_t, false, BwdPart::Legacy>(params, stream);
++}
++
++template<>
++void run_mha_bwd_legacy_<cutlass::bfloat16_t, 128, true>(Flash_bwd_params &params, cudaStream_t stream) {
++    run_mha_bwd_hdim128<cutlass::bfloat16_t, true, BwdPart::Legacy>(params, stream);
++}
++
++} // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__pycache__' '--exclude=stream_cqsa' '--exclude=frozen' v11/csrc/flash_attn/src/flash_bwd_hdim128_bf16_sm80.cu v12b/csrc/flash_attn/src/flash_bwd_hdim128_bf16_sm80.cu
+--- v11/csrc/flash_attn/src/flash_bwd_hdim128_bf16_sm80.cu	2026-08-11 21:52:18.864428518 -0400
++++ v12b/csrc/flash_attn/src/flash_bwd_hdim128_bf16_sm80.cu	2026-09-23 13:24:24.657036633 -0400
+@@ -1,20 +1,21 @@
+-// Backward bf16 instantiations for the CQSA build.
+-// FlashAttention ships bf16 FORWARD kernels but no bf16 backward .cu files;
+-// run_mha_bwd_hdim128<T, Is_causal> is generic, so these are instantiations
+-// rather than new kernel code.
++// Copyright (c) 2024, Tri Dao.
++// Splitting the different head dimensions to different files to speed up compilation.
++// next/ v12b: the whole backward of a call (preprocess, census + ALIGNED backward
++// for CQS-on calls, the same loop without a run table for CQS-off calls,
++// convert_dQ); v11's dq/dk/dv kernel (LEGACY) is in flash_bwd_hdim128_bf16_legacy_sm80.cu.
+ #include "namespace_config.h"
+-#include "flash_bwd_launch_template.h"
++#include "flash_bwd_aligned.h"
+ 
+ namespace FLASH_NAMESPACE {
+ 
+ template<>
+ void run_mha_bwd_<cutlass::bfloat16_t, 128, false>(Flash_bwd_params &params, cudaStream_t stream) {
+-    run_mha_bwd_hdim128<cutlass::bfloat16_t, false>(params, stream);
++    run_mha_bwd_hdim128<cutlass::bfloat16_t, false, BwdPart::Main>(params, stream);
+ }
+ 
+ template<>
+ void run_mha_bwd_<cutlass::bfloat16_t, 128, true>(Flash_bwd_params &params, cudaStream_t stream) {
+-    run_mha_bwd_hdim128<cutlass::bfloat16_t, true>(params, stream);
++    run_mha_bwd_hdim128<cutlass::bfloat16_t, true, BwdPart::Main>(params, stream);
+ }
+ 
+ } // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__pycache__' '--exclude=stream_cqsa' '--exclude=frozen' v11/csrc/flash_attn/src/flash_bwd_hdim128_fp16_legacy_sm80.cu v12b/csrc/flash_attn/src/flash_bwd_hdim128_fp16_legacy_sm80.cu
+--- v11/csrc/flash_attn/src/flash_bwd_hdim128_fp16_legacy_sm80.cu	1969-12-31 19:00:00.000000000 -0500
++++ v12b/csrc/flash_attn/src/flash_bwd_hdim128_fp16_legacy_sm80.cu	2026-09-23 13:24:24.656944610 -0400
+@@ -0,0 +1,19 @@
++// next/ v12b: v11's CQS backward dq/dk/dv kernel (LEGACY: per-element mask path,
++// every feature switch), alone in its translation unit so that its long compile
++// is paid only when it changes. Launched by run_mha_bwd_ (flash_bwd_aligned.h).
++#include "namespace_config.h"
++#include "flash_bwd_launch_template.h"
++
++namespace FLASH_NAMESPACE {
++
++template<>
++void run_mha_bwd_legacy_<cutlass::half_t, 128, false>(Flash_bwd_params &params, cudaStream_t stream) {
++    run_mha_bwd_hdim128<cutlass::half_t, false, BwdPart::Legacy>(params, stream);
++}
++
++template<>
++void run_mha_bwd_legacy_<cutlass::half_t, 128, true>(Flash_bwd_params &params, cudaStream_t stream) {
++    run_mha_bwd_hdim128<cutlass::half_t, true, BwdPart::Legacy>(params, stream);
++}
++
++} // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__pycache__' '--exclude=stream_cqsa' '--exclude=frozen' v11/csrc/flash_attn/src/flash_bwd_hdim128_fp16_sm80.cu v12b/csrc/flash_attn/src/flash_bwd_hdim128_fp16_sm80.cu
+--- v11/csrc/flash_attn/src/flash_bwd_hdim128_fp16_sm80.cu	2026-08-11 18:07:20.308823359 -0400
++++ v12b/csrc/flash_attn/src/flash_bwd_hdim128_fp16_sm80.cu	2026-09-23 13:24:24.656743776 -0400
+@@ -1,19 +1,21 @@
+ // Copyright (c) 2024, Tri Dao.
+ // Splitting the different head dimensions to different files to speed up compilation.
+-// This file is auto-generated style; kept minimal for CQSA A100 build.
++// next/ v12b: the whole backward of a call (preprocess, census + ALIGNED backward
++// for CQS-on calls, the same loop without a run table for CQS-off calls,
++// convert_dQ); v11's dq/dk/dv kernel (LEGACY) is in flash_bwd_hdim128_fp16_legacy_sm80.cu.
+ #include "namespace_config.h"
+-#include "flash_bwd_launch_template.h"
++#include "flash_bwd_aligned.h"
+ 
+ namespace FLASH_NAMESPACE {
+ 
+ template<>
+ void run_mha_bwd_<cutlass::half_t, 128, false>(Flash_bwd_params &params, cudaStream_t stream) {
+-    run_mha_bwd_hdim128<cutlass::half_t, false>(params, stream);
++    run_mha_bwd_hdim128<cutlass::half_t, false, BwdPart::Main>(params, stream);
+ }
+ 
+ template<>
+ void run_mha_bwd_<cutlass::half_t, 128, true>(Flash_bwd_params &params, cudaStream_t stream) {
+-    run_mha_bwd_hdim128<cutlass::half_t, true>(params, stream);
++    run_mha_bwd_hdim128<cutlass::half_t, true, BwdPart::Main>(params, stream);
+ }
+ 
+ } // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__pycache__' '--exclude=stream_cqsa' '--exclude=frozen' v11/csrc/flash_attn/src/flash_bwd_hdim64_bf16_legacy_sm80.cu v12b/csrc/flash_attn/src/flash_bwd_hdim64_bf16_legacy_sm80.cu
+--- v11/csrc/flash_attn/src/flash_bwd_hdim64_bf16_legacy_sm80.cu	1969-12-31 19:00:00.000000000 -0500
++++ v12b/csrc/flash_attn/src/flash_bwd_hdim64_bf16_legacy_sm80.cu	2026-09-23 13:24:24.656432682 -0400
+@@ -0,0 +1,19 @@
++// next/ v12b: v11's CQS backward dq/dk/dv kernel (LEGACY: per-element mask path,
++// every feature switch), alone in its translation unit so that its long compile
++// is paid only when it changes. Launched by run_mha_bwd_ (flash_bwd_aligned.h).
++#include "namespace_config.h"
++#include "flash_bwd_launch_template.h"
++
++namespace FLASH_NAMESPACE {
++
++template<>
++void run_mha_bwd_legacy_<cutlass::bfloat16_t, 64, false>(Flash_bwd_params &params, cudaStream_t stream) {
++    run_mha_bwd_hdim64<cutlass::bfloat16_t, false, BwdPart::Legacy>(params, stream);
++}
++
++template<>
++void run_mha_bwd_legacy_<cutlass::bfloat16_t, 64, true>(Flash_bwd_params &params, cudaStream_t stream) {
++    run_mha_bwd_hdim64<cutlass::bfloat16_t, true, BwdPart::Legacy>(params, stream);
++}
++
++} // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__pycache__' '--exclude=stream_cqsa' '--exclude=frozen' v11/csrc/flash_attn/src/flash_bwd_hdim64_bf16_sm80.cu v12b/csrc/flash_attn/src/flash_bwd_hdim64_bf16_sm80.cu
+--- v11/csrc/flash_attn/src/flash_bwd_hdim64_bf16_sm80.cu	2026-08-11 21:52:18.864047274 -0400
++++ v12b/csrc/flash_attn/src/flash_bwd_hdim64_bf16_sm80.cu	2026-09-23 13:24:24.656229740 -0400
+@@ -1,20 +1,21 @@
+-// Backward bf16 instantiations for the CQSA build.
+-// FlashAttention ships bf16 FORWARD kernels but no bf16 backward .cu files;
+-// run_mha_bwd_hdim64<T, Is_causal> is generic, so these are instantiations
+-// rather than new kernel code.
++// Copyright (c) 2024, Tri Dao.
++// Splitting the different head dimensions to different files to speed up compilation.
++// next/ v12b: the whole backward of a call (preprocess, census + ALIGNED backward
++// for CQS-on calls, the same loop without a run table for CQS-off calls,
++// convert_dQ); v11's dq/dk/dv kernel (LEGACY) is in flash_bwd_hdim64_bf16_legacy_sm80.cu.
+ #include "namespace_config.h"
+-#include "flash_bwd_launch_template.h"
++#include "flash_bwd_aligned.h"
+ 
+ namespace FLASH_NAMESPACE {
+ 
+ template<>
+ void run_mha_bwd_<cutlass::bfloat16_t, 64, false>(Flash_bwd_params &params, cudaStream_t stream) {
+-    run_mha_bwd_hdim64<cutlass::bfloat16_t, false>(params, stream);
++    run_mha_bwd_hdim64<cutlass::bfloat16_t, false, BwdPart::Main>(params, stream);
+ }
+ 
+ template<>
+ void run_mha_bwd_<cutlass::bfloat16_t, 64, true>(Flash_bwd_params &params, cudaStream_t stream) {
+-    run_mha_bwd_hdim64<cutlass::bfloat16_t, true>(params, stream);
++    run_mha_bwd_hdim64<cutlass::bfloat16_t, true, BwdPart::Main>(params, stream);
+ }
+ 
+ } // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__pycache__' '--exclude=stream_cqsa' '--exclude=frozen' v11/csrc/flash_attn/src/flash_bwd_hdim64_fp16_legacy_sm80.cu v12b/csrc/flash_attn/src/flash_bwd_hdim64_fp16_legacy_sm80.cu
+--- v11/csrc/flash_attn/src/flash_bwd_hdim64_fp16_legacy_sm80.cu	1969-12-31 19:00:00.000000000 -0500
++++ v12b/csrc/flash_attn/src/flash_bwd_hdim64_fp16_legacy_sm80.cu	2026-09-23 13:24:24.655894569 -0400
+@@ -0,0 +1,19 @@
++// next/ v12b: v11's CQS backward dq/dk/dv kernel (LEGACY: per-element mask path,
++// every feature switch), alone in its translation unit so that its long compile
++// is paid only when it changes. Launched by run_mha_bwd_ (flash_bwd_aligned.h).
++#include "namespace_config.h"
++#include "flash_bwd_launch_template.h"
++
++namespace FLASH_NAMESPACE {
++
++template<>
++void run_mha_bwd_legacy_<cutlass::half_t, 64, false>(Flash_bwd_params &params, cudaStream_t stream) {
++    run_mha_bwd_hdim64<cutlass::half_t, false, BwdPart::Legacy>(params, stream);
++}
++
++template<>
++void run_mha_bwd_legacy_<cutlass::half_t, 64, true>(Flash_bwd_params &params, cudaStream_t stream) {
++    run_mha_bwd_hdim64<cutlass::half_t, true, BwdPart::Legacy>(params, stream);
++}
++
++} // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__pycache__' '--exclude=stream_cqsa' '--exclude=frozen' v11/csrc/flash_attn/src/flash_bwd_hdim64_fp16_sm80.cu v12b/csrc/flash_attn/src/flash_bwd_hdim64_fp16_sm80.cu
+--- v11/csrc/flash_attn/src/flash_bwd_hdim64_fp16_sm80.cu	2026-08-11 18:07:20.308539747 -0400
++++ v12b/csrc/flash_attn/src/flash_bwd_hdim64_fp16_sm80.cu	2026-09-23 13:24:24.655655062 -0400
+@@ -1,19 +1,21 @@
+ // Copyright (c) 2024, Tri Dao.
+ // Splitting the different head dimensions to different files to speed up compilation.
+-// This file is auto-generated style; kept minimal for CQSA A100 build.
++// next/ v12b: the whole backward of a call (preprocess, census + ALIGNED backward
++// for CQS-on calls, the same loop without a run table for CQS-off calls,
++// convert_dQ); v11's dq/dk/dv kernel (LEGACY) is in flash_bwd_hdim64_fp16_legacy_sm80.cu.
+ #include "namespace_config.h"
+-#include "flash_bwd_launch_template.h"
++#include "flash_bwd_aligned.h"
+ 
+ namespace FLASH_NAMESPACE {
+ 
+ template<>
+ void run_mha_bwd_<cutlass::half_t, 64, false>(Flash_bwd_params &params, cudaStream_t stream) {
+-    run_mha_bwd_hdim64<cutlass::half_t, false>(params, stream);
++    run_mha_bwd_hdim64<cutlass::half_t, false, BwdPart::Main>(params, stream);
+ }
+ 
+ template<>
+ void run_mha_bwd_<cutlass::half_t, 64, true>(Flash_bwd_params &params, cudaStream_t stream) {
+-    run_mha_bwd_hdim64<cutlass::half_t, true>(params, stream);
++    run_mha_bwd_hdim64<cutlass::half_t, true, BwdPart::Main>(params, stream);
+ }
+ 
+ } // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__pycache__' '--exclude=stream_cqsa' '--exclude=frozen' v11/csrc/flash_attn/src/flash_bwd_launch_template.h v12b/csrc/flash_attn/src/flash_bwd_launch_template.h
+--- v11/csrc/flash_attn/src/flash_bwd_launch_template.h	2026-08-12 21:30:06.418053000 -0400
++++ v12b/csrc/flash_attn/src/flash_bwd_launch_template.h	2026-09-23 13:24:09.868975000 -0400
+@@ -42,6 +42,11 @@
+ DEFINE_FLASH_BACKWARD_KERNEL(flash_bwd_dq_dk_dv_loop_seqk_parallel_kernel, bool Is_dropout, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Is_softcap) {
+     #if defined(ARCH_SUPPORTS_FLASH)
+         static_assert(!(Is_causal && Is_local));  // If Is_local is true, Is_causal should be false
++        // next/ v12b: when the census ran (cqs_bwd_route set), this LEGACY
++        // kernel computes the call only if the census found a mixed tile or a
++        // run-table overflow; otherwise the ALIGNED kernel launched just before
++        // it already did (flash_bwd_aligned.h).
++        if (params.cqs_bwd_route != nullptr && __ldg(params.cqs_bwd_route) == 0) { return; }
+         FLASH_NAMESPACE::compute_dq_dk_dv_seqk_parallel<Kernel_traits, Is_dropout, Is_causal, Is_local, Has_alibi, Is_even_MN, Is_even_K, Is_softcap>(params);
+     #else
+         FLASH_UNSUPPORTED_ARCH
+@@ -69,18 +74,25 @@
+     FLASH_NAMESPACE::convert_dKV<Kernel_traits>(params);
+ }
+ 
+-template<typename Kernel_traits, bool Is_dropout, bool Is_causal>
+-void run_flash_bwd_seqk_parallel(Flash_bwd_params &params, cudaStream_t stream) {
+-    const int num_m_block = (params.seqlen_q + Kernel_traits::kBlockM - 1) / Kernel_traits::kBlockM;
+-    dim3 grid_m(num_m_block, params.b, params.h);
++// next/ v12b: v11's run_flash_bwd_seqk_parallel, split into its three
++// launches so that the main path (flash_bwd_aligned.h) can put the census and
++// the ALIGNED kernel between the preprocess and convert_dQ, and so that the
++// LEGACY translation units hold only v11's dq/dk/dv kernel.
++template<typename Kernel_traits>
++int bwd_grid_dimx(const Flash_bwd_params &params) {
+     const int num_n_block = (params.seqlen_k + Kernel_traits::kBlockN - 1) / Kernel_traits::kBlockN;
+     int gridDimx = num_n_block;
+     if (params.deterministic) {
+         int num_sm = get_num_sm(get_current_device());
+         gridDimx = (num_sm + params.b * params.h - 1) / (params.b * params.h);
+     }
+-    dim3 grid_n(gridDimx, params.b, params.h);
++    return gridDimx;
++}
+ 
++template<typename Kernel_traits>
++void run_flash_bwd_preprocess(Flash_bwd_params &params, cudaStream_t stream) {
++    const int num_m_block = (params.seqlen_q + Kernel_traits::kBlockM - 1) / Kernel_traits::kBlockM;
++    dim3 grid_m(num_m_block, params.b, params.h);
+     // Standard FA bwd preprocess computes dsoftmax_sum = row_sum(dO * O).
+     // In Stream-CQSA Num/Den bwd mode, dsoftmax_sum is provided by caller
+     // as row-wise dDen and must not be overwritten here.
+@@ -96,6 +108,12 @@
+         }
+         C10_CUDA_KERNEL_LAUNCH_CHECK();
+     }
++}
++
++// LEGACY: v11's dq/dk/dv kernel with every feature switch (unchanged).
++template<typename Kernel_traits, bool Is_dropout, bool Is_causal>
++void run_flash_bwd_legacy_kernel(Flash_bwd_params &params, cudaStream_t stream) {
++    dim3 grid_n(bwd_grid_dimx<Kernel_traits>(params), params.b, params.h);
+ 
+     // We want to specialize to is_even_MN and not just is_even_M, since in the case where N is not
+     // a multiple of kBlockN, we'll need to apply mask in the loop.
+@@ -124,24 +142,43 @@
+             });
+         });
+     });
++}
+ 
++template<typename Kernel_traits>
++void run_flash_bwd_convert_dq(Flash_bwd_params &params, cudaStream_t stream) {
++    const int num_m_block = (params.seqlen_q + Kernel_traits::kBlockM - 1) / Kernel_traits::kBlockM;
++    dim3 grid_m(num_m_block, params.b, params.h);
+     auto kernel_dq = &flash_bwd_convert_dq_kernel<Kernel_traits>;
+     if (Kernel_traits::kSmemdQSize >= 48 * 1024)  {
+         C10_CUDA_CHECK(cudaFuncSetAttribute(
+             kernel_dq, cudaFuncAttributeMaxDynamicSharedMemorySize, Kernel_traits::kSmemdQSize));
+     }
+-    kernel_dq<<<grid_m, Kernel_traits::kNThreads, Kernel_traits::kSmemdQSize, stream>>>(params, !params.deterministic ? 1 : gridDimx);
++    kernel_dq<<<grid_m, Kernel_traits::kNThreads, Kernel_traits::kSmemdQSize, stream>>>(params, !params.deterministic ? 1 : bwd_grid_dimx<Kernel_traits>(params));
+     C10_CUDA_KERNEL_LAUNCH_CHECK();
+ }
+ 
++// next/ v12b: which part of the backward a run_mha_bwd_hdim* call launches.
++// Main: the whole backward of the call (flash_bwd_aligned.h, the
++// flash_bwd_hdim*_sm80.cu units); Legacy: only v11's dq/dk/dv kernel (the
++// flash_bwd_hdim*_legacy_sm80.cu units, called from Main).
++enum class BwdPart { Main, Legacy };
++
++// Defined in flash_bwd_aligned.h (included by the Main units only).
+ template<typename Kernel_traits, bool Is_dropout, bool Is_causal>
++void run_flash_bwd_main(Flash_bwd_params &params, cudaStream_t stream);
++
++template<typename Kernel_traits, bool Is_dropout, bool Is_causal, BwdPart Part = BwdPart::Main>
+ void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
+ #ifndef FLASHATTENTION_DISABLE_BACKWARD
+-    run_flash_bwd_seqk_parallel<Kernel_traits, Is_dropout, Is_causal>(params, stream);
++    if constexpr (Part == BwdPart::Legacy) {
++        run_flash_bwd_legacy_kernel<Kernel_traits, Is_dropout, Is_causal>(params, stream);
++    } else {
++        run_flash_bwd_main<Kernel_traits, Is_dropout, Is_causal>(params, stream);
++    }
+ #endif
+ }
+ 
+-template<typename T, bool Is_causal>
++template<typename T, bool Is_causal, BwdPart Part = BwdPart::Main>
+ void run_mha_bwd_hdim32(Flash_bwd_params &params, cudaStream_t stream) {
+     constexpr static int Headdim = 32;
+     int device;
+@@ -155,17 +192,17 @@
+     DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
+         if (max_smem_per_block >= 2 * ((3 * 128 + 2 * 128) * Headdim + 2 * 128 * 128)) { // 104 KB
+             if constexpr(!Is_dropout) {  // We can afford more registers to keep V in registers
+-                run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 128, 128, 8, 4, 4, 4, true, false, T>, Is_dropout, Is_causal>(params, stream);
++                run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 128, 128, 8, 4, 4, 4, true, false, T>, Is_dropout, Is_causal, Part>(params, stream);
+             } else {
+-                run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 128, 128, 8, 4, 4, 4, false, false, T>, Is_dropout, Is_causal>(params, stream);
++                run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 128, 128, 8, 4, 4, 4, false, false, T>, Is_dropout, Is_causal, Part>(params, stream);
+             }
+         } else {  // 96 KB
+-            run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 128, 128, 8, 4, 4, 4, true, false, T>, Is_dropout, Is_causal>(params, stream);
++            run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 128, 128, 8, 4, 4, 4, true, false, T>, Is_dropout, Is_causal, Part>(params, stream);
+         }
+     });
+ }
+ 
+-template<typename T, bool Is_causal>
++template<typename T, bool Is_causal, BwdPart Part = BwdPart::Main>
+ void run_mha_bwd_hdim64(Flash_bwd_params &params, cudaStream_t stream) {
+     constexpr static int Headdim = 64;
+     int device;
+@@ -185,13 +222,13 @@
+         // run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 128, 64, 8, 4, 2, 4, false, false, T>, Is_dropout>(params, stream);
+         // This is slightly faster. We want to split M more so we need fewer registers to store LSE.
+         if (max_smem_per_block >= 144 * 1024) {
+-            run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 128, 128, 8, 4, 4, 4, false, false, T>, Is_dropout, Is_causal>(params, stream);
++            run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 128, 128, 8, 4, 4, 4, false, false, T>, Is_dropout, Is_causal, Part>(params, stream);
+             // This has a lot of register spilling
+             // run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 128, 128, 8, 4, 4, 4, true, false, T>, Is_dropout>(params, stream);
+         } else {
+             // if (params.h == params.h_k) {
+                 // run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 128, 8, 2, 4, 4, false, false, T>, Is_dropout>(params, stream);
+-            run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 128, 8, 2, 4, 4, true, false, T>, Is_dropout, Is_causal>(params, stream);
++            run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 128, 8, 2, 4, 4, true, false, T>, Is_dropout, Is_causal, Part>(params, stream);
+                 // run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 128, 64, 8, 4, 2, 4, false, false, T>, Is_dropout>(params, stream);
+                 // run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 128, 64, 8, 4, 2, 4, true, false, T>, Is_dropout>(params, stream);
+             // } else {
+@@ -210,7 +247,7 @@
+     // run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 128, 64, 4, 4, 2, 4, false, false, T>>(params, stream);
+ }
+ 
+-template<typename T, bool Is_causal>
++template<typename T, bool Is_causal, BwdPart Part = BwdPart::Main>
+ void run_mha_bwd_hdim96(Flash_bwd_params &params, cudaStream_t stream) {
+     constexpr static int Headdim = 96;
+     int device;
+@@ -225,18 +262,18 @@
+     DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
+         if (max_smem_per_block >= 116 * 1024) {
+             if constexpr(!Is_dropout) {  // 92KB
+-                run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 128, 8, 2, 4, 4, true, false, T>, Is_dropout, Is_causal>(params, stream);
++                run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 128, 8, 2, 4, 4, true, false, T>, Is_dropout, Is_causal, Part>(params, stream);
+             } else {  // 116 KB
+                 // This is faster for dropout since we don't have many registers to spare
+-                run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 128, 8, 2, 4, 4, false, false, T>, Is_dropout, Is_causal>(params, stream);
++                run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 128, 8, 2, 4, 4, false, false, T>, Is_dropout, Is_causal, Part>(params, stream);
+             }
+         } else {
+-            run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 128, 8, 2, 4, 4, true, false, T>, Is_dropout, Is_causal>(params, stream);
++            run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 128, 8, 2, 4, 4, true, false, T>, Is_dropout, Is_causal, Part>(params, stream);
+         }
+     });
+ }
+ 
+-template<typename T, bool Is_causal>
++template<typename T, bool Is_causal, BwdPart Part = BwdPart::Main>
+ void run_mha_bwd_hdim128(Flash_bwd_params &params, cudaStream_t stream) {
+     constexpr static int Headdim = 128;
+     int device;
+@@ -254,7 +291,7 @@
+         // Out of these three, the 2nd one is slightly faster (2% faster than the first). Idk why.
+         // run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 128, 8, 2, 2, 2, false, false, T>>(params, stream);
+         if (max_smem_per_block >= 144 * 1024) {
+-            run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 128, 8, 2, 4, 2, false, false, T>, Is_dropout, Is_causal>(params, stream);
++            run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 128, 8, 2, 4, 2, false, false, T>, Is_dropout, Is_causal, Part>(params, stream);
+             // run_flash_bwd_seqk_parallel<Flash_bwd_kernel_traits<Headdim, 128, 128, 8, 4, 4, 4, false, false, T>, Is_dropout>(params, stream);
+             // run_flash_bwd_seqk_parallel<Flash_bwd_kernel_traits<Headdim, 128, 128, 8, 4, 4, 4, false, true, T>, Is_dropout>(params, stream);
+             // run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 128, 8, 2, 4, 2, true, false, T>, Is_dropout>(params, stream);
+@@ -262,7 +299,7 @@
+             // run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 128, 64, 8, 4, 2, 2, true, false, T>, Is_dropout>(params, stream);
+         } else {
+             // run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 64, 8, 4, 2, 2, false, false, T>, Is_dropout>(params, stream);
+-            run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 64, 8, 4, 2, 2, true, false, T>, Is_dropout, Is_causal>(params, stream);
++            run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 64, 8, 4, 2, 2, true, false, T>, Is_dropout, Is_causal, Part>(params, stream);
+         }
+         // run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 128, 8, 2, 4, 4, false, false, T>>(params, stream);
+ 
+@@ -270,7 +307,7 @@
+     });
+ }
+ 
+-template<typename T, bool Is_causal>
++template<typename T, bool Is_causal, BwdPart Part = BwdPart::Main>
+ void run_mha_bwd_hdim192(Flash_bwd_params &params, cudaStream_t stream) {
+     constexpr static int Headdim = 192;
+     int device;
+@@ -283,14 +320,14 @@
+     }
+     DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
+         if (max_smem_per_block >= 136 * 1024) {
+-            run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 64, 8, 4, 2, 2, false, false, T>, Is_dropout, Is_causal>(params, stream);
++            run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 64, 8, 4, 2, 2, false, false, T>, Is_dropout, Is_causal, Part>(params, stream);
+         } else {
+-            run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 64, 8, 4, 2, 2, true, true, T>, Is_dropout, Is_causal>(params, stream);
++            run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 64, 8, 4, 2, 2, true, true, T>, Is_dropout, Is_causal, Part>(params, stream);
+         }
+     });
+ }
+ 
+-template<typename T, bool Is_causal>
++template<typename T, bool Is_causal, BwdPart Part = BwdPart::Main>
+ void run_mha_bwd_hdim256(Flash_bwd_params &params, cudaStream_t stream) {
+     constexpr static int Headdim = 256;
+     int device;
+@@ -303,12 +340,12 @@
+     }
+     DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
+         if (max_smem_per_block >= 176 * 1024) {  // H100
+-            run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 64, 8, 4, 2, 2, false, false, T>, Is_dropout, Is_causal>(params, stream);
++            run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 64, 8, 4, 2, 2, false, false, T>, Is_dropout, Is_causal, Part>(params, stream);
+         } else if (max_smem_per_block >= 144 * 1024) {  // A100, we don't do double buffering to save smem
+-            run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 64, 8, 4, 2, 2, false, true, T>, Is_dropout, Is_causal>(params, stream);
++            run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 64, 8, 4, 2, 2, false, true, T>, Is_dropout, Is_causal, Part>(params, stream);
+         } else { // sm86 and sm89, max smem is 99 KB. Only works without dropout. V in regs and no double buffering.
+             if constexpr (!Is_dropout) {
+-                run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 32, 8, 4, 1, 2, true, true, T>, false, Is_causal>(params, stream);
++                run_flash_bwd<Flash_bwd_kernel_traits<Headdim, 64, 32, 8, 4, 1, 2, true, true, T>, false, Is_causal, Part>(params, stream);
+             }
+         }
+     });
+diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__pycache__' '--exclude=stream_cqsa' '--exclude=frozen' v11/csrc/flash_attn/src/flash_fwd_kernel.h v12b/csrc/flash_attn/src/flash_fwd_kernel.h
+--- v11/csrc/flash_attn/src/flash_fwd_kernel.h	2026-09-12 01:33:47.693871000 -0400
++++ v12b/csrc/flash_attn/src/flash_fwd_kernel.h	2026-09-22 22:11:20.653051000 -0400
+@@ -64,6 +64,17 @@
+     // them as runtime branches (used for the non-causal CQS-on case, whose
+     // compile-time-on instantiation mis-compiles into 2.3x the instructions).
+     const bool Is_cqs = (Cqs_mode == 2) ? params.cqs_enabled : (Cqs_mode == 1);
++#ifdef CQSA_NO_ELEMENT_PATH
++    // next/ v11x (experiment build, -DCQSA_NO_ELEMENT_PATH): the per-element
++    // mask path is compiled OUT. Every apply_mask call receives the constant
++    // tile state 0 ("clear"), so after inlining the CQS-on instantiation holds
++    // only the live-tile loop, the clear masking-step path and the upstream
++    // causal mask. It is CORRECT ONLY for patterns with no mixed tile and no
++    // masked masking-step (diagonal) tile: the plain and all-zero patterns.
++    // Any real CQS pattern trips the flag below and the CTA poisons its rows
++    // with NaN before the epilogue, so a wrong result can never be silent.
++    bool cqs_needs_element_path = false;
++#endif
+ 
+     using Element = typename Kernel_traits::Element;
+     using ElementAccum = typename Kernel_traits::ElementAccum;
+@@ -370,8 +381,13 @@
+         const FLASH_NAMESPACE::CqsColSummary cqs_cs_m = FLASH_NAMESPACE::cqs_col_summary_c(
+             params.cqs_blk_or, params.cqs_blk_and, params.cqs_num_blocks,
+             n_block * kBlockN, kBlockN, binfo.actual_seqlen_k);
++#ifdef CQSA_NO_ELEMENT_PATH
++        cqs_needs_element_path |= Is_cqs && !FLASH_NAMESPACE::cqs_tile_clear_c(cqs_rs, cqs_cs_m, params.cqs_blk_or);
++        constexpr int cqs_ts = 0;
++#else
+         const int cqs_ts = !Is_cqs ? 0
+             : (FLASH_NAMESPACE::cqs_tile_clear_c(cqs_rs, cqs_cs_m, params.cqs_blk_or) ? 0 : 1);
++#endif
+         Tensor acc_s = partition_fragment_C(tiled_mma, Shape<Int<kBlockM>, Int<kBlockN>>{});  // (MMA=4, MMA_M, MMA_N)
+         clear(acc_s);
+         FLASH_NAMESPACE::cp_async_wait<0>();
+@@ -491,8 +507,13 @@
+     }
+     for (; n_cur >= n_block_min; ) {
+         n_block = n_cur;
++#ifdef CQSA_NO_ELEMENT_PATH
++        cqs_needs_element_path |= Is_cqs && !FLASH_NAMESPACE::cqs_tile_clear_c(cqs_rs, cqs_cs_cur, params.cqs_blk_or);
++        constexpr int cqs_ts = 0;
++#else
+         const int cqs_ts = !Is_cqs ? 0
+             : (FLASH_NAMESPACE::cqs_tile_clear_c(cqs_rs, cqs_cs_cur, params.cqs_blk_or) ? 0 : 1);
++#endif
+ 
+         Tensor acc_s = partition_fragment_C(tiled_mma, Shape<Int<kBlockM>, Int<kBlockN>>{});  // (MMA=4, MMA_M, MMA_N)
+         clear(acc_s);
+@@ -570,6 +591,17 @@
+ 
+     // Epilogue
+ 
++#ifdef CQSA_NO_ELEMENT_PATH
++    // CTA-uniform (the verdicts are). NaN in acc_o survives the normalisation
++    // below and reaches both the fp32 and the fp16 output; NaN in row_max
++    // makes the lse NaN as well.
++    if (cqs_needs_element_path) {
++        #pragma unroll
++        for (int i = 0; i < size(acc_o); ++i) { acc_o(i) = __int_as_float(0x7fc00000); }
++        #pragma unroll
++        for (int mi = 0; mi < size(softmax.row_max); ++mi) { softmax.row_max(mi) = __int_as_float(0x7fc00000); }
++    }
++#endif
+     Tensor lse = softmax.template normalize_softmax_lse<Is_dropout>(acc_o, params.scale_softmax, params.rp_dropout);
+ 
+     Tensor caccO = make_identity_tensor(Shape<Int<kBlockM>, Int<kHeadDim>>{});    // (BLK_M,BLK_K) -> (blk_m,blk_k)
+diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__pycache__' '--exclude=stream_cqsa' '--exclude=frozen' v11/csrc/flash_attn/src/flash.h v12b/csrc/flash_attn/src/flash.h
+--- v11/csrc/flash_attn/src/flash.h	2026-08-12 21:30:06.416705000 -0400
++++ v12b/csrc/flash_attn/src/flash.h	2026-09-23 13:18:33.073627000 -0400
+@@ -7,6 +7,7 @@
+ #include "namespace_config.h"
+ 
+ #include <cuda.h>
++#include <vector_types.h>  // int2 (cqs_bwd_runs)
+ #include <vector>
+ 
+ #include <ATen/cuda/CUDAGeneratorImpl.h> // For at::Generator and at::PhiloxCudaState
+@@ -229,6 +230,20 @@
+ 
+     bool deterministic;
+     index_t dq_accum_split_stride;
++
++    // next/ v12b: routing between the two CQS-on backward instantiations.
++    // Null route: no census ran (a CQS-off call, or a CQS-on call the host
++    // sent to LEGACY), and the one kernel launched computes the call.
++    // Otherwise the census (cqs_census_bwd.cu) has written *cqs_bwd_route
++    // (0: every visited tile is fully live or fully masked, so the ALIGNED
++    // backward computes the call; nonzero: a mixed tile or a run-table
++    // overflow, so LEGACY -- v11's CQS backward -- does) and, per column
++    // block of the backward's tile shape, the live m blocks as runs {hi, lo}
++    // in descending m, kCqsBwdRunSlots slots per column block, closed by
++    // {-1, -1}. Both kernels are launched on the stream; the CTAs of the one
++    // not chosen return at once, so no host sync is needed.
++    int * __restrict__ cqs_bwd_route;
++    const int2 * __restrict__ cqs_bwd_runs;
+ };
+ 
+ ////////////////////////////////////////////////////////////////////////////////////////////////////
+@@ -236,6 +251,12 @@
+ template<typename T, int Headdim, bool Is_causal> void run_mha_fwd_(Flash_fwd_params &params, cudaStream_t stream);
+ template<typename T, int Headdim, bool Is_causal> void run_mha_fwd_splitkv_dispatch(Flash_fwd_params &params, cudaStream_t stream);
+ 
++// next/ v12b: the whole backward (preprocess, census + ALIGNED or plain loop,
++// LEGACY when needed, convert_dQ); flash_bwd_hdim*_sm80.cu.
+ template<typename T, int Headdim, bool Is_causal> void run_mha_bwd_(Flash_bwd_params &params, cudaStream_t stream);
++// next/ v12b: only v11's dq/dk/dv kernel (LEGACY), in its own translation
++// units (flash_bwd_hdim*_legacy_sm80.cu) so its long compile is paid only
++// when it changes. Called by run_mha_bwd_ between its other launches.
++template<typename T, int Headdim, bool Is_causal> void run_mha_bwd_legacy_(Flash_bwd_params &params, cudaStream_t stream);
+ 
+ }  // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=*.so' '--exclude=cutlass' '--exclude=__pycache__' '--exclude=stream_cqsa' '--exclude=frozen' v11/setup.py v12b/setup.py
+--- v11/setup.py	2026-09-12 01:33:47.650394000 -0400
++++ v12b/setup.py	2026-09-23 13:16:41.997689000 -0400
+@@ -1,4 +1,3 @@
+-import glob
+ import os
+ import re
+ from pathlib import Path
+@@ -74,57 +73,35 @@
+     base = [
+         "csrc/flash_attn/flash_api.cpp",
+         "csrc/flash_attn/src/cqsa_kernel.cu",
++        "csrc/flash_attn/src/cqs_census_bwd.cu",
+     ]
++    # next/ v12b: every backward (dtype, hdim) is two translation units:
++    # flash_bwd_*_sm80.cu (the preprocess, the census-driven ALIGNED backward
++    # for CQS-on calls, the same loop without a run table for CQS-off calls,
++    # and convert_dQ) and flash_bwd_*_legacy_sm80.cu (v11's CQS backward,
++    # every feature switch, for mixed tiles and everything ALIGNED does not
++    # serve). LEGACY units first: ninja starts jobs in this order and they
++    # are the long ones.
++    def bwd(dtypes):
++        return [
++            f"csrc/flash_attn/src/flash_bwd_hdim{hd}_{dt}{part}_sm80.cu"
++            for part in ("_legacy", "") for dt in dtypes for hd in (64, 128)
++        ]
+ 
+-    kernel_set = cqsa_kernel_set()
+-    if kernel_set == "full":
+-        return (
+-            base
+-            + sorted(glob.glob(str(THIS_DIR / "csrc" / "flash_attn" / "src" / "flash_fwd_*.cu")))
+-            + sorted(glob.glob(str(THIS_DIR / "csrc" / "flash_attn" / "src" / "flash_bwd_*.cu")))
+-        )
+-    if kernel_set == "a100_fp16_hdim128":
+-        return base + [
+-            "csrc/flash_attn/src/flash_fwd_hdim128_fp16_sm80.cu",
+-            "csrc/flash_attn/src/flash_fwd_hdim128_fp16_causal_sm80.cu",
+-            "csrc/flash_attn/src/flash_bwd_hdim128_fp16_sm80.cu",
++    def fwd(dtypes):
++        return [
++            f"csrc/flash_attn/src/flash_fwd_hdim{hd}_{dt}{causal}_sm80.cu"
++            for dt in dtypes for hd in (64, 128) for causal in ("", "_causal")
+         ]
++
++    kernel_set = cqsa_kernel_set()
+     if kernel_set == "common":
+-        # Shipping target: both dtypes users actually train in, and the two head
+-        # dims that cover most transformers (Llama 128, GPT-2 64). Exotic head
+-        # dims need CQSA_KERNEL_SET=full.
+-        return base + [
+-            "csrc/flash_attn/src/flash_fwd_hdim64_fp16_sm80.cu",
+-            "csrc/flash_attn/src/flash_fwd_hdim64_fp16_causal_sm80.cu",
+-            "csrc/flash_attn/src/flash_fwd_hdim128_fp16_sm80.cu",
+-            "csrc/flash_attn/src/flash_fwd_hdim128_fp16_causal_sm80.cu",
+-            "csrc/flash_attn/src/flash_fwd_hdim64_bf16_sm80.cu",
+-            "csrc/flash_attn/src/flash_fwd_hdim64_bf16_causal_sm80.cu",
+-            "csrc/flash_attn/src/flash_fwd_hdim128_bf16_sm80.cu",
+-            "csrc/flash_attn/src/flash_fwd_hdim128_bf16_causal_sm80.cu",
+-            "csrc/flash_attn/src/flash_bwd_hdim64_fp16_sm80.cu",
+-            "csrc/flash_attn/src/flash_bwd_hdim128_fp16_sm80.cu",
+-            "csrc/flash_attn/src/flash_bwd_hdim64_bf16_sm80.cu",
+-            "csrc/flash_attn/src/flash_bwd_hdim128_bf16_sm80.cu",
+-        ]
++        # Shipping target: fp16 + bf16, head dims 64 and 128.
++        return base + bwd(("fp16", "bf16")) + fwd(("fp16", "bf16"))
+     if kernel_set == "a100_fp16_hdim64_128":
+-        return base + [
+-            "csrc/flash_attn/src/flash_fwd_hdim64_fp16_sm80.cu",
+-            "csrc/flash_attn/src/flash_fwd_hdim64_fp16_causal_sm80.cu",
+-            "csrc/flash_attn/src/flash_fwd_hdim128_fp16_sm80.cu",
+-            "csrc/flash_attn/src/flash_fwd_hdim128_fp16_causal_sm80.cu",
+-            "csrc/flash_attn/src/flash_bwd_hdim64_fp16_sm80.cu",
+-            "csrc/flash_attn/src/flash_bwd_hdim128_fp16_sm80.cu",
+-        ]
+-    if kernel_set == "a100_fp16_hdim64_noncau":
+-        return base + [
+-            "csrc/flash_attn/src/flash_fwd_hdim64_fp16_sm80.cu",
+-            "csrc/flash_attn/src/flash_bwd_hdim64_fp16_sm80.cu",
+-        ]
++        return base + bwd(("fp16",)) + fwd(("fp16",))
+     raise RuntimeError(
+-        f"Unknown CQSA_KERNEL_SET='{kernel_set}'. "
+-        "Expected one of: full, common, a100_fp16_hdim128, "
+-        "a100_fp16_hdim64_128, a100_fp16_hdim64_noncau."
++        f"Unknown CQSA_KERNEL_SET='{kernel_set}' for v12b. Expected one of: common, a100_fp16_hdim64_128."
+     )
+ 
+ 
+@@ -161,26 +138,30 @@
+             "--expt-extended-lambda",
+             "--use_fast_math",
+         ] + ([
+-            # Measurement build: compiles CQS out of the backward kernel to
+-            # recover the stock-FlashAttention baseline. Not correct; A/B only.
+-            "-DCQSA_BWD_NO_CQS",
+-        ] if os.getenv("CQSA_BWD_NO_CQS") else []) + [
++            # Experiment build (v11x): the forward's per-element mask path is
++            # compiled out; valid for the plain and all-zero patterns only, any
++            # other pattern comes back as NaN (see flash_fwd_kernel.h).
++            "-DCQSA_NO_ELEMENT_PATH",
++        ] if os.getenv("CQSA_NO_ELEMENT_PATH") else []) + ([
++            # Build diagnostics: source lines in the SASS, the ptxas resource
++            # report per instantiation, and per-phase compile times (ptxas
++            # included) appended to this CSV, one row per phase and TU.
++            "-lineinfo", "-Xptxas", "-v", "-time", os.environ["CQSA_NVCC_TIME_CSV"],
++        ] if os.getenv("CQSA_NVCC_TIME_CSV") else []) + [
+             "--threads",
+             str(nvcc_threads),
+             *arch_flags,
+         ],
+     }
+ 
+-    define_macros = []
+-    if kernel_set != "full":
+-        define_macros.append(("CQSA_MINIMAL_FWD_KERNELS", None))
+-    if kernel_set == "a100_fp16_hdim64_noncau":
+-        define_macros.append(("CQSA_MINIMAL_HDIM64_NONCAUSAL_ONLY", None))
++    if os.getenv("CQSA_BWD_NO_CQS"):
++        raise RuntimeError("v12b: CQSA_BWD_NO_CQS is a v11x measurement flag; v12b's CQS-off backward is upstream's loop")
++    define_macros = [("CQSA_MINIMAL_FWD_KERNELS", None)]
+     if kernel_set == "common":
+         define_macros.append(("CQSA_MINIMAL_BOTH_DTYPES", None))
+ 
+     return CUDAExtension(
+-        name="cqsa_cuda_next_v11",
++        name="cqsa_cuda_next_v12b",
+         sources=sources,
+         include_dirs=[
+             str(THIS_DIR / "csrc" / "flash_attn"),

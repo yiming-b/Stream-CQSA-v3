@@ -138,7 +138,8 @@ def cqs_fwd(mod, q, k, v, tabs, causal):
     """CQS on, as interface.flash_attn_func_cqs_group_bits calls it (fp32 out). Returns (out16, lse). Use v11
     for real patterns: v11x/v12b are built with -DCQSA_NO_ELEMENT_PATH and poison a real pattern's forward."""
     bits, bo, ba = tabs
-    out = torch.empty_like(q)
+    # both contiguous: the entry requires acc's strides == out's, and q may be a prefix view (c=73 part)
+    out = torch.empty(q.shape, device=q.device, dtype=q.dtype)
     acc = torch.empty(q.shape, device=q.device, dtype=torch.float32)
     out16, lse, _, _ = mod.fwd_cqs_group_bits(q, k, v, out, None, 0.0, q.shape[-1] ** -0.5, bool(causal), -1, -1, 0.0,
                                               False, None, bits, bo, ba, CQS_BLK_SIZE, acc, None, None)
@@ -151,7 +152,8 @@ def cqs_bwd(mod, do, q, k, v, o16, lse, tabs, causal, flags=None, deterministic=
     dq, dk, dv = (torch.empty_like(x) for x in (q, k, v))
     args = [do, q, k, v, o16, lse, dq, dk, dv, None, 0.0, q.shape[-1] ** -0.5, bool(causal), -1, -1, 0.0,
             bool(deterministic), None, None]
-    args += [None, None, None, None, dsum] if tabs is None else [tabs[0], tabs[1], tabs[2], CQS_BLK_SIZE, dsum]
+    if tabs is not None or dsum is not None or flags is not None:     # upstream's `bwd` (flash_attn_2_cuda) stops here
+        args += [None, None, None, None, dsum] if tabs is None else [tabs[0], tabs[1], tabs[2], CQS_BLK_SIZE, dsum]
     if flags is not None:
         args.append(int(flags))
     mod.bwd(*args)
@@ -227,6 +229,13 @@ def live_tile_fraction(bits, block_m, block_n, causal):
     return live / visited
 
 
+def fa_module():
+    """flash_attn's extension (flash_attn_2_cuda): its fwd/bwd take the same positional arguments as ours
+    (without the CQS tail), so plain_fwd / cqs_bwd(tabs=None) call it directly."""
+    import flash_attn_2_cuda
+    return flash_attn_2_cuda
+
+
 _KERNEL_NAMES = {}
 
 
@@ -253,15 +262,21 @@ def fa2_arms(L, D, causal, iters):
     o = flash_attn_func(q, k, v, causal=causal, softmax_scale=D ** -0.5)
     do = torch.randn_like(o)
     fn = lambda: torch.autograd.grad(o, (q, k, v), do, retain_graph=True)
-    r["flash_attn_bwd_ms"], r["flash_attn_bwd_min_ms"] = timed(fn, iters)
+    r["flash_attn_bwd_ms"], r["flash_attn_bwd_min_ms"] = timed(fn, iters, warm=2)
     kernel_names("flash_attn_bwd", fn)
-    del q, k, v, o, do
+    # the same backward called like our arms: the extension's `bwd` directly, no autograd
+    fa = fa_module()
+    qd, kd, vd, dod = (x.detach() for x in (q, k, v, do))
+    od, lsed = plain_fwd(fa, qd, kd, vd, causal)
+    fn = lambda: cqs_bwd(fa, dod, qd, kd, vd, od, lsed, None, causal)
+    r["flash_attn_direct_bwd_ms"], r["flash_attn_direct_bwd_min_ms"] = timed(fn, iters)
+    del q, k, v, o, do, qd, kd, vd, dod, od, lsed
     q, k, v = (torch.randn(1, H, L, D, device=DEV, dtype=DT, requires_grad=True) for _ in range(3))
     with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
         o = F.scaled_dot_product_attention(q, k, v, is_causal=causal, scale=D ** -0.5)
         do = torch.randn_like(o)
         fn = lambda: torch.autograd.grad(o, (q, k, v), do, retain_graph=True)
-        r["sdpa_flash_bwd_ms"], r["sdpa_flash_bwd_min_ms"] = timed(fn, iters)
+        r["sdpa_flash_bwd_ms"], r["sdpa_flash_bwd_min_ms"] = timed(fn, iters, warm=2)
         kernel_names("sdpa_flash_bwd", fn)
     del q, k, v, o, do
     torch.cuda.empty_cache()
@@ -322,9 +337,10 @@ def part_config(res, key, N, task, D, causal, iters, patterns=("real", "zero"), 
             row("v12b_legacy", pattern, lambda: cqs_bwd(MODS["v12b"], do, q, k, v, o16, lse, tabs, causal,
                                                          flags=FORCE_LEGACY), ref)
         del ref, o16, lse
-    kernel_names("v12b_real", lambda: cqs_bwd(MODS["v12b"], do, q, k, v, *cqs_fwd(MODS["v11"], q, k, v, real, causal),
-                                              real, causal, flags=0))
-    del q, k, v, do
+    o16, lse = cqs_fwd(MODS["v11"], q, k, v, real, causal)
+    kernel_names(f"v12b_real_D{D}_causal{int(causal)}", lambda: cqs_bwd(MODS["v12b"], do, q, k, v, o16, lse, real, causal, flags=0))
+    kernel_names(f"v11_real_D{D}_causal{int(causal)}", lambda: cqs_bwd(MODS["v11"], do, q, k, v, o16, lse, real, causal))
+    del q, k, v, do, o16, lse
     torch.cuda.empty_cache()
     return rows
 
@@ -379,12 +395,22 @@ def part_c73(res, N, iters):
             out = cqs_bwd(mod, dos, qs, ks, vs, o16, lse, tabs if cqs else None, True, flags=flags)
         return out
 
+    fa = fa_module()
+    fa_items = [(qs, ks, vs, dos) + tuple(plain_fwd(fa, qs, ks, vs, True)) for qs, ks, vs, dos, *_ in items]
+
+    def run_fa():
+        out = None
+        for qs, ks, vs, dos, o, l in fa_items:
+            out = cqs_bwd(fa, dos, qs, ks, vs, o, l, None, True)
+        return out
+
     r = dict(gpu=GPU, N=N, c=73, tasks=len(tasks), L_min=min(Ls), L_max=Lmax, sum_L=sum(Ls), D=D, causal=True,
              pattern="real", routes=routes)
     for arm, fn in (("v11", lambda: run_all(MODS["v11"])), ("v12b", lambda: run_all(MODS["v12b"], flags=0)),
                     ("v12b_legacy", lambda: run_all(MODS["v12b"], flags=FORCE_LEGACY)),
-                    ("v11x_nocqs", lambda: run_all(MODS["v11x"], cqs=False))):
+                    ("v11x_nocqs", lambda: run_all(MODS["v11x"], cqs=False)), ("flash_attn_loop", run_fa)):
         r[f"{arm}_ms"], r[f"{arm}_min_ms"] = timed(fn, iters)
+    del fa_items
     # identity on every task: v12b dk/dv == v11's
     eq, dq_max = True, 0.0
     for qs, ks, vs, dos, o16, lse, tabs in items:
@@ -404,12 +430,14 @@ def part_c73(res, N, iters):
     r["flash_attn_bwd_sum_ms"], r["sdpa_flash_bwd_sum_ms"] = fa_tot, sd_tot
     mono = fa2_arms(N, D, True, iters)
     r["monolithic_flash_attn_bwd_ms"], r["monolithic_sdpa_flash_bwd_ms"] = mono["flash_attn_bwd_ms"], mono["sdpa_flash_bwd_ms"]
-    for arm in ("v11", "v12b", "v12b_legacy", "v11x_nocqs"):
+    for arm in ("v11", "v12b", "v12b_legacy", "v11x_nocqs", "flash_attn_loop"):
         r[f"{arm}_ratio_vs_flash_attn"] = r[f"{arm}_ms"] / fa_tot
         r[f"{arm}_ratio_vs_sdpa"] = r[f"{arm}_ms"] / sd_tot
+        r[f"{arm}_ratio_vs_flash_attn_loop"] = r[f"{arm}_ms"] / r["flash_attn_loop_ms"]
     res["c73"] = r
     print(f"[c73] N={N} {len(tasks)} tasks L {min(Ls)}-{Lmax}: " + "  ".join(
-        f"{arm} {r[arm + '_ms']:.1f} ms (/fa {r[arm + '_ratio_vs_flash_attn']:.3f})" for arm in ("v11", "v12b", "v12b_legacy", "v11x_nocqs"))
+        f"{arm} {r[arm + '_ms']:.1f} ms (/fa loop {r[arm + '_ratio_vs_flash_attn_loop']:.3f})"
+        for arm in ("v11", "v12b", "v12b_legacy", "v11x_nocqs", "flash_attn_loop"))
           + f"  | flash_attn sum {fa_tot:.1f}  sdpa sum {sd_tot:.1f}  monolithic flash_attn {mono['flash_attn_bwd_ms']:.1f}"
           f"  routes={routes} dk/dv equal={eq} dq max|d| {dq_max:.1e}", flush=True)
 
@@ -434,6 +462,9 @@ def report(res, path_md):
              f"inside its timed region. Modules: " + ", ".join(f"{k} = `{v}`" for k, v in info.get("modules", {}).items()) + ".")
     L.append("")
     L.append("## Per-config rows (ms, median; ratio vs flash_attn bwd / vs SDPA-flash bwd)")
+    L.append("")
+    L.append("flash_attn = the package's backward through autograd (as the SDPA arm); flash_attn direct = its extension's "
+             "`bwd` called like our arms (recorded in the json as `flash_attn_direct_bwd_ms`).")
     L.append("")
     L.append("| config | L | D | causal | flash_attn | SDPA | v11x NO_CQS | v12b plain | v11 real | v12b real | v12b LEGACY real | v11 zero | v12b zero | v12b route (real) | dk/dv == v11 (real, zero) | dq max vs v11 (real) |")
     L.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
@@ -475,16 +506,18 @@ def report(res, path_md):
     if c:
         per = c["v12b_ms"] / c["sdpa_flash_bwd_sum_ms"]
         L.append(f"| c=73 N={c['N']} (L {c['L_min']}-{c['L_max']}): v12b sum / SDPA sum <= 1.45 (design: L=16159 causal) | {per:.3f} | {per <= 1.45} |")
+        L.append(f"| c=73: v12b loop / flash_attn loop (recorded) | {c['v12b_ratio_vs_flash_attn_loop']:.3f} | - |")
     L.append("")
     if c:
         L.append(f"## c=73, N={c['N']}, causal D=64, real: {c['tasks']} tasks (L {c['L_min']}-{c['L_max']}) in one timed region per arm")
         L.append("")
-        L.append("| arm | ms | / flash_attn sum | / SDPA sum |")
-        L.append("|---|---|---|---|")
-        for arm in ("v11", "v12b", "v12b_legacy", "v11x_nocqs"):
-            L.append(f"| {arm} | {c[arm + '_ms']:.1f} | {c[arm + '_ratio_vs_flash_attn']:.3f} | {c[arm + '_ratio_vs_sdpa']:.3f} |")
-        L.append(f"| flash_attn per task, summed | {c['flash_attn_bwd_sum_ms']:.1f} | 1 | - |")
-        L.append(f"| SDPA-flash per task, summed | {c['sdpa_flash_bwd_sum_ms']:.1f} | - | 1 |")
+        L.append("| arm | ms | / flash_attn loop | / flash_attn per-task sum | / SDPA per-task sum |")
+        L.append("|---|---|---|---|---|")
+        for arm in ("v11", "v12b", "v12b_legacy", "v11x_nocqs", "flash_attn_loop"):
+            L.append(f"| {arm} | {c[arm + '_ms']:.1f} | {c[arm + '_ratio_vs_flash_attn_loop']:.3f} | "
+                     f"{c[arm + '_ratio_vs_flash_attn']:.3f} | {c[arm + '_ratio_vs_sdpa']:.3f} |")
+        L.append(f"| flash_attn per task (autograd), summed | {c['flash_attn_bwd_sum_ms']:.1f} | - | 1 | - |")
+        L.append(f"| SDPA-flash per task (autograd), summed | {c['sdpa_flash_bwd_sum_ms']:.1f} | - | - | 1 |")
         L.append(f"| monolithic flash_attn at N={c['N']} | {c['monolithic_flash_attn_bwd_ms']:.1f} | - | - |")
         L.append("")
         L.append(f"Routes {c['routes']}; v12b dk/dv torch.equal to v11 on every task: {c['dk_dv_equal_vs_v11_all_tasks']}; "
@@ -535,6 +568,7 @@ def main():
                timing=f"1 warm-up + {a.iters} timed runs, CUDA events, median (min also stored)")
     print(json.dumps(res["info"]), flush=True)
     os.makedirs(os.path.dirname(a.out), exist_ok=True)
+    fa2_arms(4096, 64, True, 2)          # first-use initialisation of flash_attn / SDPA outside every timed row
     parts = []
     if "c7" in only:
         for N in Ns:

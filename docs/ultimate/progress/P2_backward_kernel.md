@@ -23,9 +23,11 @@ P2 (this package) started 13:12.
 |---|---|---|
 | read design 1/3/4/7, exp_build_ab.md, cuobjdump_v11x.md, P3 log + census, v11/upstream bwd | done 13:10 | |
 | clone v11x -> v12b, code written | done 13:33 | files below; standalone compile of the hdim64 main unit rc=0 (ALIGNED 128x128: REG 255, STACK 48-72 B vs v11x NO_CQS 112-128 B) |
-| build b1 (clean, detached, vis1) | running since 13:34 | log `next/logs/06_build_v12b_b1.log`, csv `next/logs/build_v12b_b1_nvcc_time.csv`; vis1 shared with the v12f b2 build and a v2 wheel build |
+| build b1 (clean, detached, vis1) | done 14:02, rc=0, 1697 s | log `next/logs/06_build_v12b_b1.log`, csv `next/logs/build_v12b_b1_nvcc_time.csv` (vis1 shared with the v12f b2 build and a v2 wheel build: LEGACY bwd units 1480-1530 s, main bwd units ~600 s, ptxas <= 100 s per unit); frozen copy `next/kernel/v12b/frozen/b1/` (md5 1bd3f31f...) |
 | harness / test / slurm written | done | `benchmarks/ultimate/bwd_ab.py`, `tests/test_ultimate_v12b.py`, `slurm/ultimate/bwd_ab.slurm`; CPU census-reference test passes |
-| tests/test_ultimate_v12b.py on vis1 | - | |
+| tests/test_ultimate_v12b.py on vis1 | done 14:06: 44 passed | first build, no fix needed; profiler confirms the ALIGNED kernel does the work (L=28032: census 8 us, LEGACY launch 9 us, ALIGNED 31.9 ms vs v11 65.3 ms on the shared PCIe GPU) |
+| bwd_ab --smoke on vis1 | done | every arm and check runs; timings on the shared, 100%-busy PCIe GPU are noise (not used) |
+| static report | done | `results/ultimate/v12b_static.md`: ALIGNED hdim64 128x128 causal even: 255/72 B/2176 SASS vs v11 255/224/5624, v11x NO_CQS 255/112/2152, torch-FA2 255/96/2336 |
 | SXM job bwd_ab | - | |
 | results, diff, commit | - | |
 

@@ -324,6 +324,7 @@ def main(argv=None):
         akw = dict(kw, seg_align=seg_align, shared_chunks=shared) if direction == "fwd" else \
             dict(causal=True, allow_escalation=False, max_parallel=args.npar, accumulate_on_gpu=True, seg_align=seg_align)
         rate = my_rates[arm["rates"]]
+        release_caches()          # before the warm-up: the free memory (the rank's budget) is the timed call's
         # untimed: the assignment (live-tile work model, children, the plan cache) -- a repeated call's state
         _assign(inputs[0], itr=itr, causal=True, group=None, scheduler=arm["scheduler"], split=args.split, tol=0.05,
                 max_extra_depth=2, rate=rate, budget_bytes=None,

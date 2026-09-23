@@ -11,11 +11,12 @@ unchanged). Both launch on the stream; the losing one's CTAs return at once (no 
 Rows (docs/ultimate/01_design_a100.md 7.1 P3.1; package P3 of the ultimate program):
   aligned c=7 task, N=131072 (L=56064): causal and non-causal x D in {64, 128};
   aligned c=7 task, N=524288 (L~225K): causal D=64;
-  c=73, N=131072 (73 tasks, L~16K): per-task times summed, causal D=64.
+  c=73, N=131072 (73 tasks, L~16K): per-task times summed, causal D=64;
+  mixed-tile patterns (unaligned c=7 task, random 3-bit) at N=131072, D=64: LEGACY vs v11 / v9.
 Arms: flash_attn (the FA-2 package), SDPA-flash (torch SDPA, FLASH_ATTENTION backend; the arm of every
 earlier results/ultimate row), v11 plain/zero/real, v11x plain/zero (compiled-out element path), v9
 plain/zero/real (non-causal: today's production non-causal module), v12f plain/zero/real and v12f
-zero/real with reversed row-block order. plain = CQS off (the extension's `fwd`), zero = CQS on with
+zero/real with the default row-block order (flags 0) and with ascending (4) / descending (2) forced. plain = CQS off (the extension's `fwd`), zero = CQS on with
 all-zero bits (the all-live tax), real = the task's own bits.
 Identity (in-job): v12f's out (fp32), lse and fp16 out equal v11's on every pattern (torch.equal), the
 census routes every aligned pattern to ALIGNED (route 0).
@@ -44,7 +45,9 @@ from stream_cqsa.stable_stream import build_tasks
 MODULES = {"v11": "cqsa_cuda_next_v11", "v11x": "cqsa_cuda_next_v11x", "v9": "cqsa_cuda_next_v9",
            "v12f": "cqsa_cuda_next_v12f"}
 MODS = {}
-FORCE_LEGACY, REVERSE_M = 1, 2        # cqs_fwd_flags of v12f's fwd_cqs_group_bits
+# cqs_fwd_flags of v12f's fwd_cqs_group_bits. Default (0) row-block order since build b2: descending for causal,
+# ascending for non-causal (job 14319938); b1's default was ascending everywhere.
+FORCE_LEGACY, REVERSE_M, ASCENDING_M = 1, 2, 4
 RUN_SLOTS = 16                        # kCqsRunSlots (cqs_census.h)
 ALIGNED_TILE = {64: (128, 128), 128: (128, 64)}   # CqsAlignedTile (cqs_census.h)
 
@@ -272,6 +275,7 @@ def arms_for(causal):
     if not causal:
         arms += [("v9", "plain", None), ("v9", "zero", None), ("v9", "real", None)]
     arms += [("v12f", "plain", None), ("v12f", "zero", 0), ("v12f", "real", 0),
+             ("v12f", "zero", ASCENDING_M), ("v12f", "real", ASCENDING_M),
              ("v12f", "zero", REVERSE_M), ("v12f", "real", REVERSE_M)]
     return arms
 
@@ -329,13 +333,56 @@ def part_task(res, N, configs, iters, key):
         torch.cuda.empty_cache()
 
 
+# ============================================================================ mixed tiles: LEGACY
+def part_mixed(res, N, iters, D=64):
+    """Patterns with mixed tiles, which v12f routes to LEGACY (v11's CQS-on code in its own TU): the unaligned
+    (seg_align=0) c=7 task of the same path as task56k, and a random 3-bit pattern at that L. Causal and
+    non-causal; non-causal adds v9 (today's production non-causal module). Answers whether v9 retires for
+    mixed non-causal calls too."""
+    task = min(c_tasks(N, 7, seg_align=0), key=lambda t: int(t.local_size))
+    L = int(task.local_size)
+    rows = res.setdefault("mixed", [])
+    gen = torch.Generator().manual_seed(3)
+    pats = {"unaligned": task_tables(task), "random3bit": tables(torch.randint(0, 8, (L,), generator=gen))}
+    for causal in (True, False):
+        q, k, v = gathered_qkv(task, N, D)
+        fa = fa2_arms(L, D, causal, iters)
+        mods = ("v11", "v9", "v12f") if not causal else ("v11", "v12f")
+        for pattern in pats:
+            route = census(MODS["v12f"], pats[pattern], causal, D)[0]
+            ref = None
+            for module in mods:
+                row = dict(gpu=GPU, N=N, L=L, L_mod_128=L % 128, path=list(task.path), causal=causal, D=D,
+                           module=module, pattern=pattern, flags=0 if module == "v12f" else None, **fa)
+                outs = run_arm(module, pattern, row["flags"], q, k, v, pats, causal)
+                row["ms"], row["min_ms"] = timed(lambda: run_arm(module, pattern, row["flags"], q, k, v, pats, causal), iters)
+                row["ratio_vs_flash_attn"] = row["ms"] / fa["flash_attn_ms"]
+                row["ratio_vs_sdpa"] = row["ms"] / fa["sdpa_flash_ms"]
+                if module == "v11":
+                    ref = outs
+                else:
+                    row["equal_vs_v11"] = equal_outputs(outs, ref)
+                    row["maxdiff_vs_v11"] = (outs[0].float() - ref[0].float()).abs().max().item()
+                if module == "v12f":
+                    row["census_route"] = route
+                    row["kernel_us"] = kernel_times(lambda: run_arm(module, pattern, 0, q, k, v, pats, causal))
+                rows.append(row)
+                print(f"[mixed] causal={int(causal)} D={D} L={L} {module:4s} {pattern:10s} {row['ms']:8.2f} ms"
+                      f"  /fa {row['ratio_vs_flash_attn']:.3f}" + (f"  equal_v11={row['equal_vs_v11']}" if "equal_vs_v11" in row else "")
+                      + (f"  route={route}" if module == "v12f" else ""), flush=True)
+                del outs
+        del q, k, v
+        torch.cuda.empty_cache()
+
+
 # ============================================================================ c=73 summed over tasks
 def part_c73(res, N, iters, D=64):
     """c=73, N=131072, causal D=64: every task's median summed per arm; flash_attn/SDPA per task at its L."""
     tasks = c_tasks(N, 73)
     arms = [("v11", "plain", None), ("v11", "real", None), ("v12f", "plain", None), ("v12f", "real", 0),
-            ("v12f", "real", REVERSE_M)]
-    tot = {f"{m}_{p}" + ("" if f in (None, 0) else "_rev"): 0.0 for m, p, f in arms}
+            ("v12f", "real", ASCENDING_M), ("v12f", "real", REVERSE_M)]
+    sfx = {None: "", 0: "", ASCENDING_M: "_asc", REVERSE_M: "_rev"}
+    tot = {f"{m}_{p}{sfx[f]}": 0.0 for m, p, f in arms}
     tot.update(flash_attn=0.0, sdpa_flash=0.0)
     equal, routes, Ls, ktot = True, set(), [], {}
     for t in tasks:
@@ -349,7 +396,7 @@ def part_c73(res, N, iters, D=64):
         routes.add(census(MODS["v12f"], pats["real"], True, D)[0])
         ref = None
         for module, pattern, flags in arms:
-            name = f"{module}_{pattern}" + ("" if flags in (None, 0) else "_rev")
+            name = f"{module}_{pattern}{sfx[flags]}"
             outs = run_arm(module, pattern, flags, q, k, v, pats, True)
             tot[name] += timed(lambda: run_arm(module, pattern, flags, q, k, v, pats, True), iters)[0]
             if (module, pattern, flags) == ("v12f", "real", 0):
@@ -418,6 +465,17 @@ def report(res):
                       f"{c['monolithic_sdpa_flash_ms']:.1f}). Census routes over the tasks: {c['census_routes']}; v12f real "
                       f"equal to v11 on every task: {c['v12f_real_equal_v11_all_tasks']}. v12f real (flags 0) device time "
                       f"summed over the tasks by kernel (us): {c.get('v12f_real_kernel_us_sum')}.", ""]
+    rows = res.get("mixed", [])
+    if rows:
+        lines += [f"## Mixed-tile patterns (LEGACY), N={rows[0]['N']} unaligned c=7 task (L={rows[0]['L']}), D={rows[0]['D']}", "",
+                  "| causal | pattern | module | ms | /flash_attn | equal v11 | route | census us | ALIGNED us | LEGACY us |",
+                  "|---|---|---|---|---|---|---|---|---|---|"]
+        for r in rows:
+            ku = r.get("kernel_us", {})
+            kc = " | ".join(f"{ku[k]:.1f}" if isinstance(ku.get(k), float) else "-" for k in ("census", "aligned", "legacy"))
+            lines.append(f"| {int(r['causal'])} | {r['pattern']} | {r['module']} | {r['ms']:.2f} | {r['ratio_vs_flash_attn']:.3f} | "
+                         f"{r.get('equal_vs_v11', '-')} | {r.get('census_route', '-')} | {kc} |")
+        lines.append("")
     lines += ["## Targets", ""]
     rows = res.get("task56k", [])
     for causal, D in ((True, 64), (True, 128), (False, 64), (False, 128)):
@@ -459,7 +517,8 @@ def main():
     os.makedirs(os.path.dirname(a.out), exist_ok=True)
     parts = ((part_task, (n56, ((True, 64), (True, 128), (False, 64), (False, 128)), iters, "task56k")),
              (part_task, (n225, ((True, 64),), iters, "task225k")),
-             (part_c73, (n73, iters)))
+             (part_c73, (n73, iters)),
+             (part_mixed, (n56, iters)))
     for part, args in parts:
         try:
             part(res, *args)

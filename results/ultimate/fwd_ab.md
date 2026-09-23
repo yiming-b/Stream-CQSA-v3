@@ -92,3 +92,43 @@ Monolithic flash_attn at N=131072: 90.3 ms (SDPA-flash 95.8). Census routes over
 - causal=1 D=128: v12f zero / v11 plain = **1.008** (target <= 1.05); v12f zero / v12f plain = 1.019; v12f real / flash_attn = **0.753**
 - causal=0 D=64: v12f zero / v11 plain = **0.964** (target <= 1.05); v12f zero / v12f plain = 0.964; v12f real / flash_attn = **0.762**
 - causal=0 D=128: v12f zero / v11 plain = **0.994** (target <= 1.05); v12f zero / v12f plain = 1.001; v12f real / flash_attn = **0.779**
+
+## Verdict (P3, written from `fwd_ab.json` of job 14319938; v12f build b1, `next/kernel/v12f/frozen/b1`)
+
+In build b1 `flags 0` = ascending row-block order everywhere, `flags 2` = descending. Every v12f row is `torch.equal`
+to v11 (fp32 out, lse, fp16 out) and the census routed every aligned pattern to ALIGNED (route 0), all 73 c=73 tasks included.
+
+| target (package P3) | measured | verdict |
+|---|---|---|
+| causal D=64 L=56064: v12f zero <= 1.05x v11 plain | 17.00 / 17.30 = **0.983** (descending 16.19: 0.936) | met |
+| causal D=64 L=56064: v12f real <= 0.82x flash_attn | 12.99 / 18.23 = **0.713** (descending 0.692; vs SDPA 0.661 / 0.642) | met |
+| non-causal v12f zero <= 1.05x plain (retires v9) | D=64 32.29 / 33.49 = **0.964**; D=128 56.91 / 56.85 = **1.001** | met |
+| causal D=128 L=56064 | zero / v11 plain 1.008 (descending 0.947); real / flash_attn 0.753 (0.731) | recorded |
+| causal D=64 L=224640 | zero / v11 plain 0.982 (descending 0.933); real / flash_attn 0.773 (0.761) | recorded |
+| c=73 N=131072, 73 tasks summed, causal D=64 | real 113.9 ms (descending 108.4) = 0.927 (0.882) x flash_attn per-task sum 122.9, 0.692 (0.658) x v11 real 164.7, 1.261 (1.200) x monolithic flash_attn 90.3 | recorded |
+
+1. **The all-live tax is gone.** v11's zero/plain is 1.301 at 56K causal D=64 (22.51 / 17.30; v11x without the element
+   path 1.127); v12f's ALIGNED on the same all-live pattern is 0.987x its own CQS-off kernel (0.940 descending):
+   22.51 -> 17.00 ms. D=128: v11 1.369 -> v12f 1.019 (0.957 descending); 225K: v11 1.225 -> 0.980.
+   ALIGNED visits exactly the CQS-off kernel's tiles on the zero pattern and runs them as fast (3.8-7.2K SASS vs
+   3.3-6.7K, `v12f_static.md`).
+2. **Dead-tile skipping now pays in full.** v12f real / v11 real = 0.727 at 56K causal D=64 (12.99 vs 17.88 ms),
+   0.708 D=128, 0.766 at 225K: with 22.2% of the causal pair work masked on the c=7 aligned task the forward runs
+   at 0.764x (56K) and 0.752x (225K) its all-live time, close to the work ratio.
+3. **Non-causal: one kernel, v9 retired.** v11's non-causal CQS-on instantiation is 6.1x plain (204 ms, the F15
+   mis-compile); v12f routes aligned non-causal calls to ALIGNED: zero 32.29 ms vs v9 47.28 (1.46x faster), real
+   25.19 vs 38.17 (1.52x); D=128 zero 56.91 vs 99.31 (1.75x), real 44.35 vs 75.99 (1.71x). Non-causal MIXED
+   patterns (unaligned / random) still run on LEGACY = v11's non-causal CQS-on code, F15-slow in v11 and not
+   re-measured in v12f (whose LEGACY TU has STACK 312-328 B vs v11's 640-680 B, `v12f_static.md`): v9 retires for
+   aligned tasks now, for mixed non-causal patterns only once that row is measured.
+4. **Census + dual launch cost** (profiled, inside every timed row): census 10.4-17.8 us at L=56064 (<= 0.08% of
+   the call), 30-31 us at 224640; the LEGACY no-op launch (all CTAs return on route 0) 8-9 us and 26 us; the route
+   memset ~1 us. Over the 73 c=73 tasks: census 0.38 ms + LEGACY no-op 0.33 ms + memset 0.08 ms = 0.80 ms of
+   113.9 ms (0.7%).
+5. **Descending row-block order (flags 2) helps causal, not non-causal.** Causal: zero -4.8% / real -2.8% (D=64),
+   -6.1% / -2.9% (D=128), -5.0% / -1.5% (225K), c=73 real -4.8%; non-causal +1.0% / +0.7% (D=64), 0.0% (D=128).
+   Kept for causal only: build b2 makes descending the default for causal calls (flags 0), ascending for
+   non-causal; flag 4 forces ascending (flash_api.cpp only, the ALIGNED device code is unchanged).
+6. Cross-job reproducibility with exp_build_ab (job 14308401, della-l07g4): v11 plain 17.30 = 17.30 ms, v11 zero
+   22.51 vs 22.55, v11x zero 19.43 vs 19.35, SDPA 19.64 vs 19.70. In-job flash_attn factor over SDPA-flash (design
+   3.3): 1.077 causal D=64, 1.084 D=128, 1.034 / 1.049 non-causal, 1.055 at 225K.

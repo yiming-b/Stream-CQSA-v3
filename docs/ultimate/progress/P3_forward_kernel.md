@@ -15,8 +15,11 @@ exact everywhere. Variant tree: `/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/
 | harness / test / slurm written | done | `benchmarks/ultimate/fwd_ab.py`, `tests/test_ultimate_v12f.py`, `slurm/ultimate/fwd_ab.slurm` |
 | correctness on vis1 (tests/test_ultimate_v12f.py) | done 13:20: **37 passed** (8 s) | profiler check: aligned real -> census 7 us + ALIGNED 6.3 ms + LEGACY 6 us (no-op); mixed random -> ALIGNED 4 us (no-op) + LEGACY; forced LEGACY -> LEGACY alone. `fwd_ab.py --smoke` (vis1, N=16K/32K/64K): every v12f row equal to v11, route 0 on every aligned task incl. all 73 c=73 tasks |
 | static report b1 | done | `results/ultimate/v12f_static.md` (`benchmarks/ultimate/v12f_static.py`): ALIGNED 3.8-7.2K SASS vs CQS-off 3.3-6.7K, LEGACY = v11's CQS-on (37-74K); v12f LEGACY non-causal STACK 312/328 B vs v11's 640/680 (TU split) |
-| SXM job fwd_ab | - | |
-| results fwd_ab.json/md, diff, commit | - | |
+| SXM job fwd_ab (b1) | done: job 14319938, della-l07g6 A100-SXM4-80GB, 54 s | **every target met on the first build**, every row bit-identical to v11: causal D=64 56K zero/v11 plain 0.983, real/flash_attn 0.713; non-causal zero/plain 0.964 (D=64), 1.001 (D=128); 225K zero/v11 plain 0.982, real/fa 0.773; c=73 real sum 0.927x flash_attn per-task sum; census 10-31 us/call |
+| descending row order | measured in 14319938 | causal -1.5..-6.1%, non-causal 0..+1.0% -> b2 makes descending the causal default (flash_api.cpp only; flag 4 = force ascending) |
+| build b2 (default flip) | running since 13:26 | the TAG-dependent `-time` csv path changed every nvcc command, so ninja rebuilds ALL units (~32 min); fix build.sh after it finishes |
+| results fwd_ab.json/md, diff, commit | done (dd5b1a9 + verdict) | `results/ultimate/fwd_ab.md` verdict section |
+| harness: mixed-tile part (LEGACY vs v11/v9 at 56K, unaligned + random) | written, smoked on vis1 | answers whether v9 retires for mixed non-causal calls; runs in the b2 confirmation job |
 
 ## Design as built (refinements of the task's sketch)
 
@@ -58,6 +61,7 @@ new: `src/cqs_census.{h,cu}`, `src/flash_fwd_aligned.h`, `src/flash_fwd_hdim*_le
 
 ## Job ids / builds
 
+- fwd_ab job **14319938** (gpu-test SXM, snapshot ultimate-adbdbfe, V12F_DIR=frozen/b1) submitted 13:27.
 - b1 .so frozen at `next/kernel/v12f/frozen/b1/` (md5 22b93a49...); `fwd_ab.slurm` takes `V12F_DIR` so a rebuild cannot change a queued job.
 - `fwd_ab.py` now records per-kernel device us of one profiled call per v12f CQS row (census / ALIGNED / LEGACY) and the c=73 sums: smoke says census 4-6 us + LEGACY no-op 4-5 us + memset 1 us per call (~0.7 ms of 37 ms over the 73 tasks at N=64K on vis1).
 

@@ -6,9 +6,9 @@ Contract: with CQS on, a census kernel classifies every tile the forward visits 
 instantiation computes the call and its out (fp32 and fp16) and lse are bit-identical to v11's; otherwise LEGACY
 (v11's own CQS forward) does, so every pattern stays exact. Checked here on the shared vis1 GPU at small L:
 the census against a numpy reference (routes and runs), bit-identity with v11 for aligned real tasks (c = 7,
-31, 73; itr 1-2; ragged L), zero, all-ones and plain calls, causal and non-causal, D = 64 and 128, the
-reversed row-block order, in-place segmented reads, automatic LEGACY routing of mixed patterns, and a float64
-spot check. Helpers come from benchmarks/ultimate/fwd_ab.py; everything GPU skips when the v11/v12f
+31, 73; itr 1-2; ragged L), zero, all-ones and plain calls, causal and non-causal, D = 64 and 128, both
+forced row-block orders (the default is descending for causal calls), in-place segmented reads, automatic
+LEGACY routing of mixed patterns, and a float64 spot check. Helpers come from benchmarks/ultimate/fwd_ab.py; everything GPU skips when the v11/v12f
 extensions are absent (next/kernel/{stable,v12f} on PYTHONPATH). The census-reference test needs no GPU.
 """
 import functools, os, sys
@@ -170,13 +170,16 @@ def test_plain_matches_v11(D, causal):
 
 
 @cuda
+@pytest.mark.parametrize("order", ["REVERSE_M", "ASCENDING_M"])
 @pytest.mark.parametrize("causal", [True, False])
-def test_reversed_row_order_bit_identical(causal):
+def test_row_order_bit_identical(causal, order):
+    """Both forced row-block orders (the default is descending for causal, ascending for non-causal)."""
     ab = _harness()
     for N, c, itr, pick in ((32768, 7, 1, 3), (100003, 7, 1, 5), (131072, 7, 2, 25)):
         t = _task(ab, N, c, itr, pick)
-        out, ref = _compare(ab, ab.task_tables(t), int(t.local_size), 64, causal, flags=ab.REVERSE_M)
-        _assert_equal(out, ref, f"reversed rows, c={c} itr={itr} path={t.path}")
+        for D in (64, 128):
+            out, ref = _compare(ab, ab.task_tables(t), int(t.local_size), D, causal, flags=getattr(ab, order))
+            _assert_equal(out, ref, f"{order} rows, D={D} c={c} itr={itr} path={t.path}")
 
 
 @cuda

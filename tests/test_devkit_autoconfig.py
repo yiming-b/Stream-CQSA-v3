@@ -16,7 +16,10 @@ def test_planner_decomposes_under_budget():
     assert p.mode == "cqsa" and p.itr >= 1 and p.stream_from_host and p.est_peak_gib <= 3 * 0.85
 
 
-def test_planner_uses_devices_when_faster():
+def test_planner_uses_devices_when_faster(monkeypatch, tmp_path):
+    # the expectations are the default cost model's: a model calibrated on this node (plan() loads it from the
+    # cache) moves the 2- and 4-device verdicts, so the cache is isolated
+    monkeypatch.setenv("CQSA_CACHE_DIR", str(tmp_path))
     # 2 devices at c=7: the 4/7 shard bound plus merge does not beat one monolithic call (measured 34.6 vs 24.2 s at 2M);
     # with the quorum-set axis a c=13/21 split (7/6, 11/10 tasks) is predicted to win -- either answer is a valid plan here
     hw2 = hardware_from_dict({"cuda:0": "80GiB", "cuda:1": "80GiB", "host": "500GiB", "link_gbs": 200})

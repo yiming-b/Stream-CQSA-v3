@@ -105,6 +105,11 @@ def test_host_resident_forward_is_decided_by_memory():
     w7 = min(c["peak"] for c in hosts if c["engine"] == "wave" and c["c"] == 7 and c["itr"] == 1 and c["acc"] == "cpu")
     c7 = min(c["peak"] for c in hosts if c["engine"] == "classic" and c["c"] == 7 and c["itr"] == 1 and c["acc"] == "cpu")
     assert w7 > c7
+    # host memory: the wave's acc=cpu candidates also hold the async fold's two pinned slots (<= W tokens each)
+    per_tok = H * D * 4 + 8 * H + 8
+    for cw in (c for c in hosts if c["engine"] == "wave" and c["acc"] == "cpu" and c["c"] == 7 and c["itr"] == 1):
+        cc = next(c for c in hosts if c["engine"] == "classic" and c["acc"] == "cpu" and c["c"] == 7 and c["itr"] == 1)
+        assert abs((cw["host"] - cc["host"]) * GIB - 2 * min(cw["wave_tokens"], 1048576) * per_tok) < 1e3
 
 
 def test_host_resident_inputs_plan_only_streaming_candidates():

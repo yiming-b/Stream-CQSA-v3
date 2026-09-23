@@ -133,3 +133,58 @@ def test_fold_exception_surfaces(monkeypatch):
     assert not t.is_alive(), "wave_forward hung after a fold exception"
     assert isinstance(box.get("exc"), RuntimeError) and "fold boom" in str(box["exc"])
     assert threading.active_count() == n_threads     # the worker pool was shut down
+
+
+@cuda
+@pytest.mark.parametrize("N", [131072, 100003])
+@pytest.mark.parametrize("workers", [2, 3])
+def test_fold_workers_split_by_token_range_are_bit_identical(monkeypatch, N, workers):
+    """CQSA_WAVE_FOLD_WORKERS > 1: each worker folds a fixed token range of every wave, so each token is still
+    folded in wave order and the result equals the synchronous fold exactly, at a ragged N too (the last
+    chunk absorbs the remainder). The info reports the fold and wait seconds for the A/B."""
+    from stream_cqsa.autoconfig import QUORUM_SETS
+    if not _native()(torch.float16, D):
+        pytest.skip("cqsa_native build lacks fp16 head_dim=64")
+    src = _inputs(N, torch.float16, host=True)
+    kw = dict(causal=True, itr=1, c=7, interest_set=QUORUM_SETS[7])
+    o_sync, i_sync = _run(monkeypatch, False, src, **kw)
+    monkeypatch.setenv("CQSA_WAVE_FOLD_WORKERS", str(workers))
+    o_async, i_async = _run(monkeypatch, True, src, **kw)
+    assert i_async["fold_workers"] == workers and i_sync["fold_workers"] == 0
+    assert torch.equal(o_sync, o_async) and torch.equal(i_sync["lse"], i_async["lse"])
+    assert i_async["merge_fold_s"] > 0 and i_async["merge_wait_s"] >= 0
+
+
+@cuda
+def test_async_fold_batch_of_two_matches_per_batch_calls(monkeypatch):
+    """B=2 host-streamed: the accumulators are drained and reset per batch and the chunk pool reloads its chunks
+    per batch; each batch equals its own B=1 call. (Regression, I0: the pool kept chunks resident by chunk id
+    alone, so batch 1's first wave read batch 0's Q/K/V -- rel error 1.41 against SDPA.)"""
+    from stream_cqsa.autoconfig import QUORUM_SETS
+    if not _native()(torch.float16, D):
+        pytest.skip("cqsa_native build lacks fp16 head_dim=64")
+    g = torch.Generator().manual_seed(3)
+    q, k, v = (torch.randn(2, H, 65536, D, generator=g).half() for _ in range(3))
+    kw = dict(causal=True, itr=1, c=7, interest_set=QUORUM_SETS[7])
+    out, _ = _run(monkeypatch, True, (q, k, v), **kw)
+    for b in range(2):
+        ob, _ = _run(monkeypatch, True, tuple(t[b:b + 1].contiguous() for t in (q, k, v)), **kw)
+        assert torch.equal(out[b:b + 1], ob)
+
+
+@cuda
+def test_async_fold_on_the_triton_kernel(monkeypatch):
+    """The Triton wave kernel feeds the same host fold (merge_rows_torch): async == sync exactly."""
+    from stream_cqsa.autoconfig import QUORUM_SETS
+    from stream_cqsa.native_wave import triton_wave_available
+    if not triton_wave_available():
+        pytest.skip("triton not available")
+    src = _inputs(32768, torch.float16, host=True)
+    kw = dict(causal=True, itr=1, c=7, interest_set=QUORUM_SETS[7], kernel="triton")
+    from stream_cqsa.native_wave import wave_forward
+    res = {}
+    for a in (False, True):
+        monkeypatch.setenv("CQSA_WAVE_MERGE_ASYNC", "1" if a else "0")
+        res[a] = wave_forward(*src, accumulate_on_gpu=False, max_wave_tokens=1 << 15, **kw)
+    assert res[True][1]["kernel"] == "triton" and res[True][1]["n_waves"] >= 2
+    assert torch.equal(res[False][0], res[True][0]) and torch.equal(res[False][1]["lse"], res[True][1]["lse"])

@@ -490,9 +490,11 @@ def plan(*, N: int, B: int = 1, H: int = 8, D: int = 64, dtype=torch.float16, ca
                                                                     gather=gather, direction=direction, out_bytes_per_el=int(out_bytes_per_el))
                                     t = cm.cqsa_time(N, B, H, D, itr, causal, acc, host, 1, world=w, hw=hw, c=c, l=l, direction=direction,
                                                      engine="wave", wave_tokens=W, gather=gather)
+                                    # acc=cpu: the async fold's two pinned slots, each a wave's touched tokens (<= W, <= N)
+                                    host_w = hostb + (2 * min(int(W), N) * (H * D * 4 + 8 * H + 8) if acc == "cpu" else 0)
                                     cands.append(dict(base, engine="wave", wave_tokens=int(W), gather=bool(gather), n_par=1,
-                                                      time=t, peak=(peak + stay) / GIB,
-                                                      ok=(peak + stay <= dev_budget and hostb <= hw.host_budget_bytes)))
+                                                      time=t, peak=(peak + stay) / GIB, host=host_w / GIB,
+                                                      ok=(peak + stay <= dev_budget and host_w <= hw.host_budget_bytes)))
                         if wave_here and not host and acc == "gpu":
                             continue                                       # the wave covers this residency (W=1 == classic)
                         if "classic" not in engines:

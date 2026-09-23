@@ -1,0 +1,1519 @@
+diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/build.sh v12f/build.sh
+--- v11/build.sh	1969-12-31 19:00:00.000000000 -0500
++++ v12f/build.sh	2026-09-23 10:38:33.887073227 -0400
+@@ -0,0 +1,45 @@
++#!/bin/bash
++# Build v12f (ultimate program P3: ALIGNED run-table forward + LEGACY v11 forward).
++#   TAG=b1 bash next/kernel/v12f/build.sh          # incremental: reuses up-to-date objects
++#   CLEAN=1 TAG=b1 bash next/kernel/v12f/build.sh  # from scratch
++# Detached on della-vis1 (nvcc 13.0):
++#   nohup setsid bash next/kernel/v12f/build.sh > /dev/null 2>&1 &
++# The backward is compiled with CQSA_BWD_NO_CQS (not correct for CQS patterns; this
++# package measures the forward only, and it keeps the build short). The LEGACY units
++# carry v11's per-element path and dominate the build (v11: 17-40 min per unit); ninja
++# resumes finished objects, so an ALIGNED-only change rebuilds only the main units.
++set -uo pipefail
++DEV=/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev
++TAG=${TAG:-b1}
++source $DEV/env.sh
++export CUDA_HOME=/usr/local/cuda-13.0
++export PATH=$CUDA_HOME/bin:$PATH
++export FLASH_ATTN_CUDA_ARCHS=80
++export TORCH_CUDA_ARCH_LIST="8.0"
++export CQSA_KERNEL_SET=${CQSA_KERNEL_SET:-a100_fp16_hdim64_128}
++# Forced, not defaulted: the session environment carries MAX_JOBS=4.
++export MAX_JOBS=8
++export NVCC_THREADS=4
++export CQSA_BWD_NO_CQS=1
++export CQSA_NVCC_TIME_CSV=$DEV/next/logs/build_v12f_${TAG}_nvcc_time.csv
++LOG=$DEV/next/logs/05_build_v12f_${TAG}.log
++WATCH_LOG=$DEV/next/logs/watchdog_v12f_${TAG}.log
++rm -f "$CQSA_NVCC_TIME_CSV"
++cd $DEV/next/kernel/v12f
++[ "${CLEAN:-0}" = 1 ] && rm -rf build
++rm -f cqsa_cuda_next_v12f*.so
++{
++  echo "build v12f $TAG: kernel_set=$CQSA_KERNEL_SET MAX_JOBS=$MAX_JOBS NVCC_THREADS=$NVCC_THREADS clean=${CLEAN:-0} host=$(hostname) load=$(cut -d' ' -f1-3 /proc/loadavg)  $(date)"
++  echo "flags: CQSA_BWD_NO_CQS=1 -lineinfo -Xptxas -v -time $CQSA_NVCC_TIME_CSV"
++  nvcc --version | tail -1
++} > "$LOG"
++# LEGACY's ptxas took up to ~35 min in v11's build; 60 min flags a hang, not a slow unit.
++bash $DEV/next/kernel/watchdog.sh 60 > "$WATCH_LOG" 2>&1 &
++WD=$!
++t0=$(date +%s)
++python setup.py build_ext --inplace >> "$LOG" 2>&1
++rc=$?
++echo "build v12f $TAG finished rc=$rc in $(( $(date +%s) - t0 )) s  $(date)" | tee -a "$LOG"
++kill $WD 2>/dev/null
++ls -la $DEV/next/kernel/v12f/cqsa_cuda_next_v12f*.so 2>&1 | tee -a "$LOG"
++exit $rc
+diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/csrc/flash_attn/flash_api.cpp v12f/csrc/flash_attn/flash_api.cpp
+--- v11/csrc/flash_attn/flash_api.cpp	2026-09-11 23:16:22.128645000 -0400
++++ v12f/csrc/flash_attn/flash_api.cpp	2026-09-23 10:37:09.444457000 -0400
+@@ -16,6 +16,7 @@
+ #include "namespace_config.h"
+ #include "hardware_info.h"
+ #include "flash.h"
++#include "cqs_census.h"
+ #include "static_switch.h"
+ #include <array>
+ #include <algorithm>
+@@ -460,6 +461,10 @@
+     params.deterministic = deterministic;
+ }
+ 
++// next/ v12f: cqs_fwd_flags of fwd_cqs_group_bits.
++constexpr int kCqsFwdForceLegacy = 1;   // skip the census: v11's CQS forward (A/B and tests)
++constexpr int kCqsFwdReverseM = 2;      // ALIGNED visits row blocks in descending order
++
+ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split_kernel=false) {
+ #ifdef CQSA_MINIMAL_FWD_KERNELS
+ #ifndef CQSA_MINIMAL_BOTH_DTYPES
+@@ -476,12 +481,19 @@
+     TORCH_CHECK(params.d == 64 || params.d == 128,
+                 "this CQSA build only supports head_dim=64 or 128; rebuild with "
+                 "CQSA_KERNEL_SET=full for other head dims.");
++    // next/ v12f: CQS off -> the plain forward. CQS on -> the census and the
++    // ALIGNED forward when mha_fwd_impl allocated the census (params.cqs_route),
++    // then LEGACY, whose CTAs return at once unless the census found a mixed
++    // tile; without a census LEGACY alone computes the call. Both launches go
++    // to the same stream, so the route is decided without a host sync.
+     FP16_SWITCH(!params.is_bf16, [&] {
+         BOOL_SWITCH(params.is_causal, Is_causal, [&] {
+             if (params.d == 64) {
+-                run_mha_fwd_<elem_type, 64, Is_causal>(params, stream);
++                if (!params.cqs_enabled || params.cqs_route != nullptr) { run_mha_fwd_<elem_type, 64, Is_causal>(params, stream); }
++                if (params.cqs_enabled) { run_mha_fwd_legacy_<elem_type, 64, Is_causal>(params, stream); }
+             } else {
+-                run_mha_fwd_<elem_type, 128, Is_causal>(params, stream);
++                if (!params.cqs_enabled || params.cqs_route != nullptr) { run_mha_fwd_<elem_type, 128, Is_causal>(params, stream); }
++                if (params.cqs_enabled) { run_mha_fwd_legacy_<elem_type, 128, Is_causal>(params, stream); }
+             }
+         });
+     });
+@@ -616,7 +628,8 @@
+         std::optional<int64_t> cqs_blk_size_ = std::nullopt,
+         std::optional<at::Tensor> cqs_out_acc_ = std::nullopt,
+         std::optional<at::Tensor> cqs_block_base_ = std::nullopt,
+-        std::optional<int64_t> cqs_seg_align_ = std::nullopt) {
++        std::optional<int64_t> cqs_seg_align_ = std::nullopt,
++        const int64_t cqs_fwd_flags = 0) {
+ 
+     // Otherwise the kernel will be launched from cuda:0 device
+     at::cuda::CUDAGuard device_guard{q.device()};
+@@ -842,6 +855,24 @@
+ 
+     set_params_alibi(params, alibi_slopes_, batch_size, num_heads);
+ 
++    // next/ v12f: the census and the ALIGNED forward serve the group-bits mode
++    // with summaries in the production configuration; anything else (and a
++    // forced LEGACY call) keeps params.cqs_route null and runs v11's forward.
++    at::Tensor cqs_census;
++    if (params.cqs_enabled && params.cqs_group_bits != nullptr && params.cqs_blk_or != nullptr
++        && (cqs_fwd_flags & kCqsFwdForceLegacy) == 0
++        && p_dropout == 0.f && !return_softmax && softcap == 0.f && params.alibi_slopes_ptr == nullptr
++        && (is_causal || (window_size_left < 0 && window_size_right < 0))
++        && (head_size == 64 || head_size == 128) && !seqlenq_ngroups_swapped) {
++        // Sized for any row-block height >= 64; the route word is padded to 8
++        // bytes so the int2 runs that follow it are aligned.
++        const int max_m_blocks = (seqlen_q + 63) / 64;
++        cqs_census = torch::empty({2 + max_m_blocks * kCqsRunSlots * 2}, opts.dtype(torch::kInt32));
++        params.cqs_route = cqs_census.data_ptr<int>();
++        params.cqs_runs = reinterpret_cast<const int2 *>(params.cqs_route + 2);
++        params.cqs_reverse_m = (cqs_fwd_flags & kCqsFwdReverseM) != 0;
++    }
++
+     if (seqlen_k > 0) {
+         auto stream = at::cuda::getCurrentCUDAStream().stream();
+         run_mha_fwd(params, stream);
+@@ -949,7 +980,8 @@
+                        std::optional<int64_t> cqs_blk_size_ = std::nullopt,
+                        std::optional<at::Tensor> cqs_out_acc_ = std::nullopt,
+                        std::optional<at::Tensor> cqs_block_base_ = std::nullopt,
+-                       std::optional<int64_t> cqs_seg_align_ = std::nullopt) {
++                       std::optional<int64_t> cqs_seg_align_ = std::nullopt,
++                       const int64_t cqs_fwd_flags = 0) {
+     auto cqs_group_bits_opt = std::optional<at::Tensor>(cqs_group_bits);
+     return mha_fwd_impl(
+         q,
+@@ -973,7 +1005,42 @@
+         cqs_blk_size_,
+         cqs_out_acc_,
+         cqs_block_base_,
+-        cqs_seg_align_);
++        cqs_seg_align_,
++        cqs_fwd_flags);
++}
++
++// next/ v12f: the census the CQS forward runs, exposed for tests. Returns the
++// route word (int32 [1]: 0 = ALIGNED, else kCqsRoute* bits), the run table
++// (int32 [ceil(L / kBlockM), kCqsRunSlots, 2], {hi, lo} runs in descending n
++// closed by {-1, -1}) and the ALIGNED tile shape (int32 [2] on the CPU).
++std::vector<at::Tensor>
++mha_fwd_cqs_census(const at::Tensor &cqs_group_bits, const at::Tensor &cqs_blk_or, const at::Tensor &cqs_blk_and,
++                   const bool is_causal, const int64_t head_size) {
++    at::cuda::CUDAGuard device_guard{cqs_group_bits.device()};
++    for (const at::Tensor *t : {&cqs_group_bits, &cqs_blk_or, &cqs_blk_and}) {
++        CHECK_DEVICE((*t)); CHECK_CONTIGUOUS((*t));
++        TORCH_CHECK(t->dtype() == torch::kInt64, "cqs group bits and summaries must be int64");
++    }
++    const int L = static_cast<int>(cqs_group_bits.numel());
++    TORCH_CHECK(L > 0, "empty group bits");
++    TORCH_CHECK(cqs_blk_or.numel() == cqs_blk_and.numel() && cqs_blk_or.numel() >= (L + 63) / 64,
++                "cqs block summaries (64 tokens each) too short");
++    TORCH_CHECK(head_size == 64 || head_size == 128, "the ALIGNED forward exists for head dims 64 and 128");
++    const int block_m = head_size == 64 ? CqsAlignedTile<64>::kBlockM : CqsAlignedTile<128>::kBlockM;
++    const int block_n = head_size == 64 ? CqsAlignedTile<64>::kBlockN : CqsAlignedTile<128>::kBlockN;
++    const int num_m = (L + block_m - 1) / block_m;
++    auto census = torch::empty({2 + num_m * kCqsRunSlots * 2}, cqs_group_bits.options().dtype(torch::kInt32));
++    Flash_fwd_params params = {};
++    params.seqlen_q = params.seqlen_k = L;
++    params.is_causal = is_causal;
++    params.cqs_group_bits = cqs_group_bits.data_ptr<int64_t>();
++    params.cqs_blk_or = cqs_blk_or.data_ptr<int64_t>();
++    params.cqs_blk_and = cqs_blk_and.data_ptr<int64_t>();
++    params.cqs_route = census.data_ptr<int>();
++    params.cqs_runs = reinterpret_cast<const int2 *>(params.cqs_route + 2);
++    run_cqs_fwd_census(params, block_m, block_n, at::cuda::getCurrentCUDAStream().stream());
++    return {census.slice(0, 0, 1), census.slice(0, 2).view({num_m, kCqsRunSlots, 2}),
++            torch::tensor({block_m, block_n}, torch::dtype(torch::kInt32))};
+ }
+ 
+ void run_mha_bwd(Flash_bwd_params &params, cudaStream_t stream);
+@@ -2465,7 +2532,14 @@
+           pybind11::arg("cqs_blk_size") = pybind11::none(),
+           pybind11::arg("cqs_out_acc") = pybind11::none(),
+           pybind11::arg("cqs_block_base") = pybind11::none(),
+-          pybind11::arg("cqs_seg_align") = pybind11::none());
++          pybind11::arg("cqs_seg_align") = pybind11::none(),
++          pybind11::arg("cqs_fwd_flags") = 0);
++    m.def("fwd_cqs_census", &FLASH_NAMESPACE::mha_fwd_cqs_census,
++          "The CQS forward's tile census (route word, run table, tile shape); for tests",
++          pybind11::arg("cqs_group_bits"), pybind11::arg("cqs_blk_or"), pybind11::arg("cqs_blk_and"),
++          pybind11::arg("is_causal"), pybind11::arg("head_size"));
++    m.attr("CQS_FWD_FORCE_LEGACY") = FLASH_NAMESPACE::kCqsFwdForceLegacy;
++    m.attr("CQS_FWD_REVERSE_M") = FLASH_NAMESPACE::kCqsFwdReverseM;
+     m.def("bwd_cqs_group_bits", &FLASH_NAMESPACE::mha_bwd_cqs_group_bits, "Backward pass with per-token CQS group-bit mask");
+     m.def("fwd_cqsa", &FLASH_NAMESPACE::mha_fwd_cqsa, "Forward pass with fused CQSA (num_chunk=7, interest=(0,1,3), configurable num_itr)");
+     m.def("fwd_cqsa_profile", &FLASH_NAMESPACE::mha_fwd_cqsa_profile, "Forward pass with fused CQSA + host timing + configurable num_itr");
+diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/csrc/flash_attn/src/cqs_census.cu v12f/csrc/flash_attn/src/cqs_census.cu
+--- v11/csrc/flash_attn/src/cqs_census.cu	1969-12-31 19:00:00.000000000 -0500
++++ v12f/csrc/flash_attn/src/cqs_census.cu	2026-09-23 10:33:57.533861000 -0400
+@@ -0,0 +1,134 @@
++/******************************************************************************
++ * next/ v12f: tile census for the ALIGNED forward (see cqs_census.h).
++ ******************************************************************************/
++
++#include "namespace_config.h"
++#include <c10/cuda/CUDAException.h>  // C10_CUDA_CHECK, C10_CUDA_KERNEL_LAUNCH_CHECK
++
++#include "cqs_census.h"
++
++namespace FLASH_NAMESPACE {
++
++namespace {
++
++constexpr int kSumBlk = 64;          // CQS_BLK_SIZE: tokens per OR/AND summary entry
++constexpr int kCensusWarps = 4;      // one warp per row block
++
++// OR and AND of the group bits of tokens [start, end), start a multiple of
++// kSumBlk. The ragged last summary block (tail_blk, -1 if none) comes from the
++// exact values over its valid tokens instead of the caller's padded entry, so
++// a ragged tile gets an exact verdict: the kernel then skips a fully masked
++// ragged tile instead of routing the whole call to LEGACY.
++__device__ __forceinline__ void range_summary(const int64_t *__restrict__ blk_or, const int64_t *__restrict__ blk_and,
++                                              const int start, const int end, const int tail_blk,
++                                              const int64_t tail_or, const int64_t tail_and,
++                                              int64_t &r_or, int64_t &r_and) {
++    r_or = 0;
++    r_and = ~int64_t(0);
++    for (int b = start / kSumBlk; b * kSumBlk < end; ++b) {
++        if (b == tail_blk) {
++            r_or |= tail_or;
++            r_and &= tail_and;
++        } else {
++            r_or |= blk_or[b];
++            r_and &= blk_and[b];
++        }
++    }
++}
++
++// Grid: one warp per row block of block_m rows (seqlen_q == seqlen_k == L in
++// the group-bits mode). A tile is live when no (row, col) pair can share a
++// group bit (row OR & col OR == 0), dead when every pair does (row AND & col
++// AND != 0), mixed otherwise. The tiles visited are those of the forward:
++// [0, n_block_max) with the causal limit, so a row block's runs are exactly
++// the tiles ALIGNED computes, in the order v11 computes them (descending n).
++__global__ void __launch_bounds__(kCensusWarps * 32)
++cqs_fwd_census_kernel(const int64_t *__restrict__ bits, const int64_t *__restrict__ blk_or,
++                      const int64_t *__restrict__ blk_and, const int L, const int block_m, const int block_n,
++                      const bool causal, int2 *__restrict__ runs, int *__restrict__ route) {
++    __shared__ int64_t s_tail[2];
++    const int lane = threadIdx.x % 32;
++    const int warp = threadIdx.x / 32;
++    const int tail_blk = (L % kSumBlk) != 0 ? L / kSumBlk : -1;
++    if (warp == 0) {
++        int64_t o = 0, a = ~int64_t(0);
++        if (tail_blk >= 0) {
++            for (int t = tail_blk * kSumBlk + lane; t < L; t += 32) { o |= bits[t]; a &= bits[t]; }
++        }
++        #pragma unroll
++        for (int off = 16; off > 0; off /= 2) {
++            o |= __shfl_xor_sync(0xffffffffu, o, off);
++            a &= __shfl_xor_sync(0xffffffffu, a, off);
++        }
++        if (lane == 0) { s_tail[0] = o; s_tail[1] = a; }
++    }
++    __syncthreads();
++    const int num_m = (L + block_m - 1) / block_m;
++    const int m = blockIdx.x * kCensusWarps + warp;
++    if (m >= num_m) { return; }
++    const int64_t tail_or = s_tail[0], tail_and = s_tail[1];
++
++    int64_t row_or, row_and;
++    range_summary(blk_or, blk_and, m * block_m, min((m + 1) * block_m, L), tail_blk, tail_or, tail_and, row_or, row_and);
++    int n_max = (L + block_n - 1) / block_n;
++    if (causal) { n_max = min(n_max, ((m + 1) * block_m + block_n - 1) / block_n); }
++
++    // Lane j classifies tile n = base - j; lane 0 turns the ballot into runs.
++    // Bit j of `above` is the liveness of tile n + 1 (for j = 0: the lowest
++    // tile of the previous chunk), so a run starts where a live tile has a
++    // dead one above it and ends where a dead tile has a live one above it.
++    int2 *row_runs = runs + m * kCqsRunSlots;
++    int nr = 0, hi = -1;
++    bool overflow = false, mixed = false, prev_live = false;
++    for (int base = n_max - 1; base >= 0; base -= 32) {
++        const int n = base - lane;
++        bool live = false, mix = false;
++        if (n >= 0) {
++            int64_t c_or, c_and;
++            range_summary(blk_or, blk_and, n * block_n, min((n + 1) * block_n, L), tail_blk, tail_or, tail_and, c_or, c_and);
++            live = (row_or & c_or) == 0;
++            mix = !live && (row_and & c_and) == 0;
++        }
++        const unsigned live_bits = __ballot_sync(0xffffffffu, live);
++        mixed |= __any_sync(0xffffffffu, mix);
++        if (lane == 0) {
++            const unsigned valid = base >= 31 ? 0xffffffffu : ((1u << (base + 1)) - 1u);
++            const unsigned above = (live_bits << 1) | unsigned(prev_live);
++            const unsigned starts = live_bits & ~above;
++            unsigned events = starts | (~live_bits & above & valid);
++            while (events) {
++                const int j = __ffs(events) - 1;
++                events &= events - 1;
++                if ((starts >> j) & 1u) {
++                    hi = base - j;
++                } else if (nr < kCqsRunSlots - 1) {
++                    row_runs[nr++] = make_int2(hi, base - j + 1);
++                } else {
++                    overflow = true;
++                }
++            }
++            prev_live = (live_bits >> min(base, 31)) & 1u;
++        }
++    }
++    if (lane == 0) {
++        if (prev_live) {                   // the last run reaches tile 0
++            if (nr < kCqsRunSlots - 1) { row_runs[nr++] = make_int2(hi, 0); } else { overflow = true; }
++        }
++        row_runs[nr] = make_int2(-1, -1);
++        const int why = (mixed ? kCqsRouteMixed : 0) | (overflow ? kCqsRouteOverflow : 0);
++        if (why) { atomicOr(route, why); }
++    }
++}
++
++}  // namespace
++
++void run_cqs_fwd_census(const Flash_fwd_params &params, int block_m, int block_n, cudaStream_t stream) {
++    C10_CUDA_CHECK(cudaMemsetAsync(params.cqs_route, 0, sizeof(int), stream));
++    const int num_m = (params.seqlen_q + block_m - 1) / block_m;
++    cqs_fwd_census_kernel<<<(num_m + kCensusWarps - 1) / kCensusWarps, kCensusWarps * 32, 0, stream>>>(
++        params.cqs_group_bits, params.cqs_blk_or, params.cqs_blk_and, params.seqlen_q, block_m, block_n,
++        params.is_causal, const_cast<int2 *>(params.cqs_runs), params.cqs_route);
++    C10_CUDA_KERNEL_LAUNCH_CHECK();
++}
++
++}  // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/csrc/flash_attn/src/cqs_census.h v12f/csrc/flash_attn/src/cqs_census.h
+--- v11/csrc/flash_attn/src/cqs_census.h	1969-12-31 19:00:00.000000000 -0500
++++ v12f/csrc/flash_attn/src/cqs_census.h	2026-09-23 10:33:35.476442691 -0400
+@@ -0,0 +1,36 @@
++/******************************************************************************
++ * next/ v12f: the forward's tile census and the ALIGNED instantiation's tile shape.
++ ******************************************************************************/
++
++#pragma once
++
++#include "namespace_config.h"
++#include "flash.h"
++
++namespace FLASH_NAMESPACE {
++
++// Run-table slots per row block: up to kCqsRunSlots - 1 runs and the {-1, -1}
++// sentinel. A 128-aligned CQS task has 1 run per causal row block at itr=1
++// (everything left of the row's own chunk) and a few at itr=2; more runs than
++// slots is recorded as an overflow and the call goes to LEGACY (still exact).
++constexpr int kCqsRunSlots = 16;
++
++// Route bits written by the census (0 = ALIGNED).
++constexpr int kCqsRouteMixed = 1;      // a visited tile is neither fully live nor fully masked
++constexpr int kCqsRouteOverflow = 2;   // a row block has more live runs than slots
++
++// The ALIGNED forward's tile shape per head dim: the sm80 choice of
++// run_mha_fwd_hdim64/128, i.e. the tiles v11 runs on an A100, so ALIGNED and
++// LEGACY/v11 visit the same tiles and can be compared bit for bit. The census
++// is run with exactly this shape (flash_fwd_aligned.h and flash_api.cpp).
++template<int Headdim> struct CqsAlignedTile;
++template<> struct CqsAlignedTile<64>  { static constexpr int kBlockM = 128, kBlockN = 128; };
++template<> struct CqsAlignedTile<128> { static constexpr int kBlockM = 128, kBlockN = 64; };
++
++// Classify every (row block, column tile) pair the forward visits, from the
++// 64-token OR/AND summaries (exact over the valid tokens: the ragged last
++// summary block is recomputed from the group bits), and write params.cqs_route
++// and params.cqs_runs. Zeroes the route first. Stream-ordered, no host sync.
++void run_cqs_fwd_census(const Flash_fwd_params &params, int block_m, int block_n, cudaStream_t stream);
++
++}  // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/csrc/flash_attn/src/flash_fwd_aligned.h v12f/csrc/flash_attn/src/flash_fwd_aligned.h
+--- v11/csrc/flash_attn/src/flash_fwd_aligned.h	1969-12-31 19:00:00.000000000 -0500
++++ v12f/csrc/flash_attn/src/flash_fwd_aligned.h	2026-09-23 10:35:19.227903000 -0400
+@@ -0,0 +1,438 @@
++/******************************************************************************
++ * next/ v12f: the ALIGNED CQS-on forward.
++ *
++ * On a 128-aligned CQS task every tile the forward visits is fully live or
++ * fully masked (results/ultimate/align_census.json: mixed 0.000%), so the
++ * CQS-on kernel needs neither the per-element mask path nor any per-tile
++ * verdict. The census (cqs_census.cu) lists each row block's live column
++ * tiles as runs in descending n -- the order v11 visits them in -- and this
++ * kernel is upstream's KV loop driven by that list: masked tiles, including
++ * the fully masked diagonal tile of a non-owner row block, are simply absent.
++ * A call whose census finds a mixed tile runs on LEGACY (v11's CQS forward,
++ * flash_fwd_kernel.h) instead; see run_mha_fwd in flash_api.cpp.
++ *
++ * Bit-identity with v11: the same tiles are accumulated in the same order
++ * with the same instructions. The one difference is that the online softmax
++ * starts from (row_max, row_sum, acc_o) = (-inf, 0, 0) and always takes the
++ * non-Is_first, Check_inf rescale, because the first visited tile need not be
++ * the diagonal one. That reproduces Is_first exactly: max(-inf, x) = x, the
++ * Check_inf guard maps an all -inf row to 0 so the scale is exp2(-inf) = 0,
++ * then row_sum = 0 * 0 + s and acc_o = 0 * 0 before the PV MMA. Skipping a
++ * fully masked tile is exact as well: v11 computes it as all -inf scores,
++ * which rescale by exp2(0) = 1 and add exp2(-inf) = 0 (or, before any live
++ * tile, leave (-inf, 0, 0) unchanged).
++ ******************************************************************************/
++
++#pragma once
++
++#include "flash_fwd_launch_template.h"
++#include "cqs_census.h"
++
++namespace FLASH_NAMESPACE {
++
++using namespace cute;
++
++// Production configuration only: no dropout, local window, alibi, softcap or
++// returned softmax, and d == kHeadDim (flash_api.cpp routes anything else to
++// LEGACY). seqlen_q == seqlen_k, as the group-bits mode requires, so the
++// causal n_block_max is never below 1 and there is no empty-row-block exit.
++template<typename Kernel_traits, bool Is_causal, bool Is_even_MN, typename Params>
++inline __device__ void compute_attn_1rowblock_aligned(const Params &params, const int bidb, const int bidh, const int m_block) {
++    constexpr bool Is_even_K = true;
++
++    using Element = typename Kernel_traits::Element;
++    using ElementAccum = typename Kernel_traits::ElementAccum;
++
++    // Shared memory.
++    extern __shared__ char smem_[];
++
++    // The thread index.
++    const int tidx = threadIdx.x;
++
++    constexpr int kBlockM = Kernel_traits::kBlockM;
++    constexpr int kBlockN = Kernel_traits::kBlockN;
++    constexpr int kHeadDim = Kernel_traits::kHeadDim;
++    constexpr int kNWarps = Kernel_traits::kNWarps;
++
++    const BlockInfo</*Varlen=*/!Is_even_MN> binfo(params, bidb);
++    if (m_block * kBlockM >= binfo.actual_seqlen_q) return;
++
++    int n_block_max = cute::ceil_div(binfo.actual_seqlen_k, kBlockN);
++    if (Is_causal) {
++        n_block_max = std::min(n_block_max,
++                               cute::ceil_div((m_block + 1) * kBlockM + binfo.actual_seqlen_k - binfo.actual_seqlen_q, kBlockN));
++    }
++
++    // This row block's live tiles: run {hi, lo} covers hi, hi - 1, ..., lo.
++    // Only a run boundary reads the table again, and that load is issued
++    // before the QK GEMM whose result it is needed after.
++    const int2 *run_next = params.cqs_runs + m_block * kCqsRunSlots;
++    const int2 run0 = run_next[0];
++    ++run_next;
++
++    Tensor mQ = make_tensor(make_gmem_ptr(reinterpret_cast<Element*>(params.q_ptr)
++                                          + binfo.q_offset(params.q_batch_stride, params.q_row_stride, bidb)),
++                            make_shape(binfo.actual_seqlen_q, params.h, params.d),
++                            make_stride(params.q_row_stride, params.q_head_stride, _1{}));
++    Tensor gQ = local_tile(mQ(_, bidh, _), Shape<Int<kBlockM>, Int<kHeadDim>>{},
++                           make_coord(m_block, 0));  // (kBlockM, kHeadDim)
++    if (params.cqs_block_base != nullptr) {
++        gQ.data() = gQ.data()
++                  + cqs_seg_delta(params, m_block * kBlockM) * params.q_row_stride;
++    }
++    Tensor mK = make_tensor(make_gmem_ptr(reinterpret_cast<Element*>(params.k_ptr)
++                                          + binfo.k_offset(params.k_batch_stride, params.k_row_stride, bidb)),
++                            make_shape(binfo.actual_seqlen_k, params.h_k, params.d),
++                            make_stride(params.k_row_stride, params.k_head_stride, _1{}));
++    Tensor gK = local_tile(mK(_, bidh / params.h_h_k_ratio, _), Shape<Int<kBlockN>, Int<kHeadDim>>{},
++                           make_coord(_, 0));  // (kBlockN, kHeadDim, nblocksN)
++    Tensor mV = make_tensor(make_gmem_ptr(reinterpret_cast<Element*>(params.v_ptr)
++                                          + binfo.k_offset(params.v_batch_stride, params.v_row_stride, bidb)),
++                            make_shape(binfo.actual_seqlen_k, params.h_k, params.d),
++                            make_stride(params.v_row_stride, params.v_head_stride, _1{}));
++    Tensor gV = local_tile(mV(_, bidh / params.h_h_k_ratio, _), Shape<Int<kBlockN>, Int<kHeadDim>>{},
++                           make_coord(_, 0));  // (kBlockN, kHeadDim, nblocksN)
++
++    Tensor sQ = make_tensor(make_smem_ptr(reinterpret_cast<Element *>(smem_)),
++                            typename Kernel_traits::SmemLayoutQ{});
++    // Careful we're using the same smem for sQ and sK | sV if Share_Q_K_smem;
++    Tensor sK = make_tensor(sQ.data() + (Kernel_traits::Share_Q_K_smem ? 0 : size(sQ)),
++                            typename Kernel_traits::SmemLayoutKV{});
++    Tensor sV = make_tensor(sK.data() + size(sK), typename Kernel_traits::SmemLayoutKV{});
++    Tensor sVt = make_tensor(sV.data(), typename Kernel_traits::SmemLayoutVtransposed{});
++    Tensor sVtNoSwizzle = make_tensor(sV.data().get(), typename Kernel_traits::SmemLayoutVtransposedNoSwizzle{});
++
++    typename Kernel_traits::GmemTiledCopyQKV gmem_tiled_copy_QKV;
++    auto gmem_thr_copy_QKV = gmem_tiled_copy_QKV.get_thread_slice(tidx);
++
++    Tensor tQgQ = gmem_thr_copy_QKV.partition_S(gQ);
++    Tensor tQsQ = gmem_thr_copy_QKV.partition_D(sQ);
++    Tensor tKgK = gmem_thr_copy_QKV.partition_S(gK);  // (KCPY, KCPY_N, KCPY_K, nblocksN)
++    Tensor tKsK = gmem_thr_copy_QKV.partition_D(sK);
++    Tensor tVgV = gmem_thr_copy_QKV.partition_S(gV);  // (VCPY, VCPY_N, VCPY_K, nblocksN)
++    Tensor tVsV = gmem_thr_copy_QKV.partition_D(sV);
++
++    // Segmented K/V, as in v11: same tile, shifted base pointer.
++    auto seg_k = [&](int n) {
++        auto t = tKgK(_, _, _, n);
++        if (params.cqs_block_base != nullptr) {
++            t.data() = t.data() + cqs_seg_delta(params, n * kBlockN) * params.k_row_stride;
++        }
++        return t;
++    };
++    auto seg_v = [&](int n) {
++        auto t = tVgV(_, _, _, n);
++        if (params.cqs_block_base != nullptr) {
++            t.data() = t.data() + cqs_seg_delta(params, n * kBlockN) * params.v_row_stride;
++        }
++        return t;
++    };
++
++    typename Kernel_traits::TiledMma tiled_mma;
++    auto thr_mma = tiled_mma.get_thread_slice(tidx);
++    Tensor tSrQ  = thr_mma.partition_fragment_A(sQ);                           // (MMA,MMA_M,MMA_K)
++    Tensor tSrK  = thr_mma.partition_fragment_B(sK);                           // (MMA,MMA_N,MMA_K)
++    Tensor tOrVt  = thr_mma.partition_fragment_B(sVtNoSwizzle);                // (MMA, MMA_K,MMA_N)
++
++    Tensor acc_o = partition_fragment_C(tiled_mma, Shape<Int<kBlockM>, Int<kHeadDim>>{});  // MMA, MMA_M, MMA_K
++
++    auto smem_tiled_copy_Q = make_tiled_copy_A(typename Kernel_traits::SmemCopyAtom{}, tiled_mma);
++    auto smem_thr_copy_Q = smem_tiled_copy_Q.get_thread_slice(tidx);
++    Tensor tSsQ = smem_thr_copy_Q.partition_S(sQ);
++
++    auto smem_tiled_copy_K = make_tiled_copy_B(typename Kernel_traits::SmemCopyAtom{}, tiled_mma);
++    auto smem_thr_copy_K = smem_tiled_copy_K.get_thread_slice(tidx);
++    Tensor tSsK = smem_thr_copy_K.partition_S(sK);
++
++    auto smem_tiled_copy_V = make_tiled_copy_B(typename Kernel_traits::SmemCopyAtomTransposed{}, tiled_mma);
++    auto smem_thr_copy_V = smem_tiled_copy_V.get_thread_slice(tidx);
++    Tensor tOsVt = smem_thr_copy_V.partition_S(sVt);
++
++    // Identity layouts for the predicated (ragged) copies; K is always even.
++    Tensor cQ = make_identity_tensor(make_shape(size<0>(sQ), size<1>(sQ)));    // (BLK_M,BLK_K) -> (blk_m,blk_k)
++    Tensor cKV = make_identity_tensor(make_shape(size<0>(sK), size<1>(sK)));    // (BLK_N,BLK_K) -> (blk_n,blk_k)
++    Tensor tQcQ = gmem_thr_copy_QKV.partition_S(cQ);       // (ACPY,ACPY_M,ACPY_K) -> (blk_m,blk_k)
++    Tensor tKVcKV = gmem_thr_copy_QKV.partition_S(cKV);   // (BCPY,BCPY_N,BCPY_K) -> (blk_n,blk_k)
++    Tensor tQpQ = make_tensor<bool>(make_shape(size<2>(tQsQ)));
++    Tensor tKVpKV = make_tensor<bool>(make_shape(size<2>(tKsK)));
++
++    clear(acc_o);
++
++    FLASH_NAMESPACE::Softmax<2 * size<1>(acc_o)> softmax;
++    cute::fill(softmax.row_max, -INFINITY);
++    cute::fill(softmax.row_sum, 0.f);
++
++    // A row block with no live tile (a leading non-owner chunk under causal)
++    // loads nothing and goes straight to the epilogue, which writes what v11
++    // writes for fully masked rows: out 0, lse +inf.
++    if (run0.x >= 0) {
++        int n_block = run0.x;
++        int run_lo = run0.y;
++        // The next live tile after n_block: one lower inside the run, else the
++        // next run's top (-1 after the last run: the sentinel).
++        auto next_live = [&]() {
++            if (n_block > run_lo) { return n_block - 1; }
++            const int2 r = *run_next;
++            ++run_next;
++            run_lo = r.y;
++            return r.x;
++        };
++
++        // Prologue
++
++        // We don't need to clear the sQ smem tiles since we'll only write out the valid outputs
++        FLASH_NAMESPACE::copy<Is_even_MN, Is_even_K>(gmem_tiled_copy_QKV, tQgQ, tQsQ, tQcQ, tQpQ,
++                                           binfo.actual_seqlen_q - m_block * kBlockM);
++        if (Kernel_traits::Is_Q_in_regs) { cute::cp_async_fence(); }
++
++        if (Kernel_traits::Share_Q_K_smem) {
++            FLASH_NAMESPACE::cp_async_wait<0>();
++            __syncthreads();
++            Tensor tSrQ_copy_view = smem_thr_copy_Q.retile_D(tSrQ);
++            CUTE_STATIC_ASSERT_V(size<1>(tSsQ) == size<1>(tSrQ_copy_view));            // M
++            cute::copy(smem_tiled_copy_Q, tSsQ, tSrQ_copy_view);
++            __syncthreads();
++        }
++
++        // The first live tile may be the ragged last one: predicated load.
++        // We don't need to clear the sK smem tiles since we'll mask out the scores anyway.
++        FLASH_NAMESPACE::copy<Is_even_MN, Is_even_K>(gmem_tiled_copy_QKV, seg_k(n_block), tKsK, tKVcKV, tKVpKV,
++                                           binfo.actual_seqlen_k - n_block * kBlockN);
++        cute::cp_async_fence();
++
++        if (Kernel_traits::Is_Q_in_regs && !Kernel_traits::Share_Q_K_smem) {
++            FLASH_NAMESPACE::cp_async_wait<1>();
++            __syncthreads();
++            Tensor tSrQ_copy_view = smem_thr_copy_Q.retile_D(tSrQ);
++            CUTE_STATIC_ASSERT_V(size<1>(tSsQ) == size<1>(tSrQ_copy_view));            // M
++            cute::copy(smem_tiled_copy_Q, tSsQ, tSrQ_copy_view);
++        }
++
++        FLASH_NAMESPACE::Mask<Is_causal, /*Is_local=*/false, /*Has_alibi=*/false> mask(
++            binfo.actual_seqlen_k, binfo.actual_seqlen_q, params.window_size_left, params.window_size_right);
++
++        // Masking steps: the tiles upstream masks (the causal diagonal, the
++        // ragged last tile) are the top n_masking_steps tiles of the row, as
++        // in v11; the live ones among them take the masked body. Only the
++        // first visited tile can be the ragged one (it is the highest n).
++        constexpr int n_masking_steps = !Is_causal
++            ? 1
++            : ((Is_even_MN && Is_causal) ? cute::ceil_div(kBlockM, kBlockN) : cute::ceil_div(kBlockM, kBlockN) + 1);
++        const int n_mask_lo = std::max(n_block_max - n_masking_steps, 0);
++        #pragma unroll
++        for (int masking_step = 0; masking_step < n_masking_steps; ++masking_step) {
++            if (n_block < n_mask_lo) { break; }
++            Tensor acc_s = partition_fragment_C(tiled_mma, Shape<Int<kBlockM>, Int<kBlockN>>{});  // (MMA=4, MMA_M, MMA_N)
++            clear(acc_s);
++            FLASH_NAMESPACE::cp_async_wait<0>();
++            __syncthreads();
++
++            if (masking_step > 0) {
++                FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, seg_v(n_block), tVsV, tKVcKV, tKVpKV);
++            } else {
++                // Clear the smem tiles to account for predicated off loads
++                FLASH_NAMESPACE::copy<Is_even_MN, Is_even_K, /*Clear_OOB_MN=*/true>(
++                    gmem_tiled_copy_QKV, seg_v(n_block), tVsV, tKVcKV, tKVpKV, binfo.actual_seqlen_k - n_block * kBlockN
++                );
++            }
++            cute::cp_async_fence();
++            const int n_next = next_live();
++
++            FLASH_NAMESPACE::gemm</*A_in_regs=*/Kernel_traits::Is_Q_in_regs>(
++                acc_s, tSrQ, tSrK, tSsQ, tSsK, tiled_mma, smem_tiled_copy_Q, smem_tiled_copy_K,
++                smem_thr_copy_Q, smem_thr_copy_K
++            );
++
++            mask.template apply_mask<Is_causal, Is_even_MN>(
++                acc_s, n_block * kBlockN, m_block * kBlockM + (tidx / 32) * 16 + (tidx % 32) / 4, kNWarps * 16,
++                m_block * kBlockM, kBlockM, kBlockN, /*cqs_tile_state=*/0
++            );
++
++            FLASH_NAMESPACE::cp_async_wait<0>();
++            __syncthreads();
++            if (n_next >= 0) {
++                FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, seg_k(n_next), tKsK, tKVcKV, tKVpKV);
++                // This cp_async_fence needs to be in the if block, otherwise the synchronization
++                // isn't right and we get race conditions.
++                cute::cp_async_fence();
++            }
++
++            softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/true>(
++                acc_s, acc_o, params.scale_softmax_log2);
++
++            // Convert acc_s from fp32 to fp16/bf16
++            Tensor rP = FLASH_NAMESPACE::convert_type<Element>(acc_s);
++            // Reshape rP from (MMA=4, MMA_M, MMA_N) to ((4, 2), MMA_M, MMA_N / 2)
++            // if using m16n8k16 or (4, MMA_M, MMA_N) if using m16n8k8.
++            Tensor tOrP = make_tensor(rP.data(), FLASH_NAMESPACE::convert_layout_acc_Aregs<typename Kernel_traits::TiledMma>(rP.layout()));
++            FLASH_NAMESPACE::gemm_rs(acc_o, tOrP, tOrVt, tOsVt, tiled_mma, smem_tiled_copy_V, smem_thr_copy_V);
++
++            n_block = n_next;
++        }
++
++        // Steady state: upstream's straight-line body, no mask.
++        while (n_block >= 0) {
++            Tensor acc_s = partition_fragment_C(tiled_mma, Shape<Int<kBlockM>, Int<kBlockN>>{});  // (MMA=4, MMA_M, MMA_N)
++            clear(acc_s);
++            FLASH_NAMESPACE::cp_async_wait<0>();
++            __syncthreads();
++            FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, seg_v(n_block), tVsV, tKVcKV, tKVpKV);
++            cute::cp_async_fence();
++            const int n_next = next_live();
++
++            FLASH_NAMESPACE::gemm</*A_in_regs=*/Kernel_traits::Is_Q_in_regs>(
++                acc_s, tSrQ, tSrK, tSsQ, tSsK, tiled_mma, smem_tiled_copy_Q, smem_tiled_copy_K,
++                smem_thr_copy_Q, smem_thr_copy_K
++            );
++
++            FLASH_NAMESPACE::cp_async_wait<0>();
++            __syncthreads();
++            if (n_next >= 0) {
++                FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, seg_k(n_next), tKsK, tKVcKV, tKVpKV);
++                // This cp_async_fence needs to be in the if block, otherwise the synchronization
++                // isn't right and we get race conditions.
++                cute::cp_async_fence();
++            }
++
++            softmax.template softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/true>(
++                acc_s, acc_o, params.scale_softmax_log2);
++
++            Tensor rP = FLASH_NAMESPACE::convert_type<Element>(acc_s);
++            // Reshape rP from (MMA=4, MMA_M, MMA_N) to ((4, 2), MMA_M, MMA_N / 2)
++            // if using m16n8k16 or (4, MMA_M, MMA_N) if using m16n8k8.
++            Tensor tOrP = make_tensor(rP.data(), FLASH_NAMESPACE::convert_layout_acc_Aregs<typename Kernel_traits::TiledMma>(rP.layout()));
++            FLASH_NAMESPACE::gemm_rs(acc_o, tOrP, tOrVt, tOsVt, tiled_mma, smem_tiled_copy_V, smem_thr_copy_V);
++
++            n_block = n_next;
++        }
++    }
++
++    // Epilogue: v11's (fp32 out from the MMA registers, fp16 out, lse).
++
++    Tensor lse = softmax.template normalize_softmax_lse</*Is_dropout=*/false>(acc_o, params.scale_softmax, params.rp_dropout);
++
++    Tensor caccO = make_identity_tensor(Shape<Int<kBlockM>, Int<kHeadDim>>{});    // (BLK_M,BLK_K) -> (blk_m,blk_k)
++    Tensor taccOcO = thr_mma.partition_C(caccO);                           // (MMA,MMA_M,MMA_K)
++    if (params.cqs_out_acc_ptr != nullptr) {
++        Tensor mOacc = make_tensor(
++            make_gmem_ptr(reinterpret_cast<ElementAccum *>(params.cqs_out_acc_ptr)
++                          + binfo.q_offset(params.o_batch_stride, params.o_row_stride, bidb)),
++            make_shape(binfo.actual_seqlen_q, params.h, params.d),
++            make_stride(params.o_row_stride, params.o_head_stride, _1{}));
++        Tensor gOacc = local_tile(mOacc(_, bidh, _), Shape<Int<kBlockM>, Int<kHeadDim>>{},
++                                  make_coord(m_block, 0));
++        Tensor tOgOacc = thr_mma.partition_C(gOacc);
++        const int row_limit = binfo.actual_seqlen_q - m_block * kBlockM;
++        #pragma unroll
++        for (int i = 0; i < size(acc_o); ++i) {
++            const int row = get<0>(taccOcO(i));
++            const int col = get<1>(taccOcO(i));
++            if (row < row_limit && col < params.d) { tOgOacc(i) = acc_o(i); }
++        }
++    }
++
++    // Convert acc_o from fp32 to fp16/bf16
++    Tensor rO = FLASH_NAMESPACE::convert_type<Element>(acc_o);
++    Tensor sO = make_tensor(sQ.data(), typename Kernel_traits::SmemLayoutO{});    // (SMEM_M,SMEM_N)
++    // Partition sO to match the accumulator partitioning
++    auto smem_tiled_copy_O = make_tiled_copy_C(typename Kernel_traits::SmemCopyAtomO{}, tiled_mma);
++    auto smem_thr_copy_O = smem_tiled_copy_O.get_thread_slice(tidx);
++    Tensor taccOrO = smem_thr_copy_O.retile_S(rO);        // ((Atom,AtomNum), MMA_M, MMA_N)
++    Tensor taccOsO = smem_thr_copy_O.partition_D(sO);     // ((Atom,AtomNum),PIPE_M,PIPE_N)
++
++    // sO has the same size as sQ, so we don't need to sync here.
++    if (Kernel_traits::Share_Q_K_smem) { __syncthreads(); }
++
++    cute::copy(smem_tiled_copy_O, taccOrO, taccOsO);
++
++    Tensor mO = make_tensor(make_gmem_ptr(reinterpret_cast<Element*>(params.o_ptr)
++                                          + binfo.q_offset(params.o_batch_stride, params.o_row_stride, bidb)),
++                            make_shape(binfo.actual_seqlen_q, params.h, params.d),
++                            make_stride(params.o_row_stride, params.o_head_stride, _1{}));
++    Tensor gO = local_tile(mO(_, bidh, _), Shape<Int<kBlockM>, Int<kHeadDim>>{},
++                           make_coord(m_block, 0));  // (kBlockM, kHeadDim)
++    Tensor gLSE = get_lse_tile<ElementAccum, Params, kBlockM, Is_even_MN>(params, bidb, bidh, m_block, binfo);
++
++    typename Kernel_traits::GmemTiledCopyO gmem_tiled_copy_O;
++    auto gmem_thr_copy_O = gmem_tiled_copy_O.get_thread_slice(tidx);
++    Tensor tOsO = gmem_thr_copy_O.partition_S(sO);        // ((Atom,AtomNum),ATOM_M,ATOM_N)
++    Tensor tOgO = gmem_thr_copy_O.partition_D(gO);
++
++    __syncthreads();
++
++    Tensor tOrO = make_tensor<Element>(shape(tOgO));
++    cute::copy(gmem_tiled_copy_O, tOsO, tOrO);
++
++    static_assert(decltype(size<0>(taccOcO))::value == 4);
++    // Convert to ((2, 2), MMA_M, MMA_K) then take only the row indices.
++    Tensor taccOcO_row = logical_divide(taccOcO, Shape<_2>{})(make_coord(0, _), _, 0);
++    CUTE_STATIC_ASSERT_V(size(lse) == size(taccOcO_row));                     // MMA_M
++    if (get<1>(taccOcO_row(0)) == 0) {
++        #pragma unroll
++        for (int mi = 0; mi < size(lse); ++mi) {
++            const int row = get<0>(taccOcO_row(mi));
++            if (row < binfo.actual_seqlen_q - m_block * kBlockM) { gLSE(row) = lse(mi); }
++        }
++    }
++
++    // Construct identity layout for sO
++    Tensor cO = make_identity_tensor(make_shape(size<0>(sO), size<1>(sO)));    // (BLK_M,BLK_K) -> (blk_m,blk_k)
++    // Repeat the partitioning with identity layouts
++    Tensor tOcO = gmem_thr_copy_O.partition_D(cO);                           // (ACPY,ACPY_M,ACPY_K) -> (blk_m,blk_k)
++    Tensor tOpO = make_tensor<bool>(make_shape(size<2>(tOgO)));
++    // Clear_OOB_K must be false since we don't want to write zeros to gmem
++    FLASH_NAMESPACE::copy<Is_even_MN, Is_even_K, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
++        gmem_tiled_copy_O, tOrO, tOgO, tOcO, tOpO, binfo.actual_seqlen_q - m_block * kBlockM
++    );
++}
++
++template<typename Kernel_traits, bool Is_causal, bool Is_even_MN>
++__global__ void flash_fwd_aligned_kernel(KERNEL_PARAM_MODIFIER const Flash_fwd_params params) {
++    #if defined(ARCH_SUPPORTS_FLASH)
++        // The census found a mixed tile or overflowed a run table: LEGACY,
++        // launched right after this kernel, computes the call instead.
++        if (__ldg(params.cqs_route) != 0) { return; }
++        const int m_block = params.cqs_reverse_m ? int(gridDim.x) - 1 - int(blockIdx.x) : int(blockIdx.x);
++        FLASH_NAMESPACE::compute_attn_1rowblock_aligned<Kernel_traits, Is_causal, Is_even_MN>(
++            params, blockIdx.y, blockIdx.z, m_block);
++    #else
++        FLASH_UNSUPPORTED_ARCH
++    #endif
++}
++
++template<typename Kernel_traits, bool Is_causal>
++void run_flash_fwd_aligned(Flash_fwd_params &params, cudaStream_t stream) {
++    run_cqs_fwd_census(params, Kernel_traits::kBlockM, Kernel_traits::kBlockN, stream);
++    // No sCqsBits staging area: this kernel never reads group bits.
++    constexpr size_t smem_size = Kernel_traits::kSmemSize;
++    const int num_m_block = (params.seqlen_q + Kernel_traits::kBlockM - 1) / Kernel_traits::kBlockM;
++    dim3 grid(num_m_block, params.b, params.h);
++    const bool is_even_MN = params.seqlen_k % Kernel_traits::kBlockN == 0 && params.seqlen_q % Kernel_traits::kBlockM == 0;
++    BOOL_SWITCH(is_even_MN, IsEvenMNConst, [&] {
++        auto kernel = &flash_fwd_aligned_kernel<Kernel_traits, Is_causal, IsEvenMNConst>;
++        if (smem_size >= 48 * 1024) {
++            C10_CUDA_CHECK(cudaFuncSetAttribute(
++                kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
++        }
++        kernel<<<grid, Kernel_traits::kNThreads, smem_size, stream>>>(params);
++        C10_CUDA_KERNEL_LAUNCH_CHECK();
++    });
++}
++
++// The entry of a forward translation unit (flash_fwd_hdim*_sm80.cu): CQS off
++// runs upstream's instantiations, CQS on the census and ALIGNED.
++template<typename T, int Headdim, bool Is_causal>
++void run_mha_fwd_plain_or_aligned(Flash_fwd_params &params, cudaStream_t stream) {
++    if (params.cqs_enabled) {
++        using Tile = CqsAlignedTile<Headdim>;
++        run_flash_fwd_aligned<Flash_fwd_kernel_traits<Headdim, Tile::kBlockM, Tile::kBlockN, 4, false, false, T>, Is_causal>(
++            params, stream);
++    } else if constexpr (Headdim == 64) {
++        run_mha_fwd_hdim64<T, Is_causal>(params, stream);
++    } else {
++        static_assert(Headdim == 128, "v12f builds the forward for head dims 64 and 128 only");
++        run_mha_fwd_hdim128<T, Is_causal>(params, stream);
++    }
++}
++
++}  // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/csrc/flash_attn/src/flash_fwd_hdim128_bf16_causal_legacy_sm80.cu v12f/csrc/flash_attn/src/flash_fwd_hdim128_bf16_causal_legacy_sm80.cu
+--- v11/csrc/flash_attn/src/flash_fwd_hdim128_bf16_causal_legacy_sm80.cu	1969-12-31 19:00:00.000000000 -0500
++++ v12f/csrc/flash_attn/src/flash_fwd_hdim128_bf16_causal_legacy_sm80.cu	2026-09-23 10:36:12.648732961 -0400
+@@ -0,0 +1,13 @@
++// next/ v12f: v11's CQS-on forward (LEGACY: per-element mask path), alone in
++// its translation unit so that its long ptxas run is paid only when it changes.
++#include "namespace_config.h"
++#include "flash_fwd_launch_template.h"
++
++namespace FLASH_NAMESPACE {
++
++template<>
++void run_mha_fwd_legacy_<cutlass::bfloat16_t, 128, true>(Flash_fwd_params &params, cudaStream_t stream) {
++    run_mha_fwd_hdim128<cutlass::bfloat16_t, true, /*Cqs_on=*/true>(params, stream);
++}
++
++} // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/csrc/flash_attn/src/flash_fwd_hdim128_bf16_causal_sm80.cu v12f/csrc/flash_attn/src/flash_fwd_hdim128_bf16_causal_sm80.cu
+--- v11/csrc/flash_attn/src/flash_fwd_hdim128_bf16_causal_sm80.cu	2026-03-03 00:28:57.771898013 -0500
++++ v12f/csrc/flash_attn/src/flash_fwd_hdim128_bf16_causal_sm80.cu	2026-09-23 10:36:12.648552278 -0400
+@@ -1,14 +1,15 @@
+-// Copyright (c) 2024, Tri Dao.
+-// Splitting the different head dimensions to different files to speed up compilation.
+-// This file is auto-generated. See "generate_kernels.py"
+-#include "namespace_config.h"
+-#include "flash_fwd_launch_template.h"
+-
+-namespace FLASH_NAMESPACE {
+-
+-template<>
+-void run_mha_fwd_<cutlass::bfloat16_t, 128, true>(Flash_fwd_params &params, cudaStream_t stream) {
+-    run_mha_fwd_hdim128<cutlass::bfloat16_t, true>(params, stream);
+-}
+-
+-} // namespace FLASH_NAMESPACE
+\ No newline at end of file
++// Copyright (c) 2024, Tri Dao.
++// Splitting the different head dimensions to different files to speed up compilation.
++// next/ v12f: the CQS-off forward and the ALIGNED CQS-on forward; v11's CQS-on
++// forward (LEGACY) is in flash_fwd_hdim128_bf16_causal_legacy_sm80.cu.
++#include "namespace_config.h"
++#include "flash_fwd_aligned.h"
++
++namespace FLASH_NAMESPACE {
++
++template<>
++void run_mha_fwd_<cutlass::bfloat16_t, 128, true>(Flash_fwd_params &params, cudaStream_t stream) {
++    run_mha_fwd_plain_or_aligned<cutlass::bfloat16_t, 128, true>(params, stream);
++}
++
++} // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/csrc/flash_attn/src/flash_fwd_hdim128_bf16_legacy_sm80.cu v12f/csrc/flash_attn/src/flash_fwd_hdim128_bf16_legacy_sm80.cu
+--- v11/csrc/flash_attn/src/flash_fwd_hdim128_bf16_legacy_sm80.cu	1969-12-31 19:00:00.000000000 -0500
++++ v12f/csrc/flash_attn/src/flash_fwd_hdim128_bf16_legacy_sm80.cu	2026-09-23 10:36:12.649298241 -0400
+@@ -0,0 +1,13 @@
++// next/ v12f: v11's CQS-on forward (LEGACY: per-element mask path), alone in
++// its translation unit so that its long ptxas run is paid only when it changes.
++#include "namespace_config.h"
++#include "flash_fwd_launch_template.h"
++
++namespace FLASH_NAMESPACE {
++
++template<>
++void run_mha_fwd_legacy_<cutlass::bfloat16_t, 128, false>(Flash_fwd_params &params, cudaStream_t stream) {
++    run_mha_fwd_hdim128<cutlass::bfloat16_t, false, /*Cqs_on=*/true>(params, stream);
++}
++
++} // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/csrc/flash_attn/src/flash_fwd_hdim128_bf16_sm80.cu v12f/csrc/flash_attn/src/flash_fwd_hdim128_bf16_sm80.cu
+--- v11/csrc/flash_attn/src/flash_fwd_hdim128_bf16_sm80.cu	2026-03-03 00:28:57.926911526 -0500
++++ v12f/csrc/flash_attn/src/flash_fwd_hdim128_bf16_sm80.cu	2026-09-23 10:36:12.649146737 -0400
+@@ -1,14 +1,15 @@
+-// Copyright (c) 2024, Tri Dao.
+-// Splitting the different head dimensions to different files to speed up compilation.
+-// This file is auto-generated. See "generate_kernels.py"
+-#include "namespace_config.h"
+-#include "flash_fwd_launch_template.h"
+-
+-namespace FLASH_NAMESPACE {
+-
+-template<>
+-void run_mha_fwd_<cutlass::bfloat16_t, 128, false>(Flash_fwd_params &params, cudaStream_t stream) {
+-    run_mha_fwd_hdim128<cutlass::bfloat16_t, false>(params, stream);
+-}
+-
+-} // namespace FLASH_NAMESPACE
+\ No newline at end of file
++// Copyright (c) 2024, Tri Dao.
++// Splitting the different head dimensions to different files to speed up compilation.
++// next/ v12f: the CQS-off forward and the ALIGNED CQS-on forward; v11's CQS-on
++// forward (LEGACY) is in flash_fwd_hdim128_bf16_legacy_sm80.cu.
++#include "namespace_config.h"
++#include "flash_fwd_aligned.h"
++
++namespace FLASH_NAMESPACE {
++
++template<>
++void run_mha_fwd_<cutlass::bfloat16_t, 128, false>(Flash_fwd_params &params, cudaStream_t stream) {
++    run_mha_fwd_plain_or_aligned<cutlass::bfloat16_t, 128, false>(params, stream);
++}
++
++} // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/csrc/flash_attn/src/flash_fwd_hdim128_fp16_causal_legacy_sm80.cu v12f/csrc/flash_attn/src/flash_fwd_hdim128_fp16_causal_legacy_sm80.cu
+--- v11/csrc/flash_attn/src/flash_fwd_hdim128_fp16_causal_legacy_sm80.cu	1969-12-31 19:00:00.000000000 -0500
++++ v12f/csrc/flash_attn/src/flash_fwd_hdim128_fp16_causal_legacy_sm80.cu	2026-09-23 10:36:12.646183878 -0400
+@@ -0,0 +1,13 @@
++// next/ v12f: v11's CQS-on forward (LEGACY: per-element mask path), alone in
++// its translation unit so that its long ptxas run is paid only when it changes.
++#include "namespace_config.h"
++#include "flash_fwd_launch_template.h"
++
++namespace FLASH_NAMESPACE {
++
++template<>
++void run_mha_fwd_legacy_<cutlass::half_t, 128, true>(Flash_fwd_params &params, cudaStream_t stream) {
++    run_mha_fwd_hdim128<cutlass::half_t, true, /*Cqs_on=*/true>(params, stream);
++}
++
++} // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/csrc/flash_attn/src/flash_fwd_hdim128_fp16_causal_sm80.cu v12f/csrc/flash_attn/src/flash_fwd_hdim128_fp16_causal_sm80.cu
+--- v11/csrc/flash_attn/src/flash_fwd_hdim128_fp16_causal_sm80.cu	2026-03-03 00:28:58.082925127 -0500
++++ v12f/csrc/flash_attn/src/flash_fwd_hdim128_fp16_causal_sm80.cu	2026-09-23 10:36:12.646006357 -0400
+@@ -1,14 +1,15 @@
+-// Copyright (c) 2024, Tri Dao.
+-// Splitting the different head dimensions to different files to speed up compilation.
+-// This file is auto-generated. See "generate_kernels.py"
+-#include "namespace_config.h"
+-#include "flash_fwd_launch_template.h"
+-
+-namespace FLASH_NAMESPACE {
+-
+-template<>
+-void run_mha_fwd_<cutlass::half_t, 128, true>(Flash_fwd_params &params, cudaStream_t stream) {
+-    run_mha_fwd_hdim128<cutlass::half_t, true>(params, stream);
+-}
+-
+-} // namespace FLASH_NAMESPACE
+\ No newline at end of file
++// Copyright (c) 2024, Tri Dao.
++// Splitting the different head dimensions to different files to speed up compilation.
++// next/ v12f: the CQS-off forward and the ALIGNED CQS-on forward; v11's CQS-on
++// forward (LEGACY) is in flash_fwd_hdim128_fp16_causal_legacy_sm80.cu.
++#include "namespace_config.h"
++#include "flash_fwd_aligned.h"
++
++namespace FLASH_NAMESPACE {
++
++template<>
++void run_mha_fwd_<cutlass::half_t, 128, true>(Flash_fwd_params &params, cudaStream_t stream) {
++    run_mha_fwd_plain_or_aligned<cutlass::half_t, 128, true>(params, stream);
++}
++
++} // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/csrc/flash_attn/src/flash_fwd_hdim128_fp16_legacy_sm80.cu v12f/csrc/flash_attn/src/flash_fwd_hdim128_fp16_legacy_sm80.cu
+--- v11/csrc/flash_attn/src/flash_fwd_hdim128_fp16_legacy_sm80.cu	1969-12-31 19:00:00.000000000 -0500
++++ v12f/csrc/flash_attn/src/flash_fwd_hdim128_fp16_legacy_sm80.cu	2026-09-23 10:36:12.646664401 -0400
+@@ -0,0 +1,13 @@
++// next/ v12f: v11's CQS-on forward (LEGACY: per-element mask path), alone in
++// its translation unit so that its long ptxas run is paid only when it changes.
++#include "namespace_config.h"
++#include "flash_fwd_launch_template.h"
++
++namespace FLASH_NAMESPACE {
++
++template<>
++void run_mha_fwd_legacy_<cutlass::half_t, 128, false>(Flash_fwd_params &params, cudaStream_t stream) {
++    run_mha_fwd_hdim128<cutlass::half_t, false, /*Cqs_on=*/true>(params, stream);
++}
++
++} // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/csrc/flash_attn/src/flash_fwd_hdim128_fp16_sm80.cu v12f/csrc/flash_attn/src/flash_fwd_hdim128_fp16_sm80.cu
+--- v11/csrc/flash_attn/src/flash_fwd_hdim128_fp16_sm80.cu	2026-03-03 00:28:58.234938379 -0500
++++ v12f/csrc/flash_attn/src/flash_fwd_hdim128_fp16_sm80.cu	2026-09-23 10:36:12.646496095 -0400
+@@ -1,14 +1,15 @@
+-// Copyright (c) 2024, Tri Dao.
+-// Splitting the different head dimensions to different files to speed up compilation.
+-// This file is auto-generated. See "generate_kernels.py"
+-#include "namespace_config.h"
+-#include "flash_fwd_launch_template.h"
+-
+-namespace FLASH_NAMESPACE {
+-
+-template<>
+-void run_mha_fwd_<cutlass::half_t, 128, false>(Flash_fwd_params &params, cudaStream_t stream) {
+-    run_mha_fwd_hdim128<cutlass::half_t, false>(params, stream);
+-}
+-
+-} // namespace FLASH_NAMESPACE
+\ No newline at end of file
++// Copyright (c) 2024, Tri Dao.
++// Splitting the different head dimensions to different files to speed up compilation.
++// next/ v12f: the CQS-off forward and the ALIGNED CQS-on forward; v11's CQS-on
++// forward (LEGACY) is in flash_fwd_hdim128_fp16_legacy_sm80.cu.
++#include "namespace_config.h"
++#include "flash_fwd_aligned.h"
++
++namespace FLASH_NAMESPACE {
++
++template<>
++void run_mha_fwd_<cutlass::half_t, 128, false>(Flash_fwd_params &params, cudaStream_t stream) {
++    run_mha_fwd_plain_or_aligned<cutlass::half_t, 128, false>(params, stream);
++}
++
++} // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/csrc/flash_attn/src/flash_fwd_hdim64_bf16_causal_legacy_sm80.cu v12f/csrc/flash_attn/src/flash_fwd_hdim64_bf16_causal_legacy_sm80.cu
+--- v11/csrc/flash_attn/src/flash_fwd_hdim64_bf16_causal_legacy_sm80.cu	1969-12-31 19:00:00.000000000 -0500
++++ v12f/csrc/flash_attn/src/flash_fwd_hdim64_bf16_causal_legacy_sm80.cu	2026-09-23 10:36:12.647426653 -0400
+@@ -0,0 +1,13 @@
++// next/ v12f: v11's CQS-on forward (LEGACY: per-element mask path), alone in
++// its translation unit so that its long ptxas run is paid only when it changes.
++#include "namespace_config.h"
++#include "flash_fwd_launch_template.h"
++
++namespace FLASH_NAMESPACE {
++
++template<>
++void run_mha_fwd_legacy_<cutlass::bfloat16_t, 64, true>(Flash_fwd_params &params, cudaStream_t stream) {
++    run_mha_fwd_hdim64<cutlass::bfloat16_t, true, /*Cqs_on=*/true>(params, stream);
++}
++
++} // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/csrc/flash_attn/src/flash_fwd_hdim64_bf16_causal_sm80.cu v12f/csrc/flash_attn/src/flash_fwd_hdim64_bf16_causal_sm80.cu
+--- v11/csrc/flash_attn/src/flash_fwd_hdim64_bf16_causal_sm80.cu	2026-03-03 00:29:00.292117719 -0500
++++ v12f/csrc/flash_attn/src/flash_fwd_hdim64_bf16_causal_sm80.cu	2026-09-23 10:36:12.647212612 -0400
+@@ -1,14 +1,15 @@
+-// Copyright (c) 2024, Tri Dao.
+-// Splitting the different head dimensions to different files to speed up compilation.
+-// This file is auto-generated. See "generate_kernels.py"
+-#include "namespace_config.h"
+-#include "flash_fwd_launch_template.h"
+-
+-namespace FLASH_NAMESPACE {
+-
+-template<>
+-void run_mha_fwd_<cutlass::bfloat16_t, 64, true>(Flash_fwd_params &params, cudaStream_t stream) {
+-    run_mha_fwd_hdim64<cutlass::bfloat16_t, true>(params, stream);
+-}
+-
+-} // namespace FLASH_NAMESPACE
+\ No newline at end of file
++// Copyright (c) 2024, Tri Dao.
++// Splitting the different head dimensions to different files to speed up compilation.
++// next/ v12f: the CQS-off forward and the ALIGNED CQS-on forward; v11's CQS-on
++// forward (LEGACY) is in flash_fwd_hdim64_bf16_causal_legacy_sm80.cu.
++#include "namespace_config.h"
++#include "flash_fwd_aligned.h"
++
++namespace FLASH_NAMESPACE {
++
++template<>
++void run_mha_fwd_<cutlass::bfloat16_t, 64, true>(Flash_fwd_params &params, cudaStream_t stream) {
++    run_mha_fwd_plain_or_aligned<cutlass::bfloat16_t, 64, true>(params, stream);
++}
++
++} // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/csrc/flash_attn/src/flash_fwd_hdim64_bf16_legacy_sm80.cu v12f/csrc/flash_attn/src/flash_fwd_hdim64_bf16_legacy_sm80.cu
+--- v11/csrc/flash_attn/src/flash_fwd_hdim64_bf16_legacy_sm80.cu	1969-12-31 19:00:00.000000000 -0500
++++ v12f/csrc/flash_attn/src/flash_fwd_hdim64_bf16_legacy_sm80.cu	2026-09-23 10:36:12.648033889 -0400
+@@ -0,0 +1,13 @@
++// next/ v12f: v11's CQS-on forward (LEGACY: per-element mask path), alone in
++// its translation unit so that its long ptxas run is paid only when it changes.
++#include "namespace_config.h"
++#include "flash_fwd_launch_template.h"
++
++namespace FLASH_NAMESPACE {
++
++template<>
++void run_mha_fwd_legacy_<cutlass::bfloat16_t, 64, false>(Flash_fwd_params &params, cudaStream_t stream) {
++    run_mha_fwd_hdim64<cutlass::bfloat16_t, false, /*Cqs_on=*/true>(params, stream);
++}
++
++} // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/csrc/flash_attn/src/flash_fwd_hdim64_bf16_sm80.cu v12f/csrc/flash_attn/src/flash_fwd_hdim64_bf16_sm80.cu
+--- v11/csrc/flash_attn/src/flash_fwd_hdim64_bf16_sm80.cu	2026-03-03 00:29:00.448131320 -0500
++++ v12f/csrc/flash_attn/src/flash_fwd_hdim64_bf16_sm80.cu	2026-09-23 10:36:12.647873246 -0400
+@@ -1,14 +1,15 @@
+-// Copyright (c) 2024, Tri Dao.
+-// Splitting the different head dimensions to different files to speed up compilation.
+-// This file is auto-generated. See "generate_kernels.py"
+-#include "namespace_config.h"
+-#include "flash_fwd_launch_template.h"
+-
+-namespace FLASH_NAMESPACE {
+-
+-template<>
+-void run_mha_fwd_<cutlass::bfloat16_t, 64, false>(Flash_fwd_params &params, cudaStream_t stream) {
+-    run_mha_fwd_hdim64<cutlass::bfloat16_t, false>(params, stream);
+-}
+-
+-} // namespace FLASH_NAMESPACE
+\ No newline at end of file
++// Copyright (c) 2024, Tri Dao.
++// Splitting the different head dimensions to different files to speed up compilation.
++// next/ v12f: the CQS-off forward and the ALIGNED CQS-on forward; v11's CQS-on
++// forward (LEGACY) is in flash_fwd_hdim64_bf16_legacy_sm80.cu.
++#include "namespace_config.h"
++#include "flash_fwd_aligned.h"
++
++namespace FLASH_NAMESPACE {
++
++template<>
++void run_mha_fwd_<cutlass::bfloat16_t, 64, false>(Flash_fwd_params &params, cudaStream_t stream) {
++    run_mha_fwd_plain_or_aligned<cutlass::bfloat16_t, 64, false>(params, stream);
++}
++
++} // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/csrc/flash_attn/src/flash_fwd_hdim64_fp16_causal_legacy_sm80.cu v12f/csrc/flash_attn/src/flash_fwd_hdim64_fp16_causal_legacy_sm80.cu
+--- v11/csrc/flash_attn/src/flash_fwd_hdim64_fp16_causal_legacy_sm80.cu	1969-12-31 19:00:00.000000000 -0500
++++ v12f/csrc/flash_attn/src/flash_fwd_hdim64_fp16_causal_legacy_sm80.cu	2026-09-23 10:36:12.644787429 -0400
+@@ -0,0 +1,13 @@
++// next/ v12f: v11's CQS-on forward (LEGACY: per-element mask path), alone in
++// its translation unit so that its long ptxas run is paid only when it changes.
++#include "namespace_config.h"
++#include "flash_fwd_launch_template.h"
++
++namespace FLASH_NAMESPACE {
++
++template<>
++void run_mha_fwd_legacy_<cutlass::half_t, 64, true>(Flash_fwd_params &params, cudaStream_t stream) {
++    run_mha_fwd_hdim64<cutlass::half_t, true, /*Cqs_on=*/true>(params, stream);
++}
++
++} // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/csrc/flash_attn/src/flash_fwd_hdim64_fp16_causal_sm80.cu v12f/csrc/flash_attn/src/flash_fwd_hdim64_fp16_causal_sm80.cu
+--- v11/csrc/flash_attn/src/flash_fwd_hdim64_fp16_causal_sm80.cu	2026-03-03 00:29:00.603144834 -0500
++++ v12f/csrc/flash_attn/src/flash_fwd_hdim64_fp16_causal_sm80.cu	2026-09-23 10:36:12.644530579 -0400
+@@ -1,14 +1,15 @@
+-// Copyright (c) 2024, Tri Dao.
+-// Splitting the different head dimensions to different files to speed up compilation.
+-// This file is auto-generated. See "generate_kernels.py"
+-#include "namespace_config.h"
+-#include "flash_fwd_launch_template.h"
+-
+-namespace FLASH_NAMESPACE {
+-
+-template<>
+-void run_mha_fwd_<cutlass::half_t, 64, true>(Flash_fwd_params &params, cudaStream_t stream) {
+-    run_mha_fwd_hdim64<cutlass::half_t, true>(params, stream);
+-}
+-
+-} // namespace FLASH_NAMESPACE
+\ No newline at end of file
++// Copyright (c) 2024, Tri Dao.
++// Splitting the different head dimensions to different files to speed up compilation.
++// next/ v12f: the CQS-off forward and the ALIGNED CQS-on forward; v11's CQS-on
++// forward (LEGACY) is in flash_fwd_hdim64_fp16_causal_legacy_sm80.cu.
++#include "namespace_config.h"
++#include "flash_fwd_aligned.h"
++
++namespace FLASH_NAMESPACE {
++
++template<>
++void run_mha_fwd_<cutlass::half_t, 64, true>(Flash_fwd_params &params, cudaStream_t stream) {
++    run_mha_fwd_plain_or_aligned<cutlass::half_t, 64, true>(params, stream);
++}
++
++} // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/csrc/flash_attn/src/flash_fwd_hdim64_fp16_legacy_sm80.cu v12f/csrc/flash_attn/src/flash_fwd_hdim64_fp16_legacy_sm80.cu
+--- v11/csrc/flash_attn/src/flash_fwd_hdim64_fp16_legacy_sm80.cu	1969-12-31 19:00:00.000000000 -0500
++++ v12f/csrc/flash_attn/src/flash_fwd_hdim64_fp16_legacy_sm80.cu	2026-09-23 10:36:12.645565071 -0400
+@@ -0,0 +1,13 @@
++// next/ v12f: v11's CQS-on forward (LEGACY: per-element mask path), alone in
++// its translation unit so that its long ptxas run is paid only when it changes.
++#include "namespace_config.h"
++#include "flash_fwd_launch_template.h"
++
++namespace FLASH_NAMESPACE {
++
++template<>
++void run_mha_fwd_legacy_<cutlass::half_t, 64, false>(Flash_fwd_params &params, cudaStream_t stream) {
++    run_mha_fwd_hdim64<cutlass::half_t, false, /*Cqs_on=*/true>(params, stream);
++}
++
++} // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/csrc/flash_attn/src/flash_fwd_hdim64_fp16_sm80.cu v12f/csrc/flash_attn/src/flash_fwd_hdim64_fp16_sm80.cu
+--- v11/csrc/flash_attn/src/flash_fwd_hdim64_fp16_sm80.cu	2026-03-03 00:29:00.760158522 -0500
++++ v12f/csrc/flash_attn/src/flash_fwd_hdim64_fp16_sm80.cu	2026-09-23 10:36:12.645391416 -0400
+@@ -1,14 +1,15 @@
+-// Copyright (c) 2024, Tri Dao.
+-// Splitting the different head dimensions to different files to speed up compilation.
+-// This file is auto-generated. See "generate_kernels.py"
+-#include "namespace_config.h"
+-#include "flash_fwd_launch_template.h"
+-
+-namespace FLASH_NAMESPACE {
+-
+-template<>
+-void run_mha_fwd_<cutlass::half_t, 64, false>(Flash_fwd_params &params, cudaStream_t stream) {
+-    run_mha_fwd_hdim64<cutlass::half_t, false>(params, stream);
+-}
+-
+-} // namespace FLASH_NAMESPACE
+\ No newline at end of file
++// Copyright (c) 2024, Tri Dao.
++// Splitting the different head dimensions to different files to speed up compilation.
++// next/ v12f: the CQS-off forward and the ALIGNED CQS-on forward; v11's CQS-on
++// forward (LEGACY) is in flash_fwd_hdim64_fp16_legacy_sm80.cu.
++#include "namespace_config.h"
++#include "flash_fwd_aligned.h"
++
++namespace FLASH_NAMESPACE {
++
++template<>
++void run_mha_fwd_<cutlass::half_t, 64, false>(Flash_fwd_params &params, cudaStream_t stream) {
++    run_mha_fwd_plain_or_aligned<cutlass::half_t, 64, false>(params, stream);
++}
++
++} // namespace FLASH_NAMESPACE
+diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/csrc/flash_attn/src/flash_fwd_kernel.h v12f/csrc/flash_attn/src/flash_fwd_kernel.h
+--- v11/csrc/flash_attn/src/flash_fwd_kernel.h	2026-09-12 01:33:47.693871000 -0400
++++ v12f/csrc/flash_attn/src/flash_fwd_kernel.h	2026-09-23 10:36:02.224454000 -0400
+@@ -1273,6 +1273,12 @@
+ 
+ template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Is_softcap, bool Return_softmax, int Cqs_mode, typename Params>
+ inline __device__ void compute_attn(const Params &params) {
++    // next/ v12f: when the census ran (cqs_route set), this CQS-on (LEGACY)
++    // kernel computes the call only if the census found a mixed tile;
++    // otherwise the ALIGNED kernel launched just before it already did.
++    if constexpr (Cqs_mode != 0) {
++        if (params.cqs_route != nullptr && __ldg(params.cqs_route) == 0) { return; }
++    }
+     const int m_block = blockIdx.x;
+     // The block index for the batch.
+     const int bidb = blockIdx.y;
+diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/csrc/flash_attn/src/flash_fwd_launch_template.h v12f/csrc/flash_attn/src/flash_fwd_launch_template.h
+--- v11/csrc/flash_attn/src/flash_fwd_launch_template.h	2026-09-12 07:59:00.174325000 -0400
++++ v12f/csrc/flash_attn/src/flash_fwd_launch_template.h	2026-09-23 10:35:53.401875000 -0400
+@@ -51,27 +51,13 @@
+     FLASH_NAMESPACE::combine_attn_seqk_parallel<Kernel_traits, kBlockM, Log_max_splits, Is_even_K>(params);
+ }
+ 
+-// Mode 1 (compile-time CQS on) exists only for causal kernels: the non-causal
+-// mode-1 instantiation mis-compiles (2.3x the instructions at hdim64) and
+-// ptxas does not finish it at hdim128, so it is never even instantiated.
+-#define CQS_MODE_SWITCH(MODE, IS_CAUSAL, CONST_NAME, ...)   \
+-    [&] {                                                  \
+-        if (MODE == 0) {                                   \
+-            constexpr static int CONST_NAME = 0;           \
+-            return __VA_ARGS__();                          \
+-        } else {                                           \
+-            if constexpr (IS_CAUSAL) {                     \
+-                constexpr static int CONST_NAME = 1;       \
+-                return __VA_ARGS__();                      \
+-            } else {                                       \
+-                constexpr static int CONST_NAME = 2;       \
+-                return __VA_ARGS__();                      \
+-            }                                              \
+-        }                                                  \
+-    }()
+-
+-template<typename Kernel_traits, bool Is_dropout, bool Is_causal>
++// next/ v12f: Cqs_on selects the instantiations a translation unit holds.
++// false: CQS off (upstream's loop), the plain half of flash_fwd_hdim*_sm80.cu.
++// true: v11's CQS-on forward (LEGACY), only in flash_fwd_hdim*_legacy_sm80.cu.
++// The ALIGNED CQS-on forward has its own launcher (flash_fwd_aligned.h).
++template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Cqs_on = false>
+ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
++    TORCH_CHECK(params.cqs_enabled == Cqs_on, "cqsa v12f: a CQS-on call reached the CQS-off forward (or the reverse)");
+     // next/ v2: one tile's worth of CQS column group-bits, staged in smem.
+     constexpr size_t smem_size = Kernel_traits::kSmemSize + Kernel_traits::kBlockN * sizeof(int64_t);
+     // printf("smem_size = %d\n", smem_size);
+@@ -92,8 +78,7 @@
+     // next/ v10: 0 = CQS off (compile time), 1 = on (compile time, causal only),
+     // 2 = runtime flag (non-causal CQS-on; its compile-time-on instantiation
+     // generates 2.3x the instructions, see LOG.md).
+-    const int cqs_mode = !params.cqs_enabled ? 0 : (Is_causal ? 1 : 2);
+-    CQS_MODE_SWITCH(cqs_mode, Is_causal, CqsModeConst, [&] {
++    constexpr static int CqsModeConst = !Cqs_on ? 0 : (Is_causal ? 1 : 2);
+     BOOL_SWITCH(is_even_MN, IsEvenMNConst, [&] {
+         EVENK_SWITCH(is_even_K, IsEvenKConst, [&] {
+             LOCAL_SWITCH((params.window_size_left >= 0 || params.window_size_right >= 0) && !Is_causal, Is_local, [&] {
+@@ -125,7 +110,6 @@
+             });
+         });
+     });
+-    });
+ }
+ 
+ template<typename Kernel_traits, bool Is_causal>
+@@ -207,7 +191,7 @@
+     });
+ }
+ 
+-template<typename T, bool Is_causal>
++template<typename T, bool Is_causal, bool Cqs_on = false>
+ void run_mha_fwd_hdim64(Flash_fwd_params &params, cudaStream_t stream) {
+     constexpr static int Headdim = 64;
+     DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
+@@ -215,11 +199,11 @@
+             // Using 8 warps is 18% slower for seqlen=2k, 2 warps is 5% slower
+             // Using block size (64 x 256) is 27% slower for seqlen=2k
+             // Using block size (256 x 64) is 85% slower for seqlen=2k, because of register spilling
+-            run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 128, 4, false, false, T>, Is_dropout, Is_causal>(params, stream);
++            run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 128, 4, false, false, T>, Is_dropout, Is_causal, Cqs_on>(params, stream);
+             // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 4, true, false, T>, Is_dropout, Is_causal>(params, stream);
+             // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 4, true, true, T>, Is_dropout, Is_causal>(params, stream);
+         } else {
+-            run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 4, false, false, T>, Is_dropout, Is_causal>(params, stream);
++            run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 4, false, false, T>, Is_dropout, Is_causal, Cqs_on>(params, stream);
+             // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 4, true, true, T>, Is_dropout, Is_causal>(params, stream);
+             // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 4, true, false, T>, Is_dropout, Is_causal>(params, stream);
+             // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 128, 4, false, false, T>, Is_dropout, Is_causal>(params, stream);
+@@ -251,7 +235,7 @@
+     });
+ }
+ 
+-template<typename T, bool Is_causal>
++template<typename T, bool Is_causal, bool Cqs_on = false>
+ void run_mha_fwd_hdim128(Flash_fwd_params &params, cudaStream_t stream) {
+     constexpr static int Headdim = 128;
+     auto [cc_major, cc_minor] = get_compute_capability(get_current_device());
+@@ -262,12 +246,12 @@
+             // and 128 x 32 (48 KB smem) is the fastest for non-causal since we get 2 CTAs per SM.
+             if (is_sm8x) {
+                 if constexpr(!Is_causal) {
+-                    run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 32, 4, false, false, T>, Is_dropout, Is_causal>(params, stream);
++                    run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 32, 4, false, false, T>, Is_dropout, Is_causal, Cqs_on>(params, stream);
+                 } else {
+-                    run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 64, 64, 4, false, false, T>, Is_dropout, Is_causal>(params, stream);
++                    run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 64, 64, 4, false, false, T>, Is_dropout, Is_causal, Cqs_on>(params, stream);
+                 }
+             } else {
+-                run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 4, false, false, T>, Is_dropout, Is_causal>(params, stream);
++                run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 4, false, false, T>, Is_dropout, Is_causal, Cqs_on>(params, stream);
+             }
+             // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 4, true, false, T>, Is_dropout, Is_causal>(params, stream);
+             // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 4, true, true, T>, Is_dropout, Is_causal>(params, stream);
+@@ -278,7 +262,7 @@
+             // 1st ones are good for H100, A100
+             // 2nd one is good for A6000 bc we get slightly better occupancy
+         } else {
+-            run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 32, 4, false, false, T>, Is_dropout, Is_causal>(params, stream);
++            run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 32, 4, false, false, T>, Is_dropout, Is_causal, Cqs_on>(params, stream);
+             // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 64, 64, 4, false, false, T>, Is_dropout, Is_causal>(params, stream);
+             // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 32, 4, true, false, T>, Is_dropout, Is_causal>(params, stream);
+             // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 32, 4, true, true, T>, Is_dropout, Is_causal>(params, stream);
+diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/csrc/flash_attn/src/flash.h v12f/csrc/flash_attn/src/flash.h
+--- v11/csrc/flash_attn/src/flash.h	2026-08-12 21:30:06.416705000 -0400
++++ v12f/csrc/flash_attn/src/flash.h	2026-09-23 10:33:27.782923000 -0400
+@@ -7,6 +7,7 @@
+ #include "namespace_config.h"
+ 
+ #include <cuda.h>
++#include <vector_types.h>  // int2 (cqs_runs)
+ #include <vector>
+ 
+ #include <ATen/cuda/CUDAGeneratorImpl.h> // For at::Generator and at::PhiloxCudaState
+@@ -178,6 +179,19 @@
+     // Null disables it and the kernel reads a pre-gathered buffer as before.
+     int * __restrict__ cqs_block_base;
+     int cqs_seg_align;
++    // next/ v12f: routing between the two CQS-on forward instantiations.
++    // Null route: the host sent this call to LEGACY (v11's loop with the
++    // per-element path) without a census. Otherwise the census kernel
++    // (cqs_census.cu) has written *cqs_route (0: every visited tile is fully
++    // live or fully masked, so ALIGNED computes the call; nonzero: a mixed
++    // tile or a run-table overflow, so LEGACY does) and, per row block of the
++    // ALIGNED tile shape, the live column tiles as runs {hi, lo} in
++    // descending n, kCqsRunSlots slots per row block, closed by {-1, -1}.
++    int * __restrict__ cqs_route;
++    const int2 * __restrict__ cqs_runs;
++    // ALIGNED only: visit row blocks in descending order (heaviest causal
++    // rows first). Each CTA's result does not depend on the order.
++    bool cqs_reverse_m;
+ };
+ 
+ ////////////////////////////////////////////////////////////////////////////////////////////////////
+@@ -233,7 +247,12 @@
+ 
+ ////////////////////////////////////////////////////////////////////////////////////////////////////
+ 
++// next/ v12f: with CQS off, the plain forward; with CQS on, the census and
++// the ALIGNED forward (the host calls it only when it allocated the census).
+ template<typename T, int Headdim, bool Is_causal> void run_mha_fwd_(Flash_fwd_params &params, cudaStream_t stream);
++// next/ v12f: v11's CQS-on forward (per-element mask path), in its own
++// translation units so its long ptxas run is paid only when it changes.
++template<typename T, int Headdim, bool Is_causal> void run_mha_fwd_legacy_(Flash_fwd_params &params, cudaStream_t stream);
+ template<typename T, int Headdim, bool Is_causal> void run_mha_fwd_splitkv_dispatch(Flash_fwd_params &params, cudaStream_t stream);
+ 
+ template<typename T, int Headdim, bool Is_causal> void run_mha_bwd_(Flash_bwd_params &params, cudaStream_t stream);
+diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/setup.py v12f/setup.py
+--- v11/setup.py	2026-09-12 01:33:47.650394000 -0400
++++ v12f/setup.py	2026-09-23 10:37:40.272109000 -0400
+@@ -1,4 +1,3 @@
+-import glob
+ import os
+ import re
+ from pathlib import Path
+@@ -71,60 +70,40 @@
+ 
+ 
+ def cqsa_sources() -> list[str]:
++    # next/ v12f: every forward (dtype, hdim, causal) is two translation units:
++    # flash_fwd_*_sm80.cu (CQS off + the census-driven ALIGNED CQS-on forward)
++    # and flash_fwd_*_legacy_sm80.cu (v11's CQS-on forward, the per-element
++    # path whose ptxas run dominates the build). Only the kernel sets whose
++    # dispatch (flash_api.cpp run_mha_fwd, CQSA_MINIMAL_FWD_KERNELS) pairs the
++    # two exist here; the other head dims have no ALIGNED/LEGACY split.
+     base = [
+         "csrc/flash_attn/flash_api.cpp",
+         "csrc/flash_attn/src/cqsa_kernel.cu",
++        "csrc/flash_attn/src/cqs_census.cu",
+     ]
+ 
+-    kernel_set = cqsa_kernel_set()
+-    if kernel_set == "full":
+-        return (
+-            base
+-            + sorted(glob.glob(str(THIS_DIR / "csrc" / "flash_attn" / "src" / "flash_fwd_*.cu")))
+-            + sorted(glob.glob(str(THIS_DIR / "csrc" / "flash_attn" / "src" / "flash_bwd_*.cu")))
+-        )
+-    if kernel_set == "a100_fp16_hdim128":
+-        return base + [
+-            "csrc/flash_attn/src/flash_fwd_hdim128_fp16_sm80.cu",
+-            "csrc/flash_attn/src/flash_fwd_hdim128_fp16_causal_sm80.cu",
+-            "csrc/flash_attn/src/flash_bwd_hdim128_fp16_sm80.cu",
++    # LEGACY units first: ninja starts jobs in this order, and they are the
++    # long ones, so the build's wall time is one LEGACY unit's.
++    def fwd(dtypes):
++        return [
++            f"csrc/flash_attn/src/flash_fwd_hdim{hd}_{dt}{causal}{part}_sm80.cu"
++            for part in ("_legacy", "") for dt in dtypes for hd in (64, 128) for causal in ("", "_causal")
+         ]
++
++    kernel_set = cqsa_kernel_set()
+     if kernel_set == "common":
+         # Shipping target: both dtypes users actually train in, and the two head
+-        # dims that cover most transformers (Llama 128, GPT-2 64). Exotic head
+-        # dims need CQSA_KERNEL_SET=full.
+-        return base + [
+-            "csrc/flash_attn/src/flash_fwd_hdim64_fp16_sm80.cu",
+-            "csrc/flash_attn/src/flash_fwd_hdim64_fp16_causal_sm80.cu",
+-            "csrc/flash_attn/src/flash_fwd_hdim128_fp16_sm80.cu",
+-            "csrc/flash_attn/src/flash_fwd_hdim128_fp16_causal_sm80.cu",
+-            "csrc/flash_attn/src/flash_fwd_hdim64_bf16_sm80.cu",
+-            "csrc/flash_attn/src/flash_fwd_hdim64_bf16_causal_sm80.cu",
+-            "csrc/flash_attn/src/flash_fwd_hdim128_bf16_sm80.cu",
+-            "csrc/flash_attn/src/flash_fwd_hdim128_bf16_causal_sm80.cu",
+-            "csrc/flash_attn/src/flash_bwd_hdim64_fp16_sm80.cu",
+-            "csrc/flash_attn/src/flash_bwd_hdim128_fp16_sm80.cu",
+-            "csrc/flash_attn/src/flash_bwd_hdim64_bf16_sm80.cu",
+-            "csrc/flash_attn/src/flash_bwd_hdim128_bf16_sm80.cu",
++        # dims that cover most transformers (Llama 128, GPT-2 64).
++        return base + fwd(("fp16", "bf16")) + [
++            f"csrc/flash_attn/src/flash_bwd_hdim{hd}_{dt}_sm80.cu" for dt in ("fp16", "bf16") for hd in (64, 128)
+         ]
+     if kernel_set == "a100_fp16_hdim64_128":
+-        return base + [
+-            "csrc/flash_attn/src/flash_fwd_hdim64_fp16_sm80.cu",
+-            "csrc/flash_attn/src/flash_fwd_hdim64_fp16_causal_sm80.cu",
+-            "csrc/flash_attn/src/flash_fwd_hdim128_fp16_sm80.cu",
+-            "csrc/flash_attn/src/flash_fwd_hdim128_fp16_causal_sm80.cu",
++        return base + fwd(("fp16",)) + [
+             "csrc/flash_attn/src/flash_bwd_hdim64_fp16_sm80.cu",
+             "csrc/flash_attn/src/flash_bwd_hdim128_fp16_sm80.cu",
+         ]
+-    if kernel_set == "a100_fp16_hdim64_noncau":
+-        return base + [
+-            "csrc/flash_attn/src/flash_fwd_hdim64_fp16_sm80.cu",
+-            "csrc/flash_attn/src/flash_bwd_hdim64_fp16_sm80.cu",
+-        ]
+     raise RuntimeError(
+-        f"Unknown CQSA_KERNEL_SET='{kernel_set}'. "
+-        "Expected one of: full, common, a100_fp16_hdim128, "
+-        "a100_fp16_hdim64_128, a100_fp16_hdim64_noncau."
++        f"Unknown CQSA_KERNEL_SET='{kernel_set}' for v12f. Expected one of: common, a100_fp16_hdim64_128."
+     )
+ 
+ 
+@@ -164,23 +143,24 @@
+             # Measurement build: compiles CQS out of the backward kernel to
+             # recover the stock-FlashAttention baseline. Not correct; A/B only.
+             "-DCQSA_BWD_NO_CQS",
+-        ] if os.getenv("CQSA_BWD_NO_CQS") else []) + [
++        ] if os.getenv("CQSA_BWD_NO_CQS") else []) + ([
++            # Build diagnostics: source lines in the SASS, the ptxas resource
++            # report per instantiation, and per-phase compile times (ptxas
++            # included) appended to this CSV, one row per phase and TU.
++            "-lineinfo", "-Xptxas", "-v", "-time", os.environ["CQSA_NVCC_TIME_CSV"],
++        ] if os.getenv("CQSA_NVCC_TIME_CSV") else []) + [
+             "--threads",
+             str(nvcc_threads),
+             *arch_flags,
+         ],
+     }
+ 
+-    define_macros = []
+-    if kernel_set != "full":
+-        define_macros.append(("CQSA_MINIMAL_FWD_KERNELS", None))
+-    if kernel_set == "a100_fp16_hdim64_noncau":
+-        define_macros.append(("CQSA_MINIMAL_HDIM64_NONCAUSAL_ONLY", None))
++    define_macros = [("CQSA_MINIMAL_FWD_KERNELS", None)]
+     if kernel_set == "common":
+         define_macros.append(("CQSA_MINIMAL_BOTH_DTYPES", None))
+ 
+     return CUDAExtension(
+-        name="cqsa_cuda_next_v11",
++        name="cqsa_cuda_next_v12f",
+         sources=sources,
+         include_dirs=[
+             str(THIS_DIR / "csrc" / "flash_attn"),

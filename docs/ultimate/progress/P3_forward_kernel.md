@@ -13,7 +13,8 @@ exact everywhere. Variant tree: `/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/
 | clone v11 -> v12f, code written | done 2026-09-23 10:38 | files listed below |
 | build b1 (clean, detached, vis1) | done rc=0 in 1926 s (11:10) | log `next/logs/05_build_v12f_b1.log`, csv `next/logs/build_v12f_b1_nvcc_time.csv` |
 | harness / test / slurm written | done | `benchmarks/ultimate/fwd_ab.py`, `tests/test_ultimate_v12f.py`, `slurm/ultimate/fwd_ab.slurm` |
-| correctness on vis1 (tests/test_ultimate_v12f.py) | - | CPU census-reference test passes |
+| correctness on vis1 (tests/test_ultimate_v12f.py) | done 13:20: **37 passed** (8 s) | profiler check: aligned real -> census 7 us + ALIGNED 6.3 ms + LEGACY 6 us (no-op); mixed random -> ALIGNED 4 us (no-op) + LEGACY; forced LEGACY -> LEGACY alone. `fwd_ab.py --smoke` (vis1, N=16K/32K/64K): every v12f row equal to v11, route 0 on every aligned task incl. all 73 c=73 tasks |
+| static report b1 | done | `results/ultimate/v12f_static.md` (`benchmarks/ultimate/v12f_static.py`): ALIGNED 3.8-7.2K SASS vs CQS-off 3.3-6.7K, LEGACY = v11's CQS-on (37-74K); v12f LEGACY non-causal STACK 312/328 B vs v11's 640/680 (TU split) |
 | SXM job fwd_ab | - | |
 | results fwd_ab.json/md, diff, commit | - | |
 
@@ -56,6 +57,9 @@ Files changed in v12f vs v11: `setup.py`, `csrc/flash_attn/flash_api.cpp`, `src/
 new: `src/cqs_census.{h,cu}`, `src/flash_fwd_aligned.h`, `src/flash_fwd_hdim*_legacy_sm80.cu` (8), `build.sh`.
 
 ## Job ids / builds
+
+- b1 .so frozen at `next/kernel/v12f/frozen/b1/` (md5 22b93a49...); `fwd_ab.slurm` takes `V12F_DIR` so a rebuild cannot change a queued job.
+- `fwd_ab.py` now records per-kernel device us of one profiled call per v12f CQS row (census / ALIGNED / LEGACY) and the c=73 sums: smoke says census 4-6 us + LEGACY no-op 4-5 us + memset 1 us per call (~0.7 ms of 37 ms over the 73 tasks at N=64K on vis1).
 
 - b1: clean build started 2026-09-23 10:38:39 on vis1 (`TAG=b1 CLEAN=1 nohup setsid bash next/kernel/v12f/build.sh`).
 

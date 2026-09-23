@@ -218,6 +218,35 @@ def kernel_names(tag, fn):
     return _KERNEL_NAMES[tag]
 
 
+def _kernel_kind(name):
+    if "census" in name.lower():
+        return "census"
+    if "flash_fwd_aligned_kernel" in name:
+        return "aligned"
+    if "flash_fwd_kernel" in name:
+        return "legacy"
+    return "other"
+
+
+def kernel_times(fn):
+    """Device time per kernel kind (census / aligned / legacy / other, us) of ONE call of fn, from the profiler.
+    v12f launches census -> ALIGNED -> LEGACY on every CQS call; the losing kernel's CTAs return at once, so this
+    separates the census's cost (it is also inside every timed v12f row) from the kernel that did the work."""
+    try:
+        from torch.profiler import profile, ProfilerActivity
+        fn(); torch.cuda.synchronize()
+        with profile(activities=[ProfilerActivity.CUDA]) as prof:
+            fn(); torch.cuda.synchronize()
+        out = {}
+        for e in prof.events():
+            if e.device_type.name == "CUDA":
+                k = _kernel_kind(e.name)
+                out[k] = out.get(k, 0.0) + float(e.time_range.elapsed_us())
+        return out
+    except Exception as e:  # noqa
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
 def fa2_arms(L, D, causal, iters):
     """flash_attn (the package) on [1,L,H,D] and SDPA-flash on [1,H,L,D]: dict of ms."""
     from flash_attn import flash_attn_func
@@ -282,6 +311,8 @@ def part_task(res, N, configs, iters, key):
             row["ms"], row["min_ms"] = timed(lambda: run_arm(module, pattern, flags, q, k, v, pats, causal), iters)
             row["ratio_vs_flash_attn"] = row["ms"] / fa["flash_attn_ms"]
             row["ratio_vs_sdpa"] = row["ms"] / fa["sdpa_flash_ms"]
+            if module == "v12f" and pattern != "plain":
+                row["kernel_us"] = kernel_times(lambda: run_arm(module, pattern, flags, q, k, v, pats, causal))
             if module == "v11":
                 ref[pattern] = outs
             elif module in ("v12f", "v11x", "v9"):
@@ -291,7 +322,8 @@ def part_task(res, N, configs, iters, key):
             print(f"[{key}] causal={int(causal)} D={D:3d} L={L} {module:4s} {pattern:5s} flags={flags} {row['ms']:8.2f} ms"
                   f"  /fa {row['ratio_vs_flash_attn']:.3f} /sdpa {row['ratio_vs_sdpa']:.3f}"
                   + (f"  equal_v11={row['equal_vs_v11']}" if "equal_vs_v11" in row else "")
-                  + (f"  route={row['census_route']}" if "census_route" in row else ""), flush=True)
+                  + (f"  route={row['census_route']}" if "census_route" in row else "")
+                  + (f"  kernels(us)={ {k: round(v, 1) for k, v in row['kernel_us'].items()} }" if "kernel_us" in row else ""), flush=True)
             del outs
         del q, k, v, ref, pats
         torch.cuda.empty_cache()
@@ -305,7 +337,7 @@ def part_c73(res, N, iters, D=64):
             ("v12f", "real", REVERSE_M)]
     tot = {f"{m}_{p}" + ("" if f in (None, 0) else "_rev"): 0.0 for m, p, f in arms}
     tot.update(flash_attn=0.0, sdpa_flash=0.0)
-    equal, routes, Ls = True, set(), []
+    equal, routes, Ls, ktot = True, set(), [], {}
     for t in tasks:
         L = int(t.local_size)
         Ls.append(L)
@@ -320,6 +352,10 @@ def part_c73(res, N, iters, D=64):
             name = f"{module}_{pattern}" + ("" if flags in (None, 0) else "_rev")
             outs = run_arm(module, pattern, flags, q, k, v, pats, True)
             tot[name] += timed(lambda: run_arm(module, pattern, flags, q, k, v, pats, True), iters)[0]
+            if (module, pattern, flags) == ("v12f", "real", 0):
+                for kk, vv in kernel_times(lambda: run_arm(module, pattern, flags, q, k, v, pats, True)).items():
+                    if isinstance(vv, float):
+                        ktot[kk] = ktot.get(kk, 0.0) + vv
             if (module, pattern) == ("v11", "real"):
                 ref = outs
             elif pattern == "real":
@@ -329,10 +365,12 @@ def part_c73(res, N, iters, D=64):
     mono = fa2_arms(N, D, True, iters)
     res["c73"] = dict(gpu=GPU, N=N, c=73, n_tasks=len(tasks), L_min=min(Ls), L_max=max(Ls), causal=True, D=D,
                       sum_ms=tot, census_routes=sorted(routes), v12f_real_equal_v11_all_tasks=equal,
+                      v12f_real_kernel_us_sum=ktot,
                       monolithic_flash_attn_ms=mono["flash_attn_ms"], monolithic_sdpa_flash_ms=mono["sdpa_flash_ms"])
     print(f"[c73] N={N} tasks={len(tasks)} L {min(Ls)}-{max(Ls)} sums (ms): "
           + "  ".join(f"{k} {v:.1f}" for k, v in tot.items())
-          + f"  | monolithic flash_attn {mono['flash_attn_ms']:.1f}  routes={sorted(routes)} equal={equal}", flush=True)
+          + f"  | monolithic flash_attn {mono['flash_attn_ms']:.1f}  routes={sorted(routes)} equal={equal}"
+          + f"  v12f real kernel sums (us) { {k: round(v, 1) for k, v in ktot.items()} }", flush=True)
 
 
 # ============================================================================ report
@@ -351,18 +389,23 @@ def report(res):
              f"flash_attn {info.get('flash_attn', '?').split()[0]}, fp16, H={res['H']}, {res['timing']}. "
              f"Harness `benchmarks/ultimate/fwd_ab.py`, raw rows `fwd_ab.json`. Kernels: flash_attn "
              f"{res.get('kernel_names', {}).get('flash_attn')}; SDPA-flash {res.get('kernel_names', {}).get('sdpa_flash')}.", ""]
-    for key, title in (("task56k", "aligned c=7 task, N=131072"), ("task225k", "aligned c=7 task, N=524288")):
+    for key in ("task56k", "task225k"):
         rows = res.get(key, [])
         if not rows:
             continue
-        lines += [f"## {title} (L={rows[0]['L']}), ms (ratio vs flash_attn / vs SDPA-flash)", "",
-                  "| causal | D | flash_attn | SDPA | module | pattern | flags | ms | /flash_attn | /SDPA | equal v11 | route |",
-                  "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+        lines += [f"## aligned c=7 task, N={rows[0]['N']} (L={rows[0]['L']}), ms (ratio vs flash_attn / vs SDPA-flash)", "",
+                  "v12f kernel columns: device us of one profiled call (census / ALIGNED / LEGACY; the losing kernel's CTAs "
+                  "return at once). The census is inside every timed v12f CQS row.", "",
+                  "| causal | D | flash_attn | SDPA | module | pattern | flags | ms | /flash_attn | /SDPA | equal v11 | route "
+                  "| census us | ALIGNED us | LEGACY us |",
+                  "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
         for r in rows:
+            ku = r.get("kernel_us", {})
+            kc = " | ".join(f"{ku[k]:.1f}" if isinstance(ku.get(k), float) else "-" for k in ("census", "aligned", "legacy"))
             lines.append(f"| {int(r['causal'])} | {r['D']} | {r['flash_attn_ms']:.2f} | {r['sdpa_flash_ms']:.2f} | {r['module']} | "
                          f"{r['pattern']} | {r['flags'] if r['flags'] is not None else '-'} | {r['ms']:.2f} | "
                          f"{r['ratio_vs_flash_attn']:.3f} | {r['ratio_vs_sdpa']:.3f} | {r.get('equal_vs_v11', '-')} | "
-                         f"{r.get('census_route', '-')} |")
+                         f"{r.get('census_route', '-')} | {kc} |")
         lines.append("")
     c = res.get("c73")
     if c:
@@ -373,7 +416,8 @@ def report(res):
             lines.append(f"| {k} | {v:.1f} | {v / s['flash_attn']:.3f} | {v / c['monolithic_flash_attn_ms']:.3f} |")
         lines += ["", f"Monolithic flash_attn at N={c['N']}: {c['monolithic_flash_attn_ms']:.1f} ms (SDPA-flash "
                       f"{c['monolithic_sdpa_flash_ms']:.1f}). Census routes over the tasks: {c['census_routes']}; v12f real "
-                      f"equal to v11 on every task: {c['v12f_real_equal_v11_all_tasks']}.", ""]
+                      f"equal to v11 on every task: {c['v12f_real_equal_v11_all_tasks']}. v12f real (flags 0) device time "
+                      f"summed over the tasks by kernel (us): {c.get('v12f_real_kernel_us_sum')}.", ""]
     lines += ["## Targets", ""]
     rows = res.get("task56k", [])
     for causal, D in ((True, 64), (True, 128), (False, 64), (False, 128)):

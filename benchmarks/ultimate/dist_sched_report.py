@@ -52,6 +52,23 @@ def pair_summary(rows: list[dict]) -> list[str]:
     return out
 
 
+def residual_table(rows: list[dict]) -> list[str]:
+    """For the planner refit (CostModel.dist_imbalance, dist_split): the measured local share of the single-device
+    time vs the scheduler's modelled share (makespan / total predicted work; equal-rate rows only), and what the
+    distributed call spends outside the slowest rank's local phase (schedule + merge + barriers)."""
+    out = ["| dir | N | itr | arm | local share = max t_local / t_single | model share | residual | t_dist - max t_local s |",
+           "|---|---|---|---|---|---|---|---|"]
+    for r in rows:
+        if not r.get("t_single_s") or len(set(r.get("rate_used_per_rank", [0]))) != 1:
+            continue
+        tot = sum(r["predicted_local_per_rank"])
+        share_m = r["predicted_makespan_s"] / tot if tot else None
+        share = max(r["t_local_per_rank"]) / r["t_single_s"]
+        out.append(f"| {r['direction']} | {r['N']} | {r['itr']} | {r['arm']} | {share:.3f} | {_f(share_m, '{:.3f}')} | "
+                   f"{_f(share / share_m if share_m else None, '{:.3f}')} | {r['t_dist_s'] - max(r['t_local_per_rank']):.2f} |")
+    return out
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("inputs", nargs="+")
@@ -73,7 +90,7 @@ def main(argv=None):
         for rk in m.get("ranks", []):
             lines.append(f"| {rk['rank']} | {rk['gpu']} | {rk['sms_used']}/{rk['n_sm']} | {rk['rate_seed']:.3e} | "
                          f"{rk['rate_measured']:.3e} |")
-        lines += ["", *rows_table(rows), "", *pair_summary(rows), ""]
+        lines += ["", *rows_table(rows), "", *pair_summary(rows), "", *residual_table(rows), ""]
         if m.get("topo"):
             lines += ["<details><summary>nvidia-smi topo -m</summary>", "", "```", m["topo"].rstrip(), "```", "</details>", ""]
     text = "\n".join(lines) + "\n"

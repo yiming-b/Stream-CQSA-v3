@@ -1,0 +1,245 @@
+code: /scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-ea3fa9a
+/scratch/gpfs/AKEY/yb2807/VENVs/CQSA311/bin/python
+della-l08g2
+NVIDIA A100-SXM4-80GB, 210 MHz, 1410 MHz, 81920 MiB
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-ea3fa9a/stream_cqsa/__init__.py 2.10.0+cu130 2.8.3 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v12f/frozen/b2/cqsa_cuda_next_v12f.cpython-311-x86_64-linux-gnu.so
+-rwxr-xr-x 1 yb2807 akey 70207768 2026-09-23 14:46:13.000000000 -0400 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v12f/frozen/b2/cqsa_cuda_next_v12f.cpython-311-x86_64-linux-gnu.so
+f55c40911ad016cbe4cb816aa9b79c92  /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v12f/frozen/b2/cqsa_cuda_next_v12f.cpython-311-x86_64-linux-gnu.so
+{"gpu": "NVIDIA A100-SXM4-80GB", "torch": "2.10.0+cu130", "node": "della-l08g2", "slurm_job": "14324080", "modules": {"v11": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/stable/cqsa_cuda_next_v11.cpython-311-x86_64-linux-gnu.so", "v11x": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v11x/cqsa_cuda_next_v11x.cpython-311-x86_64-linux-gnu.so", "v9": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/stable/cqsa_cuda_next_v9.cpython-311-x86_64-linux-gnu.so", "v12f": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v12f/frozen/b2/cqsa_cuda_next_v12f.cpython-311-x86_64-linux-gnu.so"}, "flash_attn": "2.8.3 /scratch/gpfs/AKEY/yb2807/VENVs/CQSA311/lib/python3.11/site-packages/flash_attn/__init__.py", "nvidia_smi": "NVIDIA A100-SXM4-80GB, 720 MHz, 1410 MHz, 81920 MiB"}
+/scratch/gpfs/AKEY/yb2807/VENVs/CQSA311/lib/python3.11/site-packages/torch/profiler/profiler.py:217: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+[task56k] causal=1 D= 64 L=56064 v11  plain flags=None    17.29 ms  /fa 0.949 /sdpa 0.969
+[task56k] causal=1 D= 64 L=56064 v11  zero  flags=None    22.59 ms  /fa 1.240 /sdpa 1.267
+[task56k] causal=1 D= 64 L=56064 v11  real  flags=None    17.88 ms  /fa 0.982 /sdpa 1.003
+[task56k] causal=1 D= 64 L=56064 v11x plain flags=None    17.31 ms  /fa 0.950 /sdpa 0.971  equal_v11=True
+[task56k] causal=1 D= 64 L=56064 v11x zero  flags=None    19.44 ms  /fa 1.067 /sdpa 1.090  equal_v11=True
+[task56k] causal=1 D= 64 L=56064 v12f plain flags=None    17.30 ms  /fa 0.949 /sdpa 0.970  equal_v11=True
+[task56k] causal=1 D= 64 L=56064 v12f zero  flags=0    16.23 ms  /fa 0.891 /sdpa 0.910  equal_v11=True  route=0  kernels(us)={'other': 1.6, 'census': 10.6, 'aligned': 16156.7, 'legacy': 8.4}
+[task56k] causal=1 D= 64 L=56064 v12f real  flags=0    12.65 ms  /fa 0.694 /sdpa 0.709  equal_v11=True  route=0  kernels(us)={'other': 1.1, 'census': 10.7, 'aligned': 12606.1, 'legacy': 8.4}
+[task56k] causal=1 D= 64 L=56064 v12f zero  flags=4    17.05 ms  /fa 0.936 /sdpa 0.956  equal_v11=True  route=0  kernels(us)={'other': 1.2, 'census': 10.4, 'aligned': 16974.8, 'legacy': 8.5}
+[task56k] causal=1 D= 64 L=56064 v12f real  flags=4    13.02 ms  /fa 0.715 /sdpa 0.730  equal_v11=True  route=0  kernels(us)={'other': 1.1, 'census': 10.4, 'aligned': 12958.8, 'legacy': 8.6}
+[task56k] causal=1 D= 64 L=56064 v12f zero  flags=2    16.32 ms  /fa 0.896 /sdpa 0.915  equal_v11=True  route=0  kernels(us)={'other': 1.1, 'census': 10.5, 'aligned': 16182.2, 'legacy': 7.7}
+[task56k] causal=1 D= 64 L=56064 v12f real  flags=2    12.65 ms  /fa 0.695 /sdpa 0.710  equal_v11=True  route=0  kernels(us)={'other': 1.2, 'census': 10.5, 'aligned': 12676.2, 'legacy': 8.0}
+[task56k] causal=1 D=128 L=56064 v11  plain flags=None    29.69 ms  /fa 1.000 /sdpa 0.926
+[task56k] causal=1 D=128 L=56064 v11  zero  flags=None    40.51 ms  /fa 1.364 /sdpa 1.263
+[task56k] causal=1 D=128 L=56064 v11  real  flags=None    31.83 ms  /fa 1.072 /sdpa 0.993
+[task56k] causal=1 D=128 L=56064 v11x plain flags=None    29.58 ms  /fa 0.996 /sdpa 0.922  equal_v11=True
+[task56k] causal=1 D=128 L=56064 v11x zero  flags=None    33.91 ms  /fa 1.141 /sdpa 1.057  equal_v11=True
+[task56k] causal=1 D=128 L=56064 v12f plain flags=None    29.90 ms  /fa 1.007 /sdpa 0.932  equal_v11=True
+[task56k] causal=1 D=128 L=56064 v12f zero  flags=0    28.18 ms  /fa 0.949 /sdpa 0.879  equal_v11=True  route=0  kernels(us)={'other': 1.2, 'census': 14.8, 'aligned': 28083.9, 'legacy': 8.3}
+[task56k] causal=1 D=128 L=56064 v12f real  flags=0    21.91 ms  /fa 0.737 /sdpa 0.683  equal_v11=True  route=0  kernels(us)={'other': 1.2, 'census': 14.8, 'aligned': 21817.9, 'legacy': 8.3}
+[task56k] causal=1 D=128 L=56064 v12f zero  flags=4    29.81 ms  /fa 1.003 /sdpa 0.930  equal_v11=True  route=0  kernels(us)={'other': 1.2, 'census': 15.1, 'aligned': 29908.8, 'legacy': 8.4}
+[task56k] causal=1 D=128 L=56064 v12f real  flags=4    22.58 ms  /fa 0.760 /sdpa 0.704  equal_v11=True  route=0  kernels(us)={'other': 1.2, 'census': 14.7, 'aligned': 22516.3, 'legacy': 8.6}
+[task56k] causal=1 D=128 L=56064 v12f zero  flags=2    28.14 ms  /fa 0.947 /sdpa 0.878  equal_v11=True  route=0  kernels(us)={'other': 1.1, 'census': 14.8, 'aligned': 28083.0, 'legacy': 8.2}
+[task56k] causal=1 D=128 L=56064 v12f real  flags=2    21.90 ms  /fa 0.737 /sdpa 0.683  equal_v11=True  route=0  kernels(us)={'other': 1.2, 'census': 15.0, 'aligned': 21849.0, 'legacy': 8.2}
+[task56k] causal=0 D= 64 L=56064 v11  plain flags=None    33.51 ms  /fa 1.013 /sdpa 0.981
+[task56k] causal=0 D= 64 L=56064 v11  zero  flags=None   204.73 ms  /fa 6.192 /sdpa 5.993
+[task56k] causal=0 D= 64 L=56064 v11  real  flags=None   157.49 ms  /fa 4.763 /sdpa 4.610
+[task56k] causal=0 D= 64 L=56064 v11x plain flags=None    33.28 ms  /fa 1.006 /sdpa 0.974  equal_v11=True
+[task56k] causal=0 D= 64 L=56064 v11x zero  flags=None    34.73 ms  /fa 1.050 /sdpa 1.017  equal_v11=True
+[task56k] causal=0 D= 64 L=56064 v9   plain flags=None    42.42 ms  /fa 1.283 /sdpa 1.242  equal_v11=True
+[task56k] causal=0 D= 64 L=56064 v9   zero  flags=None    47.42 ms  /fa 1.434 /sdpa 1.388  equal_v11=True
+[task56k] causal=0 D= 64 L=56064 v9   real  flags=None    38.14 ms  /fa 1.153 /sdpa 1.116  equal_v11=True
+[task56k] causal=0 D= 64 L=56064 v12f plain flags=None    33.50 ms  /fa 1.013 /sdpa 0.981  equal_v11=True
+[task56k] causal=0 D= 64 L=56064 v12f zero  flags=0    32.44 ms  /fa 0.981 /sdpa 0.950  equal_v11=True  route=0  kernels(us)={'other': 1.2, 'census': 12.0, 'aligned': 32486.4, 'legacy': 8.5}
+[task56k] causal=0 D= 64 L=56064 v12f real  flags=0    25.36 ms  /fa 0.767 /sdpa 0.742  equal_v11=True  route=0  kernels(us)={'other': 1.1, 'census': 11.8, 'aligned': 25244.6, 'legacy': 8.5}
+[task56k] causal=0 D= 64 L=56064 v12f zero  flags=4    32.39 ms  /fa 0.979 /sdpa 0.948  equal_v11=True  route=0  kernels(us)={'other': 1.2, 'census': 11.9, 'aligned': 32339.3, 'legacy': 8.4}
+[task56k] causal=0 D= 64 L=56064 v12f real  flags=4    25.33 ms  /fa 0.766 /sdpa 0.741  equal_v11=True  route=0  kernels(us)={'other': 1.1, 'census': 11.8, 'aligned': 25260.3, 'legacy': 8.4}
+[task56k] causal=0 D= 64 L=56064 v12f zero  flags=2    32.40 ms  /fa 0.980 /sdpa 0.949  equal_v11=True  route=0  kernels(us)={'other': 1.2, 'census': 12.0, 'aligned': 32536.0, 'legacy': 8.5}
+[task56k] causal=0 D= 64 L=56064 v12f real  flags=2    25.30 ms  /fa 0.765 /sdpa 0.741  equal_v11=True  route=0  kernels(us)={'other': 1.2, 'census': 11.8, 'aligned': 25240.5, 'legacy': 8.3}
+[task56k] causal=0 D=128 L=56064 v11  plain flags=None    56.74 ms  /fa 1.000 /sdpa 0.950
+[task56k] causal=0 D=128 L=56064 v11  zero  flags=None   256.37 ms  /fa 4.517 /sdpa 4.294
+[task56k] causal=0 D=128 L=56064 v11  real  flags=None   201.52 ms  /fa 3.551 /sdpa 3.375
+[task56k] causal=0 D=128 L=56064 v11x plain flags=None    56.80 ms  /fa 1.001 /sdpa 0.951  equal_v11=True
+[task56k] causal=0 D=128 L=56064 v11x zero  flags=None    64.33 ms  /fa 1.133 /sdpa 1.077  equal_v11=True
+[task56k] causal=0 D=128 L=56064 v9   plain flags=None    82.62 ms  /fa 1.456 /sdpa 1.384  equal_v11=True
+[task56k] causal=0 D=128 L=56064 v9   zero  flags=None    99.41 ms  /fa 1.752 /sdpa 1.665  equal_v11=True
+[task56k] causal=0 D=128 L=56064 v9   real  flags=None    76.09 ms  /fa 1.341 /sdpa 1.274  equal_v11=True
+[task56k] causal=0 D=128 L=56064 v12f plain flags=None    56.76 ms  /fa 1.000 /sdpa 0.951  equal_v11=True
+[task56k] causal=0 D=128 L=56064 v12f zero  flags=0    56.70 ms  /fa 0.999 /sdpa 0.950  equal_v11=True  route=0  kernels(us)={'other': 1.2, 'census': 17.7, 'aligned': 56568.0, 'legacy': 8.3}
+[task56k] causal=0 D=128 L=56064 v12f real  flags=0    44.34 ms  /fa 0.781 /sdpa 0.743  equal_v11=True  route=0  kernels(us)={'other': 1.2, 'census': 17.6, 'aligned': 44284.2, 'legacy': 8.4}
+[task56k] causal=0 D=128 L=56064 v12f zero  flags=4    56.93 ms  /fa 1.003 /sdpa 0.953  equal_v11=True  route=0  kernels(us)={'other': 1.2, 'census': 17.8, 'aligned': 56861.6, 'legacy': 8.5}
+[task56k] causal=0 D=128 L=56064 v12f real  flags=4    44.36 ms  /fa 0.782 /sdpa 0.743  equal_v11=True  route=0  kernels(us)={'other': 1.2, 'census': 17.6, 'aligned': 44136.5, 'legacy': 8.3}
+[task56k] causal=0 D=128 L=56064 v12f zero  flags=2    56.92 ms  /fa 1.003 /sdpa 0.953  equal_v11=True  route=0  kernels(us)={'other': 1.2, 'census': 17.7, 'aligned': 56744.5, 'legacy': 8.3}
+[task56k] causal=0 D=128 L=56064 v12f real  flags=2    44.36 ms  /fa 0.782 /sdpa 0.743  equal_v11=True  route=0  kernels(us)={'other': 1.2, 'census': 17.6, 'aligned': 44312.1, 'legacy': 8.4}
+[task225k] causal=1 D= 64 L=224640 v11  plain flags=None   279.93 ms  /fa 1.047 /sdpa 0.991
+[task225k] causal=1 D= 64 L=224640 v11  zero  flags=None   343.16 ms  /fa 1.283 /sdpa 1.215
+[task225k] causal=1 D= 64 L=224640 v11  real  flags=None   269.91 ms  /fa 1.009 /sdpa 0.956
+[task225k] causal=1 D= 64 L=224640 v11x plain flags=None   280.29 ms  /fa 1.048 /sdpa 0.992  equal_v11=True
+[task225k] causal=1 D= 64 L=224640 v11x zero  flags=None   300.52 ms  /fa 1.124 /sdpa 1.064  equal_v11=True
+[task225k] causal=1 D= 64 L=224640 v12f plain flags=None   281.47 ms  /fa 1.052 /sdpa 0.996  equal_v11=True
+[task225k] causal=1 D= 64 L=224640 v12f zero  flags=0   260.20 ms  /fa 0.973 /sdpa 0.921  equal_v11=True  route=0  kernels(us)={'other': 1.2, 'census': 30.0, 'aligned': 259784.6, 'legacy': 25.6}
+[task225k] causal=1 D= 64 L=224640 v12f real  flags=0   203.30 ms  /fa 0.760 /sdpa 0.720  equal_v11=True  route=0  kernels(us)={'other': 1.2, 'census': 30.2, 'aligned': 202154.6, 'legacy': 25.2}
+[task225k] causal=1 D= 64 L=224640 v12f zero  flags=4   275.18 ms  /fa 1.029 /sdpa 0.974  equal_v11=True  route=0  kernels(us)={'other': 1.2, 'census': 31.3, 'aligned': 275005.6, 'legacy': 27.0}
+[task225k] causal=1 D= 64 L=224640 v12f real  flags=4   207.82 ms  /fa 0.777 /sdpa 0.736  equal_v11=True  route=0  kernels(us)={'other': 1.2, 'census': 30.6, 'aligned': 207829.1, 'legacy': 26.1}
+[task225k] causal=1 D= 64 L=224640 v12f zero  flags=2   261.58 ms  /fa 0.978 /sdpa 0.926  equal_v11=True  route=0  kernels(us)={'other': 1.1, 'census': 29.8, 'aligned': 259916.3, 'legacy': 25.9}
+[task225k] causal=1 D= 64 L=224640 v12f real  flags=2   202.88 ms  /fa 0.759 /sdpa 0.718  equal_v11=True  route=0  kernels(us)={'other': 1.2, 'census': 29.9, 'aligned': 203015.1, 'legacy': 25.7}
+[c73] N=131072 tasks=73 L 16128-16384 sums (ms): v11_plain 126.3  v11_real 164.6  v12f_plain 125.9  v12f_real 108.8  v12f_real_asc 114.5  v12f_real_rev 108.8  flash_attn 123.5  sdpa_flash 129.2  | monolithic flash_attn 90.5  routes=[0] equal=True  v12f real kernel sums (us) {'other': 82.6, 'census': 383.7, 'aligned': 105466.6, 'legacy': 326.9}
+[mixed] causal=1 D=64 L=56173 v11  unaligned     24.58 ms  /fa 1.439
+[mixed] causal=1 D=64 L=56173 v12f unaligned     24.55 ms  /fa 1.436  equal_v11=True  route=1
+[mixed] causal=1 D=64 L=56173 v11  random3bit   158.72 ms  /fa 9.288
+[mixed] causal=1 D=64 L=56173 v12f random3bit   157.76 ms  /fa 9.232  equal_v11=True  route=1
+[mixed] causal=0 D=64 L=56173 v11  unaligned    194.89 ms  /fa 5.720
+[mixed] causal=0 D=64 L=56173 v9   unaligned     48.81 ms  /fa 1.432  equal_v11=True
+[mixed] causal=0 D=64 L=56173 v12f unaligned     46.74 ms  /fa 1.372  equal_v11=True  route=1
+[mixed] causal=0 D=64 L=56173 v11  random3bit   515.54 ms  /fa 15.131
+[mixed] causal=0 D=64 L=56173 v9   random3bit   347.53 ms  /fa 10.200  equal_v11=True
+[mixed] causal=0 D=64 L=56173 v12f random3bit   346.74 ms  /fa 10.176  equal_v11=True  route=1
+[task7k] causal=1 D= 64 L=6912 v11  plain flags=None     0.42 ms  /fa 0.962 /sdpa 1.002
+[task7k] causal=1 D= 64 L=6912 v11  zero  flags=None     0.66 ms  /fa 1.504 /sdpa 1.565
+[task7k] causal=1 D= 64 L=6912 v11  real  flags=None     0.57 ms  /fa 1.287 /sdpa 1.339
+[task7k] causal=1 D= 64 L=6912 v11x plain flags=None     0.42 ms  /fa 0.956 /sdpa 0.995  equal_v11=True
+[task7k] causal=1 D= 64 L=6912 v11x zero  flags=None     0.51 ms  /fa 1.170 /sdpa 1.218  equal_v11=True
+[task7k] causal=1 D= 64 L=6912 v12f plain flags=None     0.43 ms  /fa 0.967 /sdpa 1.007  equal_v11=True
+[task7k] causal=1 D= 64 L=6912 v12f zero  flags=0     0.43 ms  /fa 0.979 /sdpa 1.019  equal_v11=True  route=0  kernels(us)={'other': 1.2, 'census': 4.3, 'aligned': 373.9, 'legacy': 3.8}
+[task7k] causal=1 D= 64 L=6912 v12f real  flags=0     0.35 ms  /fa 0.806 /sdpa 0.838  equal_v11=True  route=0  kernels(us)={'other': 1.2, 'census': 4.2, 'aligned': 304.8, 'legacy': 3.7}
+[task7k] causal=1 D= 64 L=6912 v12f zero  flags=4     0.46 ms  /fa 1.047 /sdpa 1.089  equal_v11=True  route=0  kernels(us)={'other': 1.2, 'census': 4.0, 'aligned': 410.1, 'legacy': 3.8}
+[task7k] causal=1 D= 64 L=6912 v12f real  flags=4     0.37 ms  /fa 0.832 /sdpa 0.866  equal_v11=True  route=0  kernels(us)={'other': 1.2, 'census': 4.2, 'aligned': 318.0, 'legacy': 3.5}
+[task7k] causal=1 D= 64 L=6912 v12f zero  flags=2     0.43 ms  /fa 0.978 /sdpa 1.018  equal_v11=True  route=0  kernels(us)={'other': 1.2, 'census': 4.1, 'aligned': 385.8, 'legacy': 3.6}
+[task7k] causal=1 D= 64 L=6912 v12f real  flags=2     0.36 ms  /fa 0.809 /sdpa 0.842  equal_v11=True  route=0  kernels(us)={'other': 1.2, 'census': 4.2, 'aligned': 305.6, 'legacy': 3.5}
+# Forward A/B (P3): v12f vs v11 / v11x / v9 / flash_attn / SDPA-flash
+
+Job **14324080**, della-l08g2, **NVIDIA A100-SXM4-80GB**, torch 2.10.0+cu130, flash_attn 2.8.3, fp16, H=8, 1 warm-up + 5 timed runs, CUDA events, median (min also stored). Harness `benchmarks/ultimate/fwd_ab.py`, raw rows `fwd_ab.json`. Kernels: flash_attn ['void flash::flash_fwd_kernel<Flash_fwd_kernel_traits<64, 128, 128, 4, false, false, cutlass::half_t, Flash_kernel_traits<64, 128, 128, 4, cutlass::half_t> >, false, true, false, false, true, true, false, false>(flash::Flash_fwd_params)']; SDPA-flash ['void pytorch_flash::flash_fwd_kernel<Flash_fwd_kernel_traits<64, 128, 128, 4, false, false, cutlass::half_t, Flash_kernel_traits<64, 128, 128, 4, cutlass::half_t> >, false, true, false, false, true, true, false, false>(pytorch_flash::Flash_fwd_params)'].
+
+## aligned c=7 task, N=131072 (L=56064), ms (ratio vs flash_attn / vs SDPA-flash)
+
+v12f kernel columns: device us of one profiled call (census / ALIGNED / LEGACY; the losing kernel's CTAs return at once). The census is inside every timed v12f CQS row.
+
+| causal | D | flash_attn | SDPA | module | pattern | flags | ms | /flash_attn | /SDPA | equal v11 | route | census us | ALIGNED us | LEGACY us |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 64 | 18.22 | 17.83 | v11 | plain | - | 17.29 | 0.949 | 0.969 | - | - | - | - | - |
+| 1 | 64 | 18.22 | 17.83 | v11 | zero | - | 22.59 | 1.240 | 1.267 | - | - | - | - | - |
+| 1 | 64 | 18.22 | 17.83 | v11 | real | - | 17.88 | 0.982 | 1.003 | - | - | - | - | - |
+| 1 | 64 | 18.22 | 17.83 | v11x | plain | - | 17.31 | 0.950 | 0.971 | True | - | - | - | - |
+| 1 | 64 | 18.22 | 17.83 | v11x | zero | - | 19.44 | 1.067 | 1.090 | True | - | - | - | - |
+| 1 | 64 | 18.22 | 17.83 | v12f | plain | - | 17.30 | 0.949 | 0.970 | True | - | - | - | - |
+| 1 | 64 | 18.22 | 17.83 | v12f | zero | 0 | 16.23 | 0.891 | 0.910 | True | 0 | 10.6 | 16156.7 | 8.4 |
+| 1 | 64 | 18.22 | 17.83 | v12f | real | 0 | 12.65 | 0.694 | 0.709 | True | 0 | 10.7 | 12606.1 | 8.4 |
+| 1 | 64 | 18.22 | 17.83 | v12f | zero | 4 | 17.05 | 0.936 | 0.956 | True | 0 | 10.4 | 16974.8 | 8.5 |
+| 1 | 64 | 18.22 | 17.83 | v12f | real | 4 | 13.02 | 0.715 | 0.730 | True | 0 | 10.4 | 12958.8 | 8.6 |
+| 1 | 64 | 18.22 | 17.83 | v12f | zero | 2 | 16.32 | 0.896 | 0.915 | True | 0 | 10.5 | 16182.2 | 7.7 |
+| 1 | 64 | 18.22 | 17.83 | v12f | real | 2 | 12.65 | 0.695 | 0.710 | True | 0 | 10.5 | 12676.2 | 8.0 |
+| 1 | 128 | 29.71 | 32.07 | v11 | plain | - | 29.69 | 1.000 | 0.926 | - | - | - | - | - |
+| 1 | 128 | 29.71 | 32.07 | v11 | zero | - | 40.51 | 1.364 | 1.263 | - | - | - | - | - |
+| 1 | 128 | 29.71 | 32.07 | v11 | real | - | 31.83 | 1.072 | 0.993 | - | - | - | - | - |
+| 1 | 128 | 29.71 | 32.07 | v11x | plain | - | 29.58 | 0.996 | 0.922 | True | - | - | - | - |
+| 1 | 128 | 29.71 | 32.07 | v11x | zero | - | 33.91 | 1.141 | 1.057 | True | - | - | - | - |
+| 1 | 128 | 29.71 | 32.07 | v12f | plain | - | 29.90 | 1.007 | 0.932 | True | - | - | - | - |
+| 1 | 128 | 29.71 | 32.07 | v12f | zero | 0 | 28.18 | 0.949 | 0.879 | True | 0 | 14.8 | 28083.9 | 8.3 |
+| 1 | 128 | 29.71 | 32.07 | v12f | real | 0 | 21.91 | 0.737 | 0.683 | True | 0 | 14.8 | 21817.9 | 8.3 |
+| 1 | 128 | 29.71 | 32.07 | v12f | zero | 4 | 29.81 | 1.003 | 0.930 | True | 0 | 15.1 | 29908.8 | 8.4 |
+| 1 | 128 | 29.71 | 32.07 | v12f | real | 4 | 22.58 | 0.760 | 0.704 | True | 0 | 14.7 | 22516.3 | 8.6 |
+| 1 | 128 | 29.71 | 32.07 | v12f | zero | 2 | 28.14 | 0.947 | 0.878 | True | 0 | 14.8 | 28083.0 | 8.2 |
+| 1 | 128 | 29.71 | 32.07 | v12f | real | 2 | 21.90 | 0.737 | 0.683 | True | 0 | 15.0 | 21849.0 | 8.2 |
+| 0 | 64 | 33.07 | 34.16 | v11 | plain | - | 33.51 | 1.013 | 0.981 | - | - | - | - | - |
+| 0 | 64 | 33.07 | 34.16 | v11 | zero | - | 204.73 | 6.192 | 5.993 | - | - | - | - | - |
+| 0 | 64 | 33.07 | 34.16 | v11 | real | - | 157.49 | 4.763 | 4.610 | - | - | - | - | - |
+| 0 | 64 | 33.07 | 34.16 | v11x | plain | - | 33.28 | 1.006 | 0.974 | True | - | - | - | - |
+| 0 | 64 | 33.07 | 34.16 | v11x | zero | - | 34.73 | 1.050 | 1.017 | True | - | - | - | - |
+| 0 | 64 | 33.07 | 34.16 | v9 | plain | - | 42.42 | 1.283 | 1.242 | True | - | - | - | - |
+| 0 | 64 | 33.07 | 34.16 | v9 | zero | - | 47.42 | 1.434 | 1.388 | True | - | - | - | - |
+| 0 | 64 | 33.07 | 34.16 | v9 | real | - | 38.14 | 1.153 | 1.116 | True | - | - | - | - |
+| 0 | 64 | 33.07 | 34.16 | v12f | plain | - | 33.50 | 1.013 | 0.981 | True | - | - | - | - |
+| 0 | 64 | 33.07 | 34.16 | v12f | zero | 0 | 32.44 | 0.981 | 0.950 | True | 0 | 12.0 | 32486.4 | 8.5 |
+| 0 | 64 | 33.07 | 34.16 | v12f | real | 0 | 25.36 | 0.767 | 0.742 | True | 0 | 11.8 | 25244.6 | 8.5 |
+| 0 | 64 | 33.07 | 34.16 | v12f | zero | 4 | 32.39 | 0.979 | 0.948 | True | 0 | 11.9 | 32339.3 | 8.4 |
+| 0 | 64 | 33.07 | 34.16 | v12f | real | 4 | 25.33 | 0.766 | 0.741 | True | 0 | 11.8 | 25260.3 | 8.4 |
+| 0 | 64 | 33.07 | 34.16 | v12f | zero | 2 | 32.40 | 0.980 | 0.949 | True | 0 | 12.0 | 32536.0 | 8.5 |
+| 0 | 64 | 33.07 | 34.16 | v12f | real | 2 | 25.30 | 0.765 | 0.741 | True | 0 | 11.8 | 25240.5 | 8.3 |
+| 0 | 128 | 56.75 | 59.71 | v11 | plain | - | 56.74 | 1.000 | 0.950 | - | - | - | - | - |
+| 0 | 128 | 56.75 | 59.71 | v11 | zero | - | 256.37 | 4.517 | 4.294 | - | - | - | - | - |
+| 0 | 128 | 56.75 | 59.71 | v11 | real | - | 201.52 | 3.551 | 3.375 | - | - | - | - | - |
+| 0 | 128 | 56.75 | 59.71 | v11x | plain | - | 56.80 | 1.001 | 0.951 | True | - | - | - | - |
+| 0 | 128 | 56.75 | 59.71 | v11x | zero | - | 64.33 | 1.133 | 1.077 | True | - | - | - | - |
+| 0 | 128 | 56.75 | 59.71 | v9 | plain | - | 82.62 | 1.456 | 1.384 | True | - | - | - | - |
+| 0 | 128 | 56.75 | 59.71 | v9 | zero | - | 99.41 | 1.752 | 1.665 | True | - | - | - | - |
+| 0 | 128 | 56.75 | 59.71 | v9 | real | - | 76.09 | 1.341 | 1.274 | True | - | - | - | - |
+| 0 | 128 | 56.75 | 59.71 | v12f | plain | - | 56.76 | 1.000 | 0.951 | True | - | - | - | - |
+| 0 | 128 | 56.75 | 59.71 | v12f | zero | 0 | 56.70 | 0.999 | 0.950 | True | 0 | 17.7 | 56568.0 | 8.3 |
+| 0 | 128 | 56.75 | 59.71 | v12f | real | 0 | 44.34 | 0.781 | 0.743 | True | 0 | 17.6 | 44284.2 | 8.4 |
+| 0 | 128 | 56.75 | 59.71 | v12f | zero | 4 | 56.93 | 1.003 | 0.953 | True | 0 | 17.8 | 56861.6 | 8.5 |
+| 0 | 128 | 56.75 | 59.71 | v12f | real | 4 | 44.36 | 0.782 | 0.743 | True | 0 | 17.6 | 44136.5 | 8.3 |
+| 0 | 128 | 56.75 | 59.71 | v12f | zero | 2 | 56.92 | 1.003 | 0.953 | True | 0 | 17.7 | 56744.5 | 8.3 |
+| 0 | 128 | 56.75 | 59.71 | v12f | real | 2 | 44.36 | 0.782 | 0.743 | True | 0 | 17.6 | 44312.1 | 8.4 |
+
+## aligned c=7 task, N=524288 (L=224640), ms (ratio vs flash_attn / vs SDPA-flash)
+
+v12f kernel columns: device us of one profiled call (census / ALIGNED / LEGACY; the losing kernel's CTAs return at once). The census is inside every timed v12f CQS row.
+
+| causal | D | flash_attn | SDPA | module | pattern | flags | ms | /flash_attn | /SDPA | equal v11 | route | census us | ALIGNED us | LEGACY us |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 64 | 267.46 | 282.47 | v11 | plain | - | 279.93 | 1.047 | 0.991 | - | - | - | - | - |
+| 1 | 64 | 267.46 | 282.47 | v11 | zero | - | 343.16 | 1.283 | 1.215 | - | - | - | - | - |
+| 1 | 64 | 267.46 | 282.47 | v11 | real | - | 269.91 | 1.009 | 0.956 | - | - | - | - | - |
+| 1 | 64 | 267.46 | 282.47 | v11x | plain | - | 280.29 | 1.048 | 0.992 | True | - | - | - | - |
+| 1 | 64 | 267.46 | 282.47 | v11x | zero | - | 300.52 | 1.124 | 1.064 | True | - | - | - | - |
+| 1 | 64 | 267.46 | 282.47 | v12f | plain | - | 281.47 | 1.052 | 0.996 | True | - | - | - | - |
+| 1 | 64 | 267.46 | 282.47 | v12f | zero | 0 | 260.20 | 0.973 | 0.921 | True | 0 | 30.0 | 259784.6 | 25.6 |
+| 1 | 64 | 267.46 | 282.47 | v12f | real | 0 | 203.30 | 0.760 | 0.720 | True | 0 | 30.2 | 202154.6 | 25.2 |
+| 1 | 64 | 267.46 | 282.47 | v12f | zero | 4 | 275.18 | 1.029 | 0.974 | True | 0 | 31.3 | 275005.6 | 27.0 |
+| 1 | 64 | 267.46 | 282.47 | v12f | real | 4 | 207.82 | 0.777 | 0.736 | True | 0 | 30.6 | 207829.1 | 26.1 |
+| 1 | 64 | 267.46 | 282.47 | v12f | zero | 2 | 261.58 | 0.978 | 0.926 | True | 0 | 29.8 | 259916.3 | 25.9 |
+| 1 | 64 | 267.46 | 282.47 | v12f | real | 2 | 202.88 | 0.759 | 0.718 | True | 0 | 29.9 | 203015.1 | 25.7 |
+
+## aligned c=7 task, N=16384 (L=6912), ms (ratio vs flash_attn / vs SDPA-flash)
+
+v12f kernel columns: device us of one profiled call (census / ALIGNED / LEGACY; the losing kernel's CTAs return at once). The census is inside every timed v12f CQS row.
+
+| causal | D | flash_attn | SDPA | module | pattern | flags | ms | /flash_attn | /SDPA | equal v11 | route | census us | ALIGNED us | LEGACY us |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 64 | 0.44 | 0.42 | v11 | plain | - | 0.42 | 0.962 | 1.002 | - | - | - | - | - |
+| 1 | 64 | 0.44 | 0.42 | v11 | zero | - | 0.66 | 1.504 | 1.565 | - | - | - | - | - |
+| 1 | 64 | 0.44 | 0.42 | v11 | real | - | 0.57 | 1.287 | 1.339 | - | - | - | - | - |
+| 1 | 64 | 0.44 | 0.42 | v11x | plain | - | 0.42 | 0.956 | 0.995 | True | - | - | - | - |
+| 1 | 64 | 0.44 | 0.42 | v11x | zero | - | 0.51 | 1.170 | 1.218 | True | - | - | - | - |
+| 1 | 64 | 0.44 | 0.42 | v12f | plain | - | 0.43 | 0.967 | 1.007 | True | - | - | - | - |
+| 1 | 64 | 0.44 | 0.42 | v12f | zero | 0 | 0.43 | 0.979 | 1.019 | True | 0 | 4.3 | 373.9 | 3.8 |
+| 1 | 64 | 0.44 | 0.42 | v12f | real | 0 | 0.35 | 0.806 | 0.838 | True | 0 | 4.2 | 304.8 | 3.7 |
+| 1 | 64 | 0.44 | 0.42 | v12f | zero | 4 | 0.46 | 1.047 | 1.089 | True | 0 | 4.0 | 410.1 | 3.8 |
+| 1 | 64 | 0.44 | 0.42 | v12f | real | 4 | 0.37 | 0.832 | 0.866 | True | 0 | 4.2 | 318.0 | 3.5 |
+| 1 | 64 | 0.44 | 0.42 | v12f | zero | 2 | 0.43 | 0.978 | 1.018 | True | 0 | 4.1 | 385.8 | 3.6 |
+| 1 | 64 | 0.44 | 0.42 | v12f | real | 2 | 0.36 | 0.809 | 0.842 | True | 0 | 4.2 | 305.6 | 3.5 |
+
+## c=73, N=131072: 73 tasks, L 16128-16384, causal D=64, per-task medians summed
+
+| arm | sum ms | /flash_attn sum | /monolithic flash_attn |
+|---|---|---|---|
+| v11_plain | 126.3 | 1.022 | 1.395 |
+| v11_real | 164.6 | 1.333 | 1.818 |
+| v12f_plain | 125.9 | 1.020 | 1.391 |
+| v12f_real | 108.8 | 0.881 | 1.202 |
+| v12f_real_asc | 114.5 | 0.927 | 1.264 |
+| v12f_real_rev | 108.8 | 0.881 | 1.201 |
+| flash_attn | 123.5 | 1.000 | 1.364 |
+| sdpa_flash | 129.2 | 1.046 | 1.427 |
+
+Monolithic flash_attn at N=131072: 90.5 ms (SDPA-flash 95.8). Census routes over the tasks: [0]; v12f real equal to v11 on every task: True. v12f real (flags 0) device time summed over the tasks by kernel (us): {'other': 82.5639999999994, 'census': 383.7150000000003, 'aligned': 105466.64500000003, 'legacy': 326.9139999999984}.
+
+## Mixed-tile patterns (LEGACY), N=131072 unaligned c=7 task (L=56173), D=64
+
+| causal | pattern | module | ms | /flash_attn | equal v11 | route | census us | ALIGNED us | LEGACY us |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | unaligned | v11 | 24.58 | 1.439 | - | - | - | - | - |
+| 1 | unaligned | v12f | 24.55 | 1.436 | True | 1 | 11.3 | 8.1 | 24643.6 |
+| 1 | random3bit | v11 | 158.72 | 9.288 | - | - | - | - | - |
+| 1 | random3bit | v12f | 157.76 | 9.232 | True | 1 | 11.2 | 8.1 | 157938.9 |
+| 0 | unaligned | v11 | 194.89 | 5.720 | - | - | - | - | - |
+| 0 | unaligned | v9 | 48.81 | 1.432 | True | - | - | - | - |
+| 0 | unaligned | v12f | 46.74 | 1.372 | True | 1 | 11.6 | 8.1 | 46813.0 |
+| 0 | random3bit | v11 | 515.54 | 15.131 | - | - | - | - | - |
+| 0 | random3bit | v9 | 347.53 | 10.200 | True | - | - | - | - |
+| 0 | random3bit | v12f | 346.74 | 10.176 | True | 1 | 11.9 | 8.3 | 346868.4 |
+
+## Targets
+
+- causal=1 D=64: v12f zero / v11 plain = **0.939** (target <= 1.05); v12f zero / v12f plain = 0.938; v12f real / flash_attn = **0.694** (target <= 0.82)
+- causal=1 D=128: v12f zero / v11 plain = **0.949** (target <= 1.05); v12f zero / v12f plain = 0.942; v12f real / flash_attn = **0.737**
+- causal=0 D=64: v12f zero / v11 plain = **0.968** (target <= 1.05); v12f zero / v12f plain = 0.968; v12f real / flash_attn = **0.767**
+- causal=0 D=128: v12f zero / v11 plain = **0.999** (target <= 1.05); v12f zero / v12f plain = 0.999; v12f real / flash_attn = **0.781**
+
+
+wrote /scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/fwd_ab_b2.json  (76 s)
+exit 0  14:51:07
+14324080||00:01:26
+14324080.batch||00:01:26
+14324080.extern||00:01:26

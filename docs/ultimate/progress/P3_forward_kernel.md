@@ -19,7 +19,8 @@ exact everywhere. Variant tree: `/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/
 | descending row order | measured in 14319938 | causal -1.5..-6.1%, non-causal 0..+1.0% -> b2 makes descending the causal default (flash_api.cpp only; flag 4 = force ascending) |
 | build b2 (default flip) | done rc=0 in 4763 s (14:46; vis1 shared with the v12b build) | the TAG-dependent `-time` csv path changed every nvcc command, so ninja rebuilt ALL units; build.sh now uses one csv path (copied to the TAG name). Frozen `next/kernel/v12f/frozen/b2` (md5 f55c4091...). **ALIGNED + census SASS identical to b1** (cuobjdump -sass of the 9 kernels, 32592 lines, cmp equal): b1's flags-2 timings are b2's causal default. vis1: 39 passed (tests now cover both forced orders at D=64/128) |
 | results fwd_ab.json/md, diff, commit | done (dd5b1a9 + verdict) | `results/ultimate/fwd_ab.md` verdict section |
-| harness: mixed-tile part (LEGACY vs v11/v9 at 56K, unaligned + random) | written, smoked on vis1 | answers whether v9 retires for mixed non-causal calls; runs in the b2 confirmation job |
+| harness: mixed-tile part (LEGACY vs v11/v9 at 56K, unaligned + random) + small-L row | done | |
+| SXM job fwd_ab_b2 (b2 confirmation) | done: job 14324080, della-l08g2 A100-SXM4-80GB, 86 s, MaxRSS 2.1 GB | default = forced order within noise; causal 56K D=64 zero/v11 plain 0.939, real/fa 0.694; c=73 real 0.881x fa per-task sum; small L (6912) zero/fa 0.979, real 0.806; **LEGACY non-causal (own TU) 46.74 ms vs v11 194.89 vs v9 48.81 (unaligned), 346.74 vs 515.54 vs 347.53 (random): v12f <= v9 on every non-causal pattern (D=64)**. `results/ultimate/fwd_ab_b2.{json,md}` |
 
 ## Design as built (refinements of the task's sketch)
 

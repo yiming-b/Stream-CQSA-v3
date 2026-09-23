@@ -27,7 +27,7 @@ hostname; which python
 nvidia-smi --query-gpu=name --format=csv,noheader
 python -P -c "import stream_cqsa, torch; print(stream_cqsa.__file__, torch.__version__); print(stream_cqsa.kernels_available())"
 md5sum "$SUITE_KERNELS"/*.so
-python -P -c "import cqsa_cuda_next_v11 as a, cqsa_cuda_next_v9 as b, cqsa_cuda_next_v11x as c, cqsa_cuda_next_v12f as d, cqsa_cuda_next_v12b as e; print(*(m.__file__ for m in (a, b, c, d, e)), sep='\n')"
+python -P -c "import torch, cqsa_cuda_next_v11 as a, cqsa_cuda_next_v9 as b, cqsa_cuda_next_v11x as c, cqsa_cuda_next_v12f as d, cqsa_cuda_next_v12b as e; print(*(m.__file__ for m in (a, b, c, d, e)), sep='\n')"
 timeout -s INT 3300 python -P -X faulthandler -m pytest tests -q -rfs --tb=line -p no:cacheprovider -o faulthandler_timeout=600 2>&1 \
     | grep -v "^$\|site-packages\|frozen runpy" | tail -200 | cut -c1-300
 echo "exit ${PIPESTATUS[0]}  $(date +%T)"

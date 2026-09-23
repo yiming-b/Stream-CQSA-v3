@@ -1,0 +1,76 @@
+code: /scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-82236e3
+della-l07g6
+/scratch/gpfs/AKEY/yb2807/VENVs/CQSA311/bin/python
+NVIDIA A100-SXM4-80GB
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-82236e3/stream_cqsa/__init__.py 2.10.0+cu130
+{'cuda_extension': True, 'cuda_extension_noncausal': True, 'native_wave': True, 'triton': True, 'flash_attn': True}
+714975b954ad34336f97015124f6784e  /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/frozen_suite/2026-09-23/cqsa_cuda_next_v11x.cpython-311-x86_64-linux-gnu.so
+942f97c36eb49b581d346f5569bdc756  /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/frozen_suite/2026-09-23/cqsa_cuda_next_v12b.cpython-311-x86_64-linux-gnu.so
+f55c40911ad016cbe4cb816aa9b79c92  /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/frozen_suite/2026-09-23/cqsa_cuda_next_v12f.cpython-311-x86_64-linux-gnu.so
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+ImportError: libc10.so: cannot open shared object file: No such file or directory
+............F.F.F.F.F.F.F.F.F.F.F.F..................................... [ 13%]
+........................................................................ [ 26%]
+........................................................................ [ 39%]
+........................................................................ [ 52%]
+........................................................................ [ 65%]
+........................................................................ [ 78%]
+........................................................................ [ 91%]
+................................ss..ss...........                        [100%]
+=================================== FAILURES ===================================
+E   RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-82236e3/stream_cqsa/interface.py:270: RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+E   RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-82236e3/stream_cqsa/interface.py:270: RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+E   RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-82236e3/stream_cqsa/interface.py:270: RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+E   RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-82236e3/stream_cqsa/interface.py:270: RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+E   RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-82236e3/stream_cqsa/interface.py:270: RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+E   RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-82236e3/stream_cqsa/interface.py:270: RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+E   RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-82236e3/stream_cqsa/interface.py:270: RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+E   RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-82236e3/stream_cqsa/interface.py:270: RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+E   RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-82236e3/stream_cqsa/interface.py:270: RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+E   RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-82236e3/stream_cqsa/interface.py:270: RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+E   RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-82236e3/stream_cqsa/interface.py:270: RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+E   RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-82236e3/stream_cqsa/interface.py:270: RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+=============================== warnings summary ===============================
+tests/test_api.py::test_attention_host_inputs_and_memory_cap
+  /scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-82236e3/stream_cqsa/api.py:536: RuntimeWarning: Stream-CQSA: host-resident Q/K/V are stored head-major ([B,H,N,D] contiguous); streaming needs them token-major, so a 0.4 GiB copy is made per call. Keep host tensors token-major (x.transpose(1
+    out, info = stream_cqsa_forward(q, k, v, causal=bool(is_causal), scale=scale, verbose=verbose, out_device="acc", **kw)
+tests/test_devkit_autoconfig.py: 14 warnings
+    warnings.warn(
+tests/test_devkit_autoconfig.py::test_flex_adapter_positions
+    _warn_once(
+tests/test_ultimate_kernel_rows.py::test_recomposed_layouts_agree_and_match_fp64[1]
+    _warn_once(
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_backward_default.py::test_default_backward_matches_sdpa[True-64-dtype1]
+FAILED tests/test_backward_default.py::test_default_backward_matches_sdpa[True-128-dtype1]
+FAILED tests/test_backward_default.py::test_default_backward_matches_sdpa[False-64-dtype1]
+FAILED tests/test_backward_default.py::test_default_backward_matches_sdpa[False-128-dtype1]
+FAILED tests/test_bf16.py::test_dtype_fwd_bwd[False-64-dtype1] - RuntimeError...
+FAILED tests/test_bf16.py::test_dtype_fwd_bwd[False-128-dtype1] - RuntimeErro...
+FAILED tests/test_bf16.py::test_dtype_fwd_bwd[True-64-dtype1] - RuntimeError:...
+FAILED tests/test_bf16.py::test_dtype_fwd_bwd[True-128-dtype1] - RuntimeError...
+FAILED tests/test_bwd_host_stream.py::test_host_matches_device[False-1-dtype1]
+FAILED tests/test_bwd_host_stream.py::test_host_matches_device[False-2-dtype1]
+FAILED tests/test_bwd_host_stream.py::test_host_matches_device[True-1-dtype1]
+FAILED tests/test_bwd_host_stream.py::test_host_matches_device[True-2-dtype1]
+SKIPPED [2] tests/test_wave_shapes.py:20: cqsa_native build lacks torch.float16 head_dim=128
+SKIPPED [2] tests/test_wave_shapes.py:20: cqsa_native build lacks torch.bfloat16 head_dim=128
+12 failed, 537 passed, 4 skipped, 17 warnings in 182.40s (0:03:02)
+exit 1  16:21:14
+14328407||00:03:15
+14328407.batch||00:03:15
+14328407.extern||00:03:15

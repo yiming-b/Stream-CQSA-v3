@@ -373,7 +373,8 @@ def plan(*, N: int, B: int = 1, H: int = 8, D: int = 64, dtype=torch.float16, ca
          quorum_sets: dict[int, Sequence[int]] | None = None, direction: str = "fwd",
          safety: float = 0.85, tol: float = 0.02, out_bytes_per_el: int = 4,
          resident_input_bytes: int = 0, budget_excludes_inputs: bool = True, evict_inputs: bool = False,
-         engines: Sequence[str] | None = None, allow_mono: bool = True) -> Plan:
+         engines: Sequence[str] | None = None, allow_mono: bool = True, inputs_on_host: bool = False,
+         min_itr: int = 1) -> Plan:
     """
     Choose the configuration for one attention call on `hardware` (detected if None).
     ``out_bytes_per_el``: device bytes per element the delivered forward output costs when the
@@ -389,7 +390,15 @@ def plan(*, N: int, B: int = 1, H: int = 8, D: int = 64, dtype=torch.float16, ca
     shrinks before the depth grows and in place is chosen only when the copies do not fit. Host-resident
     inputs are enumerated on both engines and the memory model decides (the wave streams a chunk pool
     and folds on a worker; the classic pipelines pinned tasks in less device memory).
-    ``allow_mono=False`` plans among the decompositions only (a call whose depth the caller pinned).
+    ``allow_mono=False`` plans among the decompositions only (a call whose depth the caller pinned);
+    ``min_itr``/``max_itr`` bound the depths enumerated (``min_itr == max_itr`` plans a pinned depth).
+
+    ``inputs_on_host``: the caller's Q/K/V are in host memory. Only host-streaming decompositions are
+    executable then (a device-resident candidate would need the inputs on the device, and the engines
+    take the residency from the tensors: the wave backward would mix host inputs with device outputs,
+    the classic engine would run its CPU reference path), so the others are not enumerated; the
+    monolithic call copies the inputs to the device and stays a candidate. A host-resident backward is
+    therefore the classic pipeline's (the wave backward keeps its fp32 gradients on the device).
 
     `quorum_sets` ({c: interest_set}, default QUORUM_SETS) is the fourth axis:
     every (c, itr) pair is a candidate. Measured at N=131K (A100-40GB): for the
@@ -443,13 +452,13 @@ def plan(*, N: int, B: int = 1, H: int = 8, D: int = 64, dtype=torch.float16, ca
         if not is_perfect_difference_set(c, iset):
             raise ValueError(f"(c={c}, interest_set={tuple(iset)}) is not a perfect difference set")
         for w in worlds:
-            for itr in range(1, max_itr + 1):
+            for itr in range(max(1, int(min_itr)), max_itr + 1):
                 n_tasks = c ** itr
                 if itr * (l - 1) > 63 or (w > 1 and n_tasks < w) or n_tasks > 4096:
                     continue
                 for acc in ("gpu", "cpu"):
                     for host in (False, True):
-                        if acc == "cpu" and not host:
+                        if (acc == "cpu" and not host) or (inputs_on_host and not host):
                             continue
                         hostb = _host_bytes(N, B, H, D, itemsize, host, acc) * (2.0 if bwd else 1.0)
                         evict = bool(host and R and evict_inputs)
@@ -503,17 +512,28 @@ def plan(*, N: int, B: int = 1, H: int = 8, D: int = 64, dtype=torch.float16, ca
     if not feas:
         floor = per_el_floor(itemsize, True, False) * N * B * H * D
         # the most frugal configuration that was enumerated (so the subproblem-count cap holds): everything
-        # offloaded, one subproblem in flight, smallest predicted peak
-        off = [c for c in cands if c["mode"] == "cqsa" and c["stream_from_host"] and c["acc"] == "cpu" and c["n_par"] == 1]
+        # offloaded, one subproblem in flight, smallest predicted peak. An engine restriction can leave no
+        # offloaded candidate (the wave backward is device-resident only): then the most frugal of what the
+        # restriction allows, which runs and escalates or reports the out-of-memory itself.
+        single = [c for c in cands if c["mode"] == "cqsa"]
+        off = [c for c in single if c["stream_from_host"] and c["acc"] == "cpu" and c["n_par"] == 1] or single
+        if not off:
+            raise ValueError(f"no decomposition of N={N} can run with engines={engines}"
+                             + (" on host-resident inputs" if inputs_on_host else "")
+                             + (f" at itr {min_itr}..{max_itr}" if min_itr > 1 else "")
+                             + (": the wave backward is device-resident only; use kernel='auto' or 'cuda'"
+                                if bwd and engines == ("wave",) else ""))
         fb = min(off, key=lambda c: (c["peak"], c["time"]))
         p = Plan(mode="cqsa", itr=fb["itr"], c=fb["c"], interest_set=tuple(fb["interest_set"]), direction=direction,
-                 acc="cpu", stream_from_host=True, n_par=1, world=1, evict_inputs=bool(R and evict_inputs),
+                 acc=fb["acc"], stream_from_host=fb["stream_from_host"], n_par=fb["n_par"], world=1,
+                 evict_inputs=bool(fb.get("evict", False)),
                  engine=fb["engine"], wave_tokens=fb["wave_tokens"], gather=fb["gather"],
+                 est_time_s=fb["time"], est_peak_gib=fb["peak"], est_host_gib=fb["host"],
                  devices=[d.name for d in devs[:1]], candidates=cands,
                  reason=(f"nothing fits: device budget {dev_budget / GIB:.1f} GiB, host budget {hw.host_budget_bytes / GIB:.0f} GiB; "
                          f"the O(N.H.D) device floor with everything offloaded is {floor / GIB:.1f} GiB. "
-                         f"Falling back to the most frugal configuration (c={fb['c']}, itr={fb['itr']}, everything offloaded, "
-                         f"~{fb['peak']:.1f} GiB); the engine escalates on its own if that still does not fit."))
+                         f"Falling back to the most frugal configuration {_cname(fb)} "
+                         f"(~{fb['peak']:.1f} GiB); the engine escalates on its own if that still does not fit."))
         return p
     pick, front = frontier_pick(feas, tol)
     p = Plan(mode=pick["mode"], itr=pick["itr"], c=pick["c"], interest_set=tuple(pick["interest_set"]), direction=direction,

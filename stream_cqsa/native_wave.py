@@ -34,7 +34,7 @@ from typing import Optional, Sequence
 import numpy as np
 import torch
 
-from .stable_stream import SubproblemTask, build_tasks, effective_free_bytes, _GIB, _cpu_threads
+from .stable_stream import SubproblemTask, build_tasks, effective_free_bytes, is_oom, _GIB, _cpu_threads
 
 # torch CPU ops fork one OpenMP thread per core; on an 80-core host a 19 MB copy then takes
 # 96 ms instead of 0.2 ms (measured). Host-side copies/gathers run under this cap.
@@ -707,6 +707,13 @@ def wave_forward(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *, causal: b
 # ---------------------------------------------------------------------------
 # Backward
 # ---------------------------------------------------------------------------
+def bwd_wave_budget(device, N: int, H: int, D: int, itemsize: int, memory_fraction: float, cap: Optional[int]) -> int:
+    """Packed tokens per backward wave: what the free memory holds next to the fp32 dq/dk/dv (+ dpsum),
+    capped by ``cap`` (``DEFAULT_MAX_WAVE_TOKENS`` when None)."""
+    grad_bytes = 3 * N * H * D * 4 + N * H * 4
+    return _budget_tokens(device, bwd_bytes_per_token(H, D, itemsize), grad_bytes + (256 << 20), memory_fraction, cap)
+
+
 def wave_backward(q, k, v, out, dout, lse, *, causal: bool = True, scale: Optional[float] = None,
                   itr: int = 1, c: int = 7, interest_set: Sequence[int] = (0, 1, 3),
                   max_wave_tokens: Optional[int] = None, max_wave_subproblems: Optional[int] = None,
@@ -726,9 +733,7 @@ def wave_backward(q, k, v, out, dout, lse, *, causal: bool = True, scale: Option
     itemsize = q.element_size()
     tasks = wave_tasks(N, itr, c, interest_set, H=H, D=D, itemsize=itemsize)
     on_device = q.is_cuda
-    grad_bytes = 3 * N * H * D * 4 + N * H * 4
-    per_tok = bwd_bytes_per_token(H, D, itemsize)
-    max_tokens = _budget_tokens(dev, per_tok, grad_bytes + (256 << 20), memory_fraction, max_wave_tokens)
+    max_tokens = bwd_wave_budget(dev, N, H, D, itemsize, memory_fraction, max_wave_tokens)
     waves = plan_waves(tasks, max_tokens, max_wave_subproblems)
     # rowsum(dO * O) is a global per-token quantity: once, in fp32
     dpsum = torch.empty((B, H, N), device=dev, dtype=torch.float32)
@@ -792,29 +797,95 @@ def wave_backward(q, k, v, out, dout, lse, *, causal: bool = True, scale: Option
 # ---------------------------------------------------------------------------
 # Autograd
 # ---------------------------------------------------------------------------
+def wave_backward_recovering(q, k, v, out, dout, lse, *, causal: bool, scale: Optional[float], itr: int, c: int,
+                             interest_set: Sequence[int], max_wave_tokens: Optional[int] = None,
+                             classic_fallback: bool = False, verbose: Optional[bool] = None):
+    """
+    ``wave_backward`` with the forward's out-of-memory ladder (design 5.2). The backward runs during
+    ``loss.backward()``, outside ``attention()``'s own recovery, so it recovers here: on an OOM the wave
+    budget is halved down to one subproblem per wave (the backward always gathers: there is no in-place
+    rung); below that, with ``classic_fallback`` (``kernel="auto"``), the classic streamed backward runs
+    from the same saved ``out``/``lse`` -- exact at any partition, every subproblem scores against the
+    global lse -- with its fp32 gradients in host memory, and escalates the depth itself. A forced wave
+    kernel re-raises instead. Returns ``((dq, dk, dv), record)``; ``record`` says which engine produced
+    the gradients and what the recovery did.
+    """
+    B, H, N, D = q.shape
+    dev = q.device if q.is_cuda else torch.device("cuda")
+    itemsize = q.element_size()
+    floor = wave_token_floor(N, itr, c, interest_set, H=H, D=D, itemsize=itemsize)
+    vb = verbose_enabled(verbose)
+    W, retries = max_wave_tokens, 0
+    while True:
+        W = bwd_wave_budget(dev, N, H, D, itemsize, 0.85, W)       # the budget this attempt runs with
+        try:
+            grads, info = wave_backward(q, k, v, out, dout, lse, causal=causal, scale=scale, itr=itr, c=c,
+                                        interest_set=interest_set, max_wave_tokens=W, verbose=verbose)
+            return grads, dict(engine="wave", wave_oom_retries=retries, max_wave_tokens=info["max_wave_tokens"],
+                               n_waves=info["n_waves"])
+        except Exception as exc:                                     # noqa: BLE001
+            if not is_oom(exc):
+                raise
+            torch.cuda.empty_cache()
+            retries += 1
+            if W > floor:
+                W = max(floor, W // 2)
+                if vb:
+                    print(f"Stream-CQSA: the wave backward ran out of memory; halving the wave budget to {W:,} tokens", flush=True)
+                continue
+            if not classic_fallback:
+                raise
+            break
+    if vb:
+        print("Stream-CQSA: the wave backward ran out of memory at one subproblem per wave; "
+              "retrying on the streaming engine with host-memory gradients", flush=True)
+    from .stable_stream import stream_cqsa_backward
+    host = not q.is_cuda
+    place = (lambda t: t.cpu()) if host else (lambda t: t.to(dev))
+    bwd_info: dict = {}
+    grads = stream_cqsa_backward(place(q), place(k), place(v), place(dout), place(out), place(lse), itr="auto",
+                                 min_itr=int(itr), causal=causal, scale=scale, c=c, interest_set=tuple(interest_set),
+                                 stream_from_host=host, accumulate_on_gpu=False, bwd_info=bwd_info, verbose=verbose)
+    # cast where the fp32 gradient sits (host memory), then move the half-size result
+    grads = tuple(g.to(q.dtype).to(q.device) for g in grads)
+    return grads, dict(engine="classic", wave_oom_retries=retries, itr=bwd_info.get("itr_reached"),
+                       depth_escalations=bwd_info.get("depth_escalations", 0))
+
+
 class _WaveAttn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, causal, scale, itr, c, interest_set, bwd_itr, max_wave_tokens, gather, verbose):
+    def forward(ctx, q, k, v, causal, scale, itr, c, interest_set, bwd_itr, max_wave_tokens, gather, verbose,
+                classic_fallback, bwd_info):
         out, info = wave_forward(q, k, v, causal=causal, scale=scale, itr=itr, c=c, interest_set=interest_set,
                                  max_wave_tokens=max_wave_tokens, gather=gather, verbose=verbose)
         ctx.save_for_backward(q, k, v, out, info["lse"])
         ctx.meta = (causal, scale, itr if bwd_itr is None else bwd_itr, c, tuple(interest_set), max_wave_tokens, verbose)
+        ctx.classic_fallback, ctx.bwd_info = bool(classic_fallback), bwd_info
+        if bwd_info is not None:
+            bwd_info["forward_gather"] = info["gather"]              # what ran: a ragged causal N always gathers
         return out
 
     @staticmethod
     def backward(ctx, dout):
         q, k, v, out, lse = ctx.saved_tensors
         causal, scale, itr, c, interest_set, mwt, verbose = ctx.meta
-        (dq, dk, dv), _ = wave_backward(q, k, v, out, dout.to(q.dtype), lse, causal=causal, scale=scale, itr=itr, c=c,
-                                        interest_set=interest_set, max_wave_tokens=mwt, verbose=verbose)
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None
+        (dq, dk, dv), rec = wave_backward_recovering(q, k, v, out, dout.to(q.dtype), lse, causal=causal, scale=scale,
+                                                     itr=itr, c=c, interest_set=interest_set, max_wave_tokens=mwt,
+                                                     classic_fallback=ctx.classic_fallback, verbose=verbose)
+        if ctx.bwd_info is not None:
+            ctx.bwd_info.update(rec)
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None
 
 
 def wave_attention(q, k, v, *, causal=True, scale=None, itr=1, c=7, interest_set=(0, 1, 3), bwd_itr=None, max_wave_tokens=None,
-                   gather=None, verbose=None):
+                   gather=None, verbose=None, classic_fallback: bool = False, bwd_info: Optional[dict] = None):
     """Differentiable Stream-CQSA attention on the native wave kernel; returns fp32 ``[B, H, N, D]``.
-    ``gather`` is the forward's (the backward always gathers)."""
-    return _WaveAttn.apply(q, k, v, causal, scale, itr, c, tuple(interest_set), bwd_itr, max_wave_tokens, gather, verbose)
+    ``gather`` is the forward's (the backward always gathers). An out-of-memory in the backward halves
+    the wave budget, then (``classic_fallback=True``) moves to the classic streamed backward; see
+    ``wave_backward_recovering``. ``bwd_info``, when given, is filled with the forward's gather mode and,
+    after ``.backward()``, the backward's record (engine, wave OOM retries, budget)."""
+    return _WaveAttn.apply(q, k, v, causal, scale, itr, c, tuple(interest_set), bwd_itr, max_wave_tokens, gather, verbose,
+                           classic_fallback, bwd_info)
 
 
 # ---------------------------------------------------------------------------

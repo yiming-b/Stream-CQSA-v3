@@ -107,6 +107,57 @@ def test_host_resident_forward_is_decided_by_memory():
     assert w7 > c7
 
 
+def test_host_resident_inputs_plan_only_streaming_candidates():
+    """Regression (I0, P0.2 review BLOCKER): for host-resident inputs the planner enumerated device-resident
+    wave candidates and, with CostModel defaults, planned 'wave W=32,768 gathered' for an itr=1 backward,
+    which crashed in wave_backward. Only host-streaming decompositions can run on host tensors."""
+    n = 8192
+    kw = dict(N=n, H=H, D=D, hardware=_hw(30), allow_distributed=False, out_bytes_per_el=0, engines=E, allow_mono=False,
+              quorum_sets={7: (0, 1, 3)}, min_itr=1, max_itr=1, inputs_on_host=True)
+    b = plan(direction="bwd", **kw)
+    assert b.stream_from_host and b.engine == "classic" and "host-resident" in b.name()
+    assert all(c["stream_from_host"] for c in b.candidates if c["mode"] == "cqsa")
+    assert not any(c.get("engine") == "wave" for c in b.candidates)            # the wave backward is device-resident only
+    f = plan(direction="fwd", **kw)
+    assert f.stream_from_host and all(c["stream_from_host"] for c in f.candidates if c["mode"] == "cqsa")
+    assert {c["engine"] for c in f.candidates if c["mode"] == "cqsa"} == {"wave", "classic"}   # the chunk pool competes
+    # without the flag the device-resident wave is what a device caller gets
+    assert plan(direction="bwd", **dict(kw, inputs_on_host=False)).engine == "wave"
+
+
+def test_nothing_fits_fallback_under_an_engine_restriction():
+    """Regression (I0, P0.2 review MAJOR): plan(engines=('wave',), direction='bwd') with nothing fitting raised
+    'min() arg is an empty sequence' (the fallback looked only at host-streamed acc=cpu candidates)."""
+    for n, gib in ((1 << 20, 6), (2 << 20, 12)):
+        p = plan(N=n, H=H, D=D, hardware=_hw(gib), engines=("wave",), direction="bwd", allow_distributed=False)
+        assert p.mode == "cqsa" and p.engine == "wave" and not p.stream_from_host and "nothing fits" in p.reason
+        frugal = min(c["peak"] for c in p.candidates if c["mode"] == "cqsa")
+        assert p.est_peak_gib == frugal
+    # the classic fallback is unchanged: everything offloaded
+    p = plan(N=1 << 20, H=H, D=D, hardware=_hw(0.05), engines=E, direction="bwd", allow_distributed=False)
+    assert "nothing fits" in p.reason and p.stream_from_host and p.acc == "cpu"
+    # no executable decomposition at all: a clear error, not a crash in min()
+    with pytest.raises(ValueError, match="device-resident only"):
+        plan(N=1 << 20, H=H, D=D, hardware=_hw(6), engines=("wave",), direction="bwd", allow_distributed=False,
+             inputs_on_host=True)
+
+
+def test_monolithic_fits_whenever_a_device_resident_wave_does():
+    """kernel="auto" with nothing pinned runs the monolithic call whenever it fits (the design's rule, and the
+    fastest point); this pins down why a device-resident wave then runs only after a monolithic OOM or under a
+    pinned itr: every device-resident decomposition needs more device memory than the monolithic call."""
+    for n in (1 << 15, 1 << 17, 1 << 20, 100003):
+        for gib in (0.3, 0.6, 1.2, 2.5, 5, 10, 20, 40):
+            for direction in ("fwd", "bwd"):
+                p = plan(N=n, H=H, D=D, hardware=_hw(gib), engines=E, direction=direction, allow_distributed=False,
+                         out_bytes_per_el=2)
+                dev_wave = [c for c in p.candidates if c.get("engine") == "wave" and not c["stream_from_host"]]
+                mono = p.candidates[0]
+                assert min(c["peak"] for c in dev_wave) > mono["peak"], (n, gib, direction)
+                if any(c["ok"] for c in dev_wave):
+                    assert mono["ok"] and p.mode == "mono", (n, gib, direction)
+
+
 # ---------------------------------------------------------------------------------------------- GPU
 cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
 
@@ -218,3 +269,134 @@ def test_verbose_plan_line_reports_the_wave_choice(capsys):
     assert "Stream-CQSA ran:" in s and "waves of" in s
     stream_cqsa.attention(q, k, v, is_causal=True, itr=1, gather=False, verbose=True)
     assert "Q/K/V read in place" in capsys.readouterr().out
+
+
+@cuda
+def test_host_resident_backward_under_auto_is_classic_and_exact():
+    """Regression (I0, P0.2 review BLOCKER), end to end with the uncalibrated default cost model (the fixture
+    isolates the cache): CPU inputs with requires_grad and itr=1 plan and run the classic host-resident
+    pipeline, the forward reports what it planned, and .backward() returns finite CPU gradients."""
+    import stream_cqsa
+    g = torch.Generator().manual_seed(0)
+    q, k, v = (torch.randn(1, H, 8192, D, generator=g).half().requires_grad_() for _ in range(3))
+    p = stream_cqsa.attention(q, k, v, is_causal=True, itr=1, plan_only=True)
+    assert p.engine == "classic" and p.stream_from_host and "host-resident" in p.name()
+    for kern in ("auto", "wave"):                   # a forced wave kernel cannot run a host-resident backward either
+        for t in (q, k, v):
+            t.grad = None
+        out, info = stream_cqsa.attention(q, k, v, is_causal=True, itr=1, kernel=kern, return_info=True)
+        assert info["engine"] == "classic" and info["stream_from_host"] and out.device.type == "cpu"
+        out.float().sum().backward()
+        assert all(t.grad is not None and t.grad.device.type == "cpu" and torch.isfinite(t.grad).all() for t in (q, k, v))
+    qd, kd, vd = (t.detach().cuda().requires_grad_() for t in (q, k, v))
+    F.scaled_dot_product_attention(qd, kd, vd, is_causal=True).float().sum().backward()
+    assert _rel(q.grad, qd.grad.cpu()) < 5e-3 and _rel(v.grad, vd.grad.cpu()) < 5e-3
+    # host-resident forward: the plan and the run describe the same configuration
+    with torch.no_grad():
+        p = stream_cqsa.attention(q, k, v, is_causal=True, itr=1, plan_only=True)
+        out, info = stream_cqsa.attention(q, k, v, is_causal=True, itr=1, return_info=True)
+    assert p.stream_from_host and info["engine"] == p.engine and info.get("host_resident", True)
+
+
+@cuda
+def test_oom_in_the_wave_backward_is_recovered(monkeypatch, capsys):
+    """Regression (I0, P0.2 review MAJOR): an OOM raised inside the wave backward (during loss.backward(),
+    outside attention()'s ladder) propagated to the caller. Now the backward halves its wave budget, then under
+    kernel="auto" falls back to the classic streamed backward; a forced wave kernel still reports the OOM."""
+    import stream_cqsa
+    from stream_cqsa import native_wave
+    if not _native():
+        pytest.skip("cqsa_native not built for fp16 hdim64")
+    q0, k0, v0 = _qkv(8192)
+    do = torch.randn_like(q0)
+    ref = tuple(t.detach().clone().requires_grad_() for t in (q0, k0, v0))
+    F.scaled_dot_product_attention(*ref, is_causal=True).backward(do)
+    real = native_wave.wave_backward
+    budgets = []
+
+    def run(fail_while, kernel="auto"):
+        def flaky(*a, max_wave_tokens=None, **kw):
+            budgets.append(max_wave_tokens)
+            if fail_while(max_wave_tokens):
+                raise torch.cuda.OutOfMemoryError("CUDA out of memory (simulated)")
+            return real(*a, max_wave_tokens=max_wave_tokens, **kw)
+        monkeypatch.setattr(native_wave, "wave_backward", flaky)
+        budgets.clear()
+        q, k, v = (t.detach().clone().requires_grad_() for t in (q0, k0, v0))
+        out, info = stream_cqsa.attention(q, k, v, is_causal=True, itr=1, kernel=kernel, return_info=True, verbose=True)
+        assert info["engine"] == "wave" and info["backward"] == {"forward_gather": True}
+        out.backward(do)
+        return (q, k, v), info["backward"]
+
+    calls = {"n": 0}
+
+    def once(w):
+        calls["n"] += 1
+        return calls["n"] == 1
+    grads, rec = run(once)                                   # one OOM: the halved budget runs
+    assert rec["engine"] == "wave" and rec["wave_oom_retries"] == 1 and budgets[1] == budgets[0] // 2
+    assert "halving the wave budget" in capsys.readouterr().out
+    for t, r in zip(grads, ref):
+        assert torch.isfinite(t.grad).all() and _rel(t.grad, r.grad) < 5e-3
+    grads, rec = run(lambda w: True)                         # never fits: down the ladder, then the classic backward
+    assert rec["engine"] == "classic" and rec["wave_oom_retries"] == len(budgets)
+    assert all(a > b for a, b in zip(budgets, budgets[1:]))
+    assert "retrying on the streaming engine" in capsys.readouterr().out
+    for t, r in zip(grads, ref):
+        assert t.grad.is_cuda and t.grad.dtype == torch.float16 and _rel(t.grad, r.grad) < 5e-3
+    with pytest.raises(torch.cuda.OutOfMemoryError):
+        run(lambda w: True, kernel="wave-cuda")
+
+
+@cuda
+def test_monolithic_oom_replans_among_decompositions(monkeypatch):
+    """Minor (I0, P0.2 review): after the monolithic call ran out of memory the re-plan hand-set a classic
+    decomposition; it now plans among the decompositions, so the device-resident call runs on the wave."""
+    import stream_cqsa
+    from stream_cqsa import api
+    if not _native():
+        pytest.skip("cqsa_native not built for fp16 hdim64")
+    q, k, v = _qkv(65536)
+    ref = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+    monkeypatch.setattr(api, "_TRUE_SDPA", lambda *a, **kw: (_ for _ in ()).throw(torch.cuda.OutOfMemoryError("simulated")))
+    out, info = stream_cqsa.attention(q, k, v, is_causal=True, return_info=True)
+    assert info["engine"] == "wave" and info["n_subproblems"] > 1 and _rel(out, ref) < 1e-3
+
+
+@cuda
+def test_pinned_depth_is_what_plan_only_reports_and_the_backward_reports_the_gather_that_ran():
+    """Minors (I0, P0.2 review): under a pinned itr the plan (and its W) is planned at that depth, so plan_only
+    describes the call that runs; a ragged causal backward reports the gathered forward it ran."""
+    import stream_cqsa
+    if not _native():
+        pytest.skip("cqsa_native not built for fp16 hdim64")
+    q, k, v = _qkv(32768)
+    p = stream_cqsa.attention(q, k, v, is_causal=True, itr=2, plan_only=True)
+    assert p.itr == 2 and p.engine == "wave"
+    out, info = stream_cqsa.attention(q, k, v, is_causal=True, itr=2, return_info=True)
+    assert info["itr"] == 2 and info["max_wave_tokens"] == p.wave_tokens
+    q, k, v = (t.contiguous().requires_grad_() for t in _qkv(100003))
+    out, info = stream_cqsa.attention(q, k, v, is_causal=True, itr=1, gather=False, return_info=True)
+    assert info["engine"] == "wave" and info["gather"] is True          # in place is impossible at a ragged causal N
+    out.float().sum().backward()
+    assert torch.isfinite(q.grad).all()
+
+
+@cuda
+def test_inputs_restored_under_a_memory_fraction():
+    """Wart (I0): _restore_inputs reserved 10% of the PHYSICAL device, so under set_per_process_memory_fraction
+    Q/K/V never came back; the reserve is now a fraction of the capacity the process may use."""
+    import stream_cqsa
+    n = 262144
+    q, k, v = _qkv(n)
+    torch.cuda.synchronize(); torch.cuda.empty_cache()
+    total = torch.cuda.get_device_properties(0).total_memory
+    cap = torch.cuda.memory_reserved() + int(1.5 * GIB)
+    try:
+        torch.cuda.set_per_process_memory_fraction(cap / total)
+        out, info = stream_cqsa.attention(q, k, v, is_causal=True, return_info=True, evict_inputs=True)
+    finally:
+        torch.cuda.set_per_process_memory_fraction(1.0)
+    assert info["inputs_evicted"] and info["inputs_restored"] and q.is_cuda and k.is_cuda and v.is_cuda
+    assert out.is_cuda                           # the output goes to the caller's device, even on the monolithic path
+    assert _rel(out, F.scaled_dot_product_attention(q, k, v, is_causal=True)) < 2e-3

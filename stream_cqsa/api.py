@@ -89,11 +89,16 @@ def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, attn_mask=None,
 
     q/k/v ``[B, H, N, D]`` fp16/bf16, on a device or in host memory. Returns the
     output in the inputs' dtype and device. Differentiable when the inputs require
-    gradients. ``kernel``: "auto" (the planner routes by the memory model: the wave engine for
-    device-resident device-accumulator calls whenever its wave fits, with the wave budget W and
-    gathered-vs-in-place reads chosen from the budget; the classic pinned pipeline for host-resident
-    inputs where it is smaller and for host-accumulator backwards), "wave" (wave engine, CUDA kernel
-    when built else Triton), "wave-cuda", "wave-triton", "cuda", "triton" (classic engine).
+    gradients. ``kernel``: "auto" (the planner routes by the memory model: the monolithic call
+    whenever it fits -- it is the fastest configuration and needs less device memory than any
+    device-resident decomposition, so with nothing pinned a device-resident wave runs only after the
+    monolithic call ran out of memory after all or under a pinned ``itr=``/``c=``; otherwise the wave
+    engine for device-resident device-accumulator calls whenever its wave fits, with the wave budget
+    W and gathered-vs-in-place reads chosen from the budget; host-resident inputs are streamed, by
+    whichever engine the memory model prefers for a forward and by the classic pinned pipeline for
+    a backward and for host-accumulator backwards), "wave" (wave engine, CUDA kernel when built else
+    Triton), "wave-cuda", "wave-triton", "cuda", "triton" (classic engine). The wave backward is
+    device-resident only: a host-resident backward runs on the classic engine whatever ``kernel`` says.
     ``overrides`` (itr=, c=, interest_set=, max_parallel=, max_wave_tokens=, gather=, ...) pin engine settings.
     ``plan_only=True`` returns the plan without computing anything; ``return_info=True`` reports the
     engine, kernel, wave budget and gather mode that ran.
@@ -237,22 +242,28 @@ def _evict_inputs(tensors, grad: bool, vb: bool):
     return hosts, state
 
 
-def _restore_inputs(state, mode, vb: bool, reserve_fraction: float = 0.10) -> bool:
+def _restore_inputs(state, mode, vb: bool, reserve_fraction: float = 0.10, budget_bytes: Optional[int] = None) -> bool:
     """After the output is in place: bring Q/K/V back to the device if there is room (mode "auto"),
     always try (True) or never (False). The output has priority, so this runs last. Tensors that
-    do not fit stay in host memory (``t.device`` tells the caller where each one is)."""
-    from .stable_stream import effective_free_bytes
+    do not fit stay in host memory (``t.device`` tells the caller where each one is).
+
+    Room is judged on the memory this process may use, not the physical device: the free memory
+    under a set_per_process_memory_fraction cap, less ``reserve_fraction`` of the capped capacity,
+    and within ``budget_bytes`` (what a ``hardware=`` budget leaves after the output) when given.
+    A reserve of the physical total never restored anything under a small cap or budget."""
+    from .stable_stream import effective_free_bytes, effective_total_bytes
     dev = state["device"]
     if mode is False:
         state["restored"] = False
         return False
     ok = True
+    left = budget_bytes
     for t, stride in zip(state["tensors"], state["strides"]):
         if t.device == dev:
             continue
         need = t.numel() * t.element_size()
-        total = torch.cuda.get_device_properties(dev).total_memory
-        if mode == "auto" and need > effective_free_bytes(dev) - reserve_fraction * total:
+        room = effective_free_bytes(dev) - reserve_fraction * effective_total_bytes(dev)
+        if mode == "auto" and (need > room or (left is not None and need > left)):
             ok = False
             continue
         try:
@@ -260,6 +271,8 @@ def _restore_inputs(state, mode, vb: bool, reserve_fraction: float = 0.10) -> bo
             d.copy_(t.data, non_blocking=True)
             torch.cuda.synchronize(dev)
             t.data = d
+            if left is not None:
+                left -= need
         except Exception as exc:                                     # noqa: BLE001
             if not _is_oom(exc):
                 raise
@@ -287,7 +300,7 @@ def _attention(q, k, v, attn_mask, dropout_p, is_causal, scale, enable_gqa, *, v
     out_device = q.device
     hw = hardware_from_dict(hardware) if isinstance(hardware, dict) else (hardware or detect_hardware())
     direction = "bwd" if torch.is_grad_enabled() and (q.requires_grad or k.requires_grad or v.requires_grad) else "fwd"
-    engines = _engines_for(kernel, q.dtype, D, direction)
+    engines = _engines_for(kernel, q.dtype, D, direction, on_host=not on_cuda)
     out_el = q.element_size() if on_cuda else 0          # attention() delivers fp16 to a device caller, nothing to a host caller
     # Inputs already on the device (the end-to-end model case). evict_inputs: "auto" moves them to
     # host memory for the computation when nothing device-resident fits, True always, False never.
@@ -299,30 +312,37 @@ def _attention(q, k, v, attn_mask, dropout_p, is_causal, scale, enable_gqa, *, v
     vb = verbose_enabled(verbose)
     ev = {"state": None}                                  # eviction state, shared with _run (survives an exception there)
     resident = (sum(t.numel() * t.element_size() for t in (q, k, v)) if on_cuda else 0)
+    # inputs_on_host: only host-streaming decompositions can run on host tensors (the planner skips the rest)
     pkw = dict(resident_input_bytes=resident, budget_excludes_inputs=hardware is None,
-               evict_inputs=bool(evict) and on_cuda)
+               evict_inputs=bool(evict) and on_cuda, inputs_on_host=not on_cuda)
     if evict is True and on_cuda and not plan_only:
         (q, k, v), ev["state"] = _evict_inputs((q, k, v), direction == "bwd", vb)
         on_cuda = False
-        pkw = dict(resident_input_bytes=0)
+        pkw = dict(resident_input_bytes=0, inputs_on_host=True)
+        engines = _engines_for(kernel, q.dtype, D, direction, on_host=True)
         if hardware is None:
             hw = detect_hardware()
     pkw["engines"] = engines
     p = _plan(N=N, B=B, H=H, D=D, dtype=q.dtype, causal=bool(is_causal), hardware=hw, direction=direction,
               allow_distributed=False, out_bytes_per_el=out_el, **pkw)
-    if p.mode == "mono" and overrides:
-        # The caller pinned a decomposition (itr=, c=, ...) under a plan that would have been monolithic:
-        # the engine, wave budget and gather mode still come from the memory model, among the
-        # decompositions of the pinned quorum set (c=7 unless given); the pinned depth is applied in _run.
+    pinned = {k_: overrides[k_] for k_ in ("itr", "c", "interest_set") if k_ in overrides and overrides[k_] != "auto"}
+    if overrides and (p.mode == "mono" or pinned):
+        # The caller pinned a decomposition (itr=, c=, ...), or any override under a plan that would have
+        # been monolithic: the engine, wave budget and gather mode still come from the memory model, among
+        # the decompositions of the pinned quorum set (c=7 unless given) at the pinned depth, so plan_only,
+        # the reason line and W describe the configuration that runs.
         from .autoconfig import QUORUM_SETS
         c_pin = int(overrides.get("c", 7))
         iset = tuple(overrides.get("interest_set", QUORUM_SETS.get(c_pin, (0, 1, 3))))
+        depth = {"min_itr": int(pinned["itr"]), "max_itr": int(pinned["itr"])} if "itr" in pinned else {}
         p = _plan(N=N, B=B, H=H, D=D, dtype=q.dtype, causal=bool(is_causal), hardware=hw, direction=direction,
-                  allow_distributed=False, out_bytes_per_el=out_el, allow_mono=False, quorum_sets={c_pin: iset}, **pkw)
+                  allow_distributed=False, out_bytes_per_el=out_el, allow_mono=False, quorum_sets={c_pin: iset},
+                  **depth, **pkw)
     if on_cuda and p.mode == "cqsa" and p.stream_from_host:
         _prefer_device_resident(p)
     if plan_only:
         return p
+    out = None
     try:
         out, info = _run(q, k, v, p, is_causal=is_causal, scale=scale, direction=direction, on_cuda=on_cuda, out_el=out_el,
                          overrides=overrides, kernel=kernel, verbose=verbose, vb=vb, evict=evict, ev=ev,
@@ -330,8 +350,13 @@ def _attention(q, k, v, attn_mask, dropout_p, is_causal, scale, enable_gqa, *, v
     finally:
         evicted = ev["state"]
         if evicted is not None and evicted["restored"] is None:
+            # a hardware= budget describes the whole allowance: Q/K/V return within what the output leaves of it
+            budget = None if hardware is None else next(
+                (d.budget_bytes for d in hw.devices if torch.device(d.name) == evicted["device"]), None)
+            if budget is not None and out is not None and out.is_cuda:
+                budget -= out.numel() * out.element_size()
             try:
-                _restore_inputs(evicted, restore, vb)               # the output is delivered first; Q/K/V only if room remains
+                _restore_inputs(evicted, restore, vb, budget_bytes=budget)   # the output is delivered first; Q/K/V only if room remains
             except Exception:                                        # noqa: BLE001
                 pass
     if evicted is not None:
@@ -370,11 +395,11 @@ def _run(q, k, v, p, *, is_causal, scale, direction, on_cuda, out_el, overrides,
         if vb:
             print(f"Stream-CQSA: N={N} fits ({p.est_peak_gib:.1f} GiB)", flush=True)
             print(_config_line(stage="plan", mode="mono", qkv=("device" if on_cuda else "host, copied to the device"),
-                               acc="device", engine="monolithic", kernel="sdpa", out=f"{q.device} {str(q.dtype).replace('torch.', '')}"), flush=True)
+                               acc="device", engine="monolithic", kernel="sdpa", out=f"{out_device} {str(q.dtype).replace('torch.', '')}"), flush=True)
         qd, kd, vd = ((t if on_cuda else t.to("cuda", non_blocking=True)) for t in (q, k, v))
         try:
             out = _TRUE_SDPA(qd, kd, vd, is_causal=bool(is_causal), scale=scale)
-            out = out if on_cuda else out.to(q.device)
+            out = out if out.device == out_device else out.to(out_device)     # evicted inputs: the caller's device
             return out, {"engine": "monolithic", "kernel": "sdpa", "itr": 0, "n_subproblems": 1}
         except Exception as exc:                                     # noqa: BLE001
             if not _is_oom(exc):
@@ -383,12 +408,12 @@ def _run(q, k, v, p, *, is_causal, scale, direction, on_cuda, out_el, overrides,
                 print("Stream-CQSA: the monolithic call ran out of memory after all; decomposing", flush=True)
             del qd, kd, vd
             torch.cuda.empty_cache()
+            # the planner may still think it fits: plan among the decompositions only, so the engine,
+            # wave budget and gather mode come from the memory model as for a predicted OOM
             p = _plan(N=N, B=B, H=H, D=D, dtype=q.dtype, causal=bool(is_causal), hardware=detect_hardware(),
-                      direction=direction, allow_distributed=False, out_bytes_per_el=out_el,
+                      direction=direction, allow_distributed=False, out_bytes_per_el=out_el, allow_mono=False,
                       **dict(pkw, budget_excludes_inputs=True))
-            if p.mode == "mono":     # the planner still thinks it fits: force a decomposition
-                p.mode, p.itr, p.c, p.interest_set = "cqsa", 1, 7, (0, 1, 3)
-            elif p.stream_from_host:
+            if on_cuda and p.stream_from_host:
                 _prefer_device_resident(p)
 
     # ---- decomposed ------------------------------------------------------------
@@ -415,10 +440,7 @@ def _run(q, k, v, p, *, is_causal, scale, direction, on_cuda, out_el, overrides,
         else:
             if vb:
                 print("Stream-CQSA: no device-resident configuration fits; copying Q/K/V to pinned host memory and streaming", flush=True)
-            if direction == "bwd":
-                q, k, v = (t.to("cpu") for t in (q, k, v))                 # differentiable copies: the graph stays intact
-            else:
-                q, k, v = (_pinned_copy(t) for t in (q, k, v))            # token-major: the engine streams it as is
+            q, k, v = (_pinned_copy(t) for t in (q, k, v))                # token-major: the engine streams it as is
             on_cuda = False
     kw.update(overrides)
     bwd_itr = kw.pop("bwd_itr", "auto")          # depth of the backward: "auto" (planned on its own), "fwd", or an int
@@ -447,7 +469,7 @@ def _run(q, k, v, p, *, is_causal, scale, direction, on_cuda, out_el, overrides,
                            n_par=(None if use_wave else kw.get("max_parallel")),
                            out=f"{out_device} {str(q.dtype).replace('torch.', '')}"), flush=True)
     if use_wave:
-        from .native_wave import wave_attention, wave_forward, wave_token_floor, in_place_possible
+        from .native_wave import wave_attention, wave_forward, wave_token_floor, in_place_possible, default_wave_tokens
         wkw = dict(itr=int(kw.get("itr", 1)), c=int(kw.get("c", 7)), interest_set=tuple(kw.get("interest_set", (0, 1, 3))))
         wkern = WAVE_KERNELS.get(kernel, "auto")
         floor = wave_token_floor(N, H=H, D=D, itemsize=q.element_size(), **wkw)
@@ -455,9 +477,15 @@ def _run(q, k, v, p, *, is_causal, scale, direction, on_cuda, out_el, overrides,
         while use_wave:
             try:
                 if direction == "bwd":
+                    # the backward runs in loss.backward(), outside this ladder: it halves its own wave budget
+                    # on an OOM and, under kernel="auto", falls back to the classic streamed backward; its
+                    # record lands in info["backward"] once it has run
+                    binfo: dict = {}
                     out = wave_attention(q, k, v, causal=bool(is_causal), scale=scale, verbose=verbose, max_wave_tokens=wave_tokens,
-                                         gather=gather, bwd_itr=(bwd_itr if isinstance(bwd_itr, int) else None), **wkw)
-                    info = {"engine": "wave", "kernel": wkern, "max_wave_tokens": wave_tokens, "gather": gather, **wkw}
+                                         gather=gather, bwd_itr=(bwd_itr if isinstance(bwd_itr, int) else None),
+                                         classic_fallback=kernel not in WAVE_KERNELS, bwd_info=binfo, **wkw)
+                    info = {"engine": "wave", "kernel": wkern, "max_wave_tokens": wave_tokens,
+                            "gather": binfo["forward_gather"], "backward": binfo, **wkw}
                 else:
                     out, info = wave_forward(q, k, v, causal=bool(is_causal), scale=scale, verbose=verbose, max_wave_tokens=wave_tokens,
                                              gather=gather, accumulate_on_gpu=acc_gpu, kernel=wkern, **wkw)
@@ -472,7 +500,7 @@ def _run(q, k, v, p, *, is_causal, scale, direction, on_cuda, out_el, overrides,
                 # OOM inside a wave: halve the wave budget first (the per-wave term is the only one the budget
                 # moves), then drop the gathered copies, and only then leave the wave engine, which keeps its
                 # accumulator on the device, for the classic pipeline (it escalates the depth on its own)
-                cur = wave_tokens if wave_tokens is not None else N
+                cur = wave_tokens if wave_tokens is not None else default_wave_tokens(N)   # wave_forward's own default
                 if cur > floor:
                     wave_tokens = max(floor, cur // 2)
                     if vb:
@@ -564,14 +592,15 @@ def _wave_desc(wave_tokens, gather, stream_from_host) -> str:
     return w + (", chunk pool" if stream_from_host else (", Q/K/V gathered" if gather else ", Q/K/V read in place"))
 
 
-def _engines_for(kernel: str, dtype, D: int, direction: str) -> tuple:
+def _engines_for(kernel: str, dtype, D: int, direction: str, on_host: bool = False) -> tuple:
     """The engines the planner may choose from for this call: what ``kernel=`` allows, and the wave engine only
-    when the native build has kernels for (dtype, D). The wave backward runs on the CUDA kernel only, so a
-    Triton-only wave request for a backward is the classic engine's Triton kernels."""
+    when the native build has kernels for (dtype, D). The wave backward runs on the CUDA kernel only and on
+    device-resident inputs only, so a Triton-only wave request for a backward, and any backward of
+    host-resident inputs (``on_host``), is the classic engine's."""
     if kernel in ("cuda", "triton"):
         return ("classic",)
     if kernel in WAVE_KERNELS:
-        return ("classic",) if (direction != "fwd" and kernel == "wave-triton") else ("wave",)
+        return ("classic",) if (direction != "fwd" and (kernel == "wave-triton" or on_host)) else ("wave",)
     if kernel != "auto":
         raise ValueError(f"kernel must be 'auto', 'wave', 'wave-cuda', 'wave-triton', 'cuda' or 'triton' (got {kernel!r})")
     try:
@@ -586,7 +615,11 @@ def _engines_for(kernel: str, dtype, D: int, direction: str) -> tuple:
 def _pick_wave(kernel: str, q: torch.Tensor, direction: str, engine: str) -> bool:
     """Whether this call runs on the wave engine: ``kernel="wave*"`` forces it, ``"cuda"``/``"triton"`` the classic
     engine; ``"auto"`` follows ``engine``, the planner's choice by the memory model (a W=1 wave costs what a classic
-    subproblem costs, so the wave is the executor of every device-resident device-accumulator call it fits)."""
+    subproblem costs, so the wave is the executor of every device-resident device-accumulator call it fits).
+    A backward of host-resident (or evicted) inputs is the classic engine's whatever ``kernel`` says: the wave
+    backward keeps fp32 gradients on the device and cannot take host inputs."""
+    if direction != "fwd" and not q.is_cuda:
+        return False
     if kernel in WAVE_KERNELS:
         # the wave backward runs on the CUDA kernel only: a Triton-only wave request for a
         # backward goes to the classic engine's Triton kernels

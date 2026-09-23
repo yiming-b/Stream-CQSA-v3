@@ -776,19 +776,29 @@ def effective_free_bytes(device) -> int:
     except Exception:
         pass
     free_b, total_b = torch.cuda.mem_get_info(device)
+    frac = _memory_fraction(device)
+    if frac < 1.0:
+        allowed = int(frac * total_b) - int(torch.cuda.memory_reserved(device))
+        free_b = max(0, min(free_b, allowed))
+    return int(free_b)
+
+
+def effective_total_bytes(device) -> int:
+    """Device capacity as the allocator will grant it: the physical total times the
+    torch.cuda.set_per_process_memory_fraction cap (the whole device when none is set)."""
+    return int(_memory_fraction(device) * torch.cuda.get_device_properties(device).total_memory)
+
+
+def _memory_fraction(device) -> float:
     # The fraction is kept per device INDEX; an index-less torch.device("cuda")
     # must be resolved to the current device or the lookup silently returns 1.0.
     idx = device.index if isinstance(device, torch.device) else device
     if idx is None or isinstance(idx, str):
         idx = torch.cuda.current_device()
     try:
-        frac = torch.cuda.get_per_process_memory_fraction(int(idx))
+        return float(torch.cuda.get_per_process_memory_fraction(int(idx)))
     except Exception:
-        frac = 1.0
-    if frac < 1.0:
-        allowed = int(frac * total_b) - int(torch.cuda.memory_reserved(device))
-        free_b = max(0, min(free_b, allowed))
-    return int(free_b)
+        return 1.0
 
 
 def estimate_peak_bytes_bwd(N: int, itr: int, *, B: int, H: int, D: int, itemsize: int,

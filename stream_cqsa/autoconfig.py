@@ -669,12 +669,14 @@ def _cname(c: dict) -> str:
 
 def calibrate(hardware: HardwareSpec | None = None, *, N: int = 131072, B: int = 1, H: int = 8, D: int = 64,
               dtype=torch.float16, causal: bool = True, device="cuda", verbose: bool = True,
-              save: bool = True) -> CostModel:
+              save: bool = True, rate: bool = True) -> CostModel:
     """
     Refit the cost model on this machine: time the monolithic kernel and three
     Stream-CQSA configurations (itr=1 acc=gpu; itr=1 acc=cpu host-resident;
     itr=2 acc=gpu) at a small N and solve for pair_rate, kernel_ratio,
     host-stage cost and depth_factor. About a minute on an A100 at N=131072.
+    With ``save`` (and ``rate``) the device's live-tile rate for the multi-device
+    scheduler (``scheduler.calibrate_rate``, ~1 s) is cached for this GPU model too.
     """
     from .devkit import Config, run_config, measure
     from .stable_stream import TraceRecorder, stream_cqsa_forward
@@ -739,6 +741,13 @@ def calibrate(hardware: HardwareSpec | None = None, *, N: int = 131072, B: int =
         path = save_cost_model(cm, device)
         if verbose:
             print(f"calibrate: saved to {path} (plan() uses it automatically on this GPU model)")
+        if rate:
+            # the multi-device scheduler's live-tile rate of this GPU model (DeviceSpec.tile_rate, the rank table)
+            from .scheduler import calibrate_rate, save_device_rate
+            dr = calibrate_rate(dev)
+            rpath = save_device_rate(dr)
+            if verbose:
+                print(f"calibrate: live-tile rate {dr.tile_rate:.3e} tiles/s saved to {rpath}")
     return cm
 
 

@@ -1,0 +1,466 @@
+{
+ "info": {
+  "gpu": "NVIDIA A100-SXM4-80GB",
+  "torch": "2.10.0+cu130",
+  "node": "della-l08g3",
+  "slurm_job": "14292616",
+  "cpu_threads": "8",
+  "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB"
+ },
+ "config": {
+  "B": 1,
+  "H": 8,
+  "D": 64,
+  "c": 7,
+  "itr": 1,
+  "dtype": "fp16",
+  "causal": true,
+  "acc": "cpu",
+  "reps": 3,
+  "warmup": 1
+ },
+ "arm_check": {
+  "N": 131072,
+  "wave_sync_eq_async": true,
+  "rel_classic_vs_wave": 2.7579912783830037e-08
+ },
+ "note": "no FA-2 arm in this A/B; FA-2 ratios elsewhere in the program are torch SDPA flash backend (flash_attn not installed), ~5% slower than the flash_attn package",
+ "rows": [
+  {
+   "arm": "wave_sync",
+   "N": 1048576,
+   "residency": "host",
+   "reps": 3,
+   "warmup": 1,
+   "times_s": [
+    9.871756732929498,
+    9.86093738512136,
+    9.865163987036794
+   ],
+   "mean_s": 9.865952701695884,
+   "min_s": 9.86093738512136,
+   "peak_gib": [
+    6.254309177398682,
+    6.254309177398682,
+    6.254309177398682,
+    6.254309177398682
+   ],
+   "inputs_gib": 0.0,
+   "host_maxrss_gib": 13.092842102050781,
+   "n_waves": 4,
+   "wave_sizes": [
+    2,
+    2,
+    2,
+    1
+   ],
+   "merge_async": false,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l08g3",
+   "slurm_job": "14292616",
+   "cpu_threads": "8",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "no FA-2 arm in this A/B; FA-2 ratios elsewhere in the program are torch SDPA flash backend (flash_attn not installed), ~5% slower than the flash_attn package"
+  },
+  {
+   "arm": "wave_async",
+   "N": 1048576,
+   "residency": "host",
+   "reps": 3,
+   "warmup": 1,
+   "times_s": [
+    9.023337316000834,
+    9.037500360049307,
+    9.043885053833947
+   ],
+   "mean_s": 9.03490757662803,
+   "min_s": 9.023337316000834,
+   "peak_gib": [
+    6.254309177398682,
+    6.254309177398682,
+    6.254309177398682,
+    6.254309177398682
+   ],
+   "inputs_gib": 0.0,
+   "host_maxrss_gib": 15.243125915527344,
+   "n_waves": 4,
+   "wave_sizes": [
+    2,
+    2,
+    2,
+    1
+   ],
+   "merge_async": true,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l08g3",
+   "slurm_job": "14292616",
+   "cpu_threads": "8",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "no FA-2 arm in this A/B; FA-2 ratios elsewhere in the program are torch SDPA flash backend (flash_attn not installed), ~5% slower than the flash_attn package"
+  },
+  {
+   "arm": "classic",
+   "N": 1048576,
+   "residency": "host",
+   "reps": 3,
+   "warmup": 1,
+   "times_s": [
+    9.334157348843291,
+    9.338252803077921,
+    9.284327697008848
+   ],
+   "mean_s": 9.31891261631002,
+   "min_s": 9.284327697008848,
+   "peak_gib": [
+    3.88059663772583,
+    3.88059663772583,
+    3.88059663772583,
+    3.88059663772583
+   ],
+   "inputs_gib": 0.0,
+   "host_maxrss_gib": 14.659797668457031,
+   "n_waves": null,
+   "wave_sizes": null,
+   "merge_async": null,
+   "n_parallel": 2,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l08g3",
+   "slurm_job": "14292616",
+   "cpu_threads": "8",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "no FA-2 arm in this A/B; FA-2 ratios elsewhere in the program are torch SDPA flash backend (flash_attn not installed), ~5% slower than the flash_attn package"
+  },
+  {
+   "arm": "wave_sync",
+   "N": 2097152,
+   "residency": "host",
+   "reps": 3,
+   "warmup": 1,
+   "times_s": [
+    35.74139451398514,
+    35.74633631692268,
+    35.74024296901189
+   ],
+   "mean_s": 35.74265793330657,
+   "min_s": 35.74024296901189,
+   "peak_gib": [
+    12.504093170166016,
+    12.504093170166016,
+    12.504093170166016,
+    12.504093170166016
+   ],
+   "inputs_gib": 0.0,
+   "host_maxrss_gib": 25.077186584472656,
+   "n_waves": 4,
+   "wave_sizes": [
+    2,
+    2,
+    2,
+    1
+   ],
+   "merge_async": false,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l08g3",
+   "slurm_job": "14292616",
+   "cpu_threads": "8",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "no FA-2 arm in this A/B; FA-2 ratios elsewhere in the program are torch SDPA flash backend (flash_attn not installed), ~5% slower than the flash_attn package"
+  },
+  {
+   "arm": "wave_async",
+   "N": 2097152,
+   "residency": "host",
+   "reps": 3,
+   "warmup": 1,
+   "times_s": [
+    34.19474159087986,
+    34.21648933296092,
+    34.24148155003786
+   ],
+   "mean_s": 34.217570824626215,
+   "min_s": 34.19474159087986,
+   "peak_gib": [
+    12.504093170166016,
+    12.504093170166016,
+    12.504093170166016,
+    12.504093170166016
+   ],
+   "inputs_gib": 0.0,
+   "host_maxrss_gib": 29.206806182861328,
+   "n_waves": 4,
+   "wave_sizes": [
+    2,
+    2,
+    2,
+    1
+   ],
+   "merge_async": true,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l08g3",
+   "slurm_job": "14292616",
+   "cpu_threads": "8",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "no FA-2 arm in this A/B; FA-2 ratios elsewhere in the program are torch SDPA flash backend (flash_attn not installed), ~5% slower than the flash_attn package"
+  },
+  {
+   "arm": "classic",
+   "N": 2097152,
+   "residency": "host",
+   "reps": 3,
+   "warmup": 1,
+   "times_s": [
+    34.64679575199261,
+    34.622586340876296,
+    34.61221868498251
+   ],
+   "mean_s": 34.6272002592838,
+   "min_s": 34.61221868498251,
+   "peak_gib": [
+    7.757772445678711,
+    7.757772445678711,
+    7.757772445678711,
+    7.757772445678711
+   ],
+   "inputs_gib": 0.0,
+   "host_maxrss_gib": 28.506099700927734,
+   "n_waves": null,
+   "wave_sizes": null,
+   "merge_async": null,
+   "n_parallel": 2,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l08g3",
+   "slurm_job": "14292616",
+   "cpu_threads": "8",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "no FA-2 arm in this A/B; FA-2 ratios elsewhere in the program are torch SDPA flash backend (flash_attn not installed), ~5% slower than the flash_attn package"
+  },
+  {
+   "arm": "wave_sync",
+   "N": 1048576,
+   "residency": "device",
+   "reps": 3,
+   "warmup": 1,
+   "times_s": [
+    9.616993712959811,
+    9.598517963895574,
+    9.603195402072743
+   ],
+   "mean_s": 9.606235692976043,
+   "min_s": 9.598517963895574,
+   "peak_gib": [
+    6.252478122711182,
+    6.252478122711182,
+    6.252478122711182,
+    6.252478122711182
+   ],
+   "inputs_gib": 3.0,
+   "host_maxrss_gib": 9.5396728515625,
+   "n_waves": 4,
+   "wave_sizes": [
+    2,
+    2,
+    2,
+    1
+   ],
+   "merge_async": false,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l08g3",
+   "slurm_job": "14292616",
+   "cpu_threads": "8",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "no FA-2 arm in this A/B; FA-2 ratios elsewhere in the program are torch SDPA flash backend (flash_attn not installed), ~5% slower than the flash_attn package"
+  },
+  {
+   "arm": "wave_async",
+   "N": 1048576,
+   "residency": "device",
+   "reps": 3,
+   "warmup": 1,
+   "times_s": [
+    8.75731256394647,
+    8.746479131048545,
+    8.759267321089283
+   ],
+   "mean_s": 8.754353005361432,
+   "min_s": 8.746479131048545,
+   "peak_gib": [
+    6.252478122711182,
+    6.252478122711182,
+    6.252478122711182,
+    6.252478122711182
+   ],
+   "inputs_gib": 3.0,
+   "host_maxrss_gib": 11.642826080322266,
+   "n_waves": 4,
+   "wave_sizes": [
+    2,
+    2,
+    2,
+    1
+   ],
+   "merge_async": true,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l08g3",
+   "slurm_job": "14292616",
+   "cpu_threads": "8",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "no FA-2 arm in this A/B; FA-2 ratios elsewhere in the program are torch SDPA flash backend (flash_attn not installed), ~5% slower than the flash_attn package"
+  },
+  {
+   "arm": "classic",
+   "N": 1048576,
+   "residency": "device",
+   "reps": 3,
+   "warmup": 1,
+   "times_s": [
+    8.585864823078737,
+    8.590477883117273,
+    8.586388660827652
+   ],
+   "mean_s": 8.587577122341221,
+   "min_s": 8.585864823078737,
+   "peak_gib": [
+    5.5966477394104,
+    5.5966477394104,
+    5.5966477394104,
+    5.5966477394104
+   ],
+   "inputs_gib": 3.0,
+   "host_maxrss_gib": 8.73263931274414,
+   "n_waves": null,
+   "wave_sizes": null,
+   "merge_async": null,
+   "n_parallel": 2,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l08g3",
+   "slurm_job": "14292616",
+   "cpu_threads": "8",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "no FA-2 arm in this A/B; FA-2 ratios elsewhere in the program are torch SDPA flash backend (flash_attn not installed), ~5% slower than the flash_attn package"
+  },
+  {
+   "arm": "wave_sync",
+   "N": 2097152,
+   "residency": "device",
+   "reps": 3,
+   "warmup": 1,
+   "times_s": [
+    35.2542397279758,
+    35.23335873289034,
+    35.245118560036644
+   ],
+   "mean_s": 35.2442390069676,
+   "min_s": 35.23335873289034,
+   "peak_gib": [
+    12.502994537353516,
+    12.502994537353516,
+    12.502994537353516,
+    12.502994537353516
+   ],
+   "inputs_gib": 6.0,
+   "host_maxrss_gib": 18.05500030517578,
+   "n_waves": 4,
+   "wave_sizes": [
+    2,
+    2,
+    2,
+    1
+   ],
+   "merge_async": false,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l08g3",
+   "slurm_job": "14292616",
+   "cpu_threads": "8",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "no FA-2 arm in this A/B; FA-2 ratios elsewhere in the program are torch SDPA flash backend (flash_attn not installed), ~5% slower than the flash_attn package"
+  },
+  {
+   "arm": "wave_async",
+   "N": 2097152,
+   "residency": "device",
+   "reps": 3,
+   "warmup": 1,
+   "times_s": [
+    33.54855835111812,
+    33.562232565134764,
+    33.50719425617717
+   ],
+   "mean_s": 33.53932839081002,
+   "min_s": 33.50719425617717,
+   "peak_gib": [
+    12.502994537353516,
+    12.502994537353516,
+    12.502994537353516,
+    12.502994537353516
+   ],
+   "inputs_gib": 6.0,
+   "host_maxrss_gib": 22.262916564941406,
+   "n_waves": 4,
+   "wave_sizes": [
+    2,
+    2,
+    2,
+    1
+   ],
+   "merge_async": true,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l08g3",
+   "slurm_job": "14292616",
+   "cpu_threads": "8",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "no FA-2 arm in this A/B; FA-2 ratios elsewhere in the program are torch SDPA flash backend (flash_attn not installed), ~5% slower than the flash_attn package"
+  },
+  {
+   "arm": "classic",
+   "N": 2097152,
+   "residency": "device",
+   "reps": 3,
+   "warmup": 1,
+   "times_s": [
+    32.172811123076826,
+    32.20837076404132,
+    32.218244665069506
+   ],
+   "mean_s": 32.19980885072922,
+   "min_s": 32.172811123076826,
+   "peak_gib": [
+    11.18548059463501,
+    11.18548059463501,
+    11.18548059463501,
+    11.18548059463501
+   ],
+   "inputs_gib": 6.0,
+   "host_maxrss_gib": 16.68002700805664,
+   "n_waves": null,
+   "wave_sizes": null,
+   "merge_async": null,
+   "n_parallel": 2,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l08g3",
+   "slurm_job": "14292616",
+   "cpu_threads": "8",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "no FA-2 arm in this A/B; FA-2 ratios elsewhere in the program are torch SDPA flash backend (flash_attn not installed), ~5% slower than the flash_attn package"
+  }
+ ]
+}

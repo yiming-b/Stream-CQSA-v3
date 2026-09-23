@@ -1,0 +1,25 @@
+/scratch/gpfs/AKEY/yb2807/VENVs/CQSA311/bin/python
+della-l08g3
+NVIDIA A100-SXM4-80GB, 210 MHz, 1410 MHz, 81920 MiB
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/stream_cqsa/__init__.py 2.10.0+cu130
+3d3be92 benchmarks/ultimate/kernel_rows.py: M0.1b kernel rows (hdim128, non-causal v9, bf16, patterns, ragged, itr=2 + wave) in one job
+{'gpu': 'NVIDIA A100-SXM4-80GB', 'torch': '2.10.0+cu130', 'node': 'della-l08g3', 'slurm_job': '14292616', 'cpu_threads': '8', 'nvidia_smi': 'NVIDIA A100-SXM4-80GB, 210 MHz, 1410 MHz, 81920 MiB'}
+arm check: {'N': 131072, 'wave_sync_eq_async': True, 'rel_classic_vs_wave': 2.7579912783830037e-08}
+host   N= 1048576 wave_sync :    9.87 s (min 9.86, runs [9.87, 9.86, 9.87])  peak 6.25 GiB  host 13.1 GiB  waves=4
+host   N= 1048576 wave_async:    9.03 s (min 9.02, runs [9.02, 9.04, 9.04])  peak 6.25 GiB  host 15.2 GiB  waves=4
+host   N= 1048576 classic   :    9.32 s (min 9.28, runs [9.33, 9.34, 9.28])  peak 3.88 GiB  host 14.7 GiB  waves=None
+host   N= 2097152 wave_sync :   35.74 s (min 35.74, runs [35.74, 35.75, 35.74])  peak 12.50 GiB  host 25.1 GiB  waves=4
+host   N= 2097152 wave_async:   34.22 s (min 34.19, runs [34.19, 34.22, 34.24])  peak 12.50 GiB  host 29.2 GiB  waves=4
+host   N= 2097152 classic   :   34.63 s (min 34.61, runs [34.65, 34.62, 34.61])  peak 7.76 GiB  host 28.5 GiB  waves=None
+device N= 1048576 wave_sync :    9.61 s (min 9.60, runs [9.62, 9.6, 9.6])  peak 6.25 GiB  host 9.5 GiB  waves=4
+device N= 1048576 wave_async:    8.75 s (min 8.75, runs [8.76, 8.75, 8.76])  peak 6.25 GiB  host 11.6 GiB  waves=4
+device N= 1048576 classic   :    8.59 s (min 8.59, runs [8.59, 8.59, 8.59])  peak 5.60 GiB  host 8.7 GiB  waves=None
+device N= 2097152 wave_sync :   35.24 s (min 35.23, runs [35.25, 35.23, 35.25])  peak 12.50 GiB  host 18.1 GiB  waves=4
+device N= 2097152 wave_async:   33.54 s (min 33.51, runs [33.55, 33.56, 33.51])  peak 12.50 GiB  host 22.3 GiB  waves=4
+device N= 2097152 classic   :   32.20 s (min 32.17, runs [32.17, 32.21, 32.22])  peak 11.19 GiB  host 16.7 GiB  waves=None
+
+summary (mean s; ratio = wave_async / classic):
+  host   N= 1048576: sync 9.87  async 9.03  classic 9.32  async/classic 0.970  async/sync 0.916
+  host   N= 2097152: sync 35.74  async 34.22  classic 34.63  async/classic 0.988  async/sync 0.957
+  device N= 1048576: sync 9.61  async 8.75  classic 8.59  async/classic 1.019  async/sync 0.911
+  device N= 2097152: sync 35.24  async 33.54  classic 32.20  async/classic 1.042  async/sync 0.952

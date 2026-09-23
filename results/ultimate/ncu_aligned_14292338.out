@@ -1,0 +1,211 @@
+della-l02g14
+/scratch/gpfs/AKEY/yb2807/VENVs/CQSA311/bin/python
+-rwxr-xr-x 1 root root 2699 Oct  3  2025 /usr/local/cuda-13.0/bin/ncu
+Version 2026.2.1.0 (build 38283040) (public-release)
+NVIDIA A100 80GB PCIe, 210 MHz, 1410 MHz, 81920 MiB
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/stream_cqsa/__init__.py 2.10.0+cu130
+=============== arm=fa2  01:32:37
+==WARNING== Launching the workload is taking more time than expected. If this continues to hang, terminate the profile and re-try by profiling the range of all related launches using '--replay-mode range'. See https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#replay for more details.
+....50%....100% - 53 passes
+{"arm": "fa2", "N": 131072, "c": 7, "path": [2], "L": 56064, "L_mod_128": 0, "H": 8, "D": 64, "dtype": "float16", "causal": true, "layout": "aligned_128", "seg_align": 128, "inputs": "gathered", "cuda_module": "cqsa_cuda_next_v11", "torch": "2.10.0+cu130", "node": "della-l02g14", "slurm_job": "14292338", "gpu": "NVIDIA A100 80GB PCIe", "nvidia_smi": "NVIDIA A100 80GB PCIe, 210 MHz, 1410 MHz", "device_mem_peak_GiB": 0.21553897857666016}
+==WARNING== No source files were imported. Check that the target application was compiled with -lineinfo.
+ncu exit: 0  01:32:54
+-rw-r--r-- 1 yb2807 akey  244037 Sep 23 01:32 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/ncu_aligned/fa2.details.txt
+-rw-r--r-- 1 yb2807 akey 4867836 Sep 23 01:32 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/ncu_aligned/fa2.ncu-rep
+-rw-r--r-- 1 yb2807 akey  120654 Sep 23 01:32 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/ncu_aligned/fa2.raw.csv
+-rw-r--r-- 1 yb2807 akey     466 Sep 23 01:32 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/ncu_aligned/fa2.row.json
+-rw-r--r-- 1 yb2807 akey 1491879 Sep 23 01:32 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/ncu_aligned/fa2.sass.csv
+    SM Frequency                    Ghz          1.06
+    Duration                         ms         23.58
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+grep: write error: Broken pipe
+=============== arm=plain  01:32:56
+{"arm": "plain", "N": 131072, "c": 7, "path": [2], "L": 56064, "L_mod_128": 0, "H": 8, "D": 64, "dtype": "float16", "causal": true, "layout": "aligned_128", "seg_align": 128, "inputs": "gathered", "cuda_module": "cqsa_cuda_next_v11", "torch": "2.10.0+cu130", "node": "della-l02g14", "slurm_job": "14292338", "gpu": "NVIDIA A100 80GB PCIe", "nvidia_smi": "NVIDIA A100 80GB PCIe, 210 MHz, 1410 MHz", "device_mem_peak_GiB": 0.5358180999755859}
+==WARNING== No source files were imported. Check that the target application was compiled with -lineinfo.
+ncu exit: 0  01:33:08
+-rw-r--r-- 1 yb2807 akey   245971 Sep 23 01:33 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/ncu_aligned/plain.details.txt
+-rw-r--r-- 1 yb2807 akey 22137298 Sep 23 01:33 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/ncu_aligned/plain.ncu-rep
+-rw-r--r-- 1 yb2807 akey   120733 Sep 23 01:33 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/ncu_aligned/plain.raw.csv
+-rw-r--r-- 1 yb2807 akey      467 Sep 23 01:33 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/ncu_aligned/plain.row.json
+-rw-r--r-- 1 yb2807 akey  1367712 Sep 23 01:33 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/ncu_aligned/plain.sass.csv
+    SM Frequency                    Ghz          1.06
+    Duration                         ms         22.79
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+grep: write error: Broken pipe
+=============== arm=zero  01:33:10
+{"arm": "zero", "N": 131072, "c": 7, "path": [2], "L": 56064, "L_mod_128": 0, "H": 8, "D": 64, "dtype": "float16", "causal": true, "layout": "aligned_128", "seg_align": 128, "inputs": "gathered", "cuda_module": "cqsa_cuda_next_v11", "torch": "2.10.0+cu130", "node": "della-l02g14", "slurm_job": "14292338", "gpu": "NVIDIA A100 80GB PCIe", "nvidia_smi": "NVIDIA A100 80GB PCIe, 210 MHz, 1410 MHz", "census": {"n_tiles64": 384126, "masked": 0.0, "clear": 1.0, "mixed": 0.0}, "device_mem_peak_GiB": 0.5358180999755859}
+==WARNING== No source files were imported. Check that the target application was compiled with -lineinfo.
+ncu exit: 0  01:33:36
+-rw-r--r-- 1 yb2807 akey   248158 Sep 23 01:33 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/ncu_aligned/zero.details.txt
+-rw-r--r-- 1 yb2807 akey 33211234 Sep 23 01:33 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/ncu_aligned/zero.ncu-rep
+-rw-r--r-- 1 yb2807 akey   120855 Sep 23 01:33 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/ncu_aligned/zero.raw.csv
+-rw-r--r-- 1 yb2807 akey      554 Sep 23 01:33 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/ncu_aligned/zero.row.json
+-rw-r--r-- 1 yb2807 akey 23098343 Sep 23 01:33 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/ncu_aligned/zero.sass.csv
+    SM Frequency                    Ghz          1.06
+    Duration                         ms         29.75
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+grep: write error: Broken pipe
+=============== arm=real  01:33:43
+{"arm": "real", "N": 131072, "c": 7, "path": [2], "L": 56064, "L_mod_128": 0, "H": 8, "D": 64, "dtype": "float16", "causal": true, "layout": "aligned_128", "seg_align": 128, "inputs": "gathered", "cuda_module": "cqsa_cuda_next_v11", "torch": "2.10.0+cu130", "node": "della-l02g14", "slurm_job": "14292338", "gpu": "NVIDIA A100 80GB PCIe", "nvidia_smi": "NVIDIA A100 80GB PCIe, 210 MHz, 1410 MHz", "census": {"n_tiles64": 384126, "masked": 0.2227290003800836, "clear": 0.7772709996199164, "mixed": 0.0}, "device_mem_peak_GiB": 0.5358180999755859}
+==WARNING== No source files were imported. Check that the target application was compiled with -lineinfo.
+ncu exit: 0  01:34:09
+-rw-r--r-- 1 yb2807 akey   248103 Sep 23 01:34 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/ncu_aligned/real.details.txt
+-rw-r--r-- 1 yb2807 akey 34003848 Sep 23 01:34 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/ncu_aligned/real.ncu-rep
+-rw-r--r-- 1 yb2807 akey   120829 Sep 23 01:34 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/ncu_aligned/real.raw.csv
+-rw-r--r-- 1 yb2807 akey      584 Sep 23 01:34 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/ncu_aligned/real.row.json
+-rw-r--r-- 1 yb2807 akey 23125546 Sep 23 01:34 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/ncu_aligned/real.sass.csv
+    SM Frequency                    Ghz          1.06
+    Duration                         ms         23.58
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                                                      Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+    SM Frequency                          Ghz         1.06
+grep: write error: Broken pipe
+=============== summarize  01:34:16
+wrote /scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/ncu_aligned.md
+done 01:34:33

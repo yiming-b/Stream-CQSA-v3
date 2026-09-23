@@ -1,0 +1,119 @@
+/scratch/gpfs/AKEY/yb2807/VENVs/CQSA311/bin/python
+della-l08g3
+NVIDIA A100-SXM4-80GB, 210 MHz, 1410 MHz, 81920 MiB
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/stream_cqsa/__init__.py 2.10.0+cu130
+{"torch_device": "NVIDIA A100-SXM4-80GB", "torch": "2.10.0+cu130", "node": "della-l08g3", "slurm_job": "14292580", "slurm_node": "della-l08g3", "cuda_module": "cqsa_cuda_next_v11", "nvidia_smi": "NVIDIA A100-SXM4-80GB, 210 MHz, 1410 MHz, 81920 MiB"}
+/scratch/gpfs/AKEY/yb2807/VENVs/CQSA311/lib/python3.11/site-packages/torch/profiler/profiler.py:217: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+[a] hdim128 aligned_128    path=(0,) L= 56320 v11 real    35.57 zero    40.88 sdpaF    32.81  real/F 1.084 zero/F 1.246  inplace    37.94 maxdiff 0.0e+00
+[a] hdim128 aligned_128    path=(1,) L= 56192 v11 real    32.02 zero    40.76 sdpaF    32.77  real/F 0.977 zero/F 1.244  inplace    34.30 maxdiff 0.0e+00
+[a] hdim128 aligned_128    path=(2,) L= 56064 v11 real    31.91 zero    40.62 sdpaF    32.81  real/F 0.973 zero/F 1.238  inplace    34.13 maxdiff 0.0e+00
+[a] hdim128 aligned_128    path=(3,) L= 56064 v11 real    31.87 zero    40.57 sdpaF    32.81  real/F 0.972 zero/F 1.237  inplace    34.14 maxdiff 0.0e+00
+[a] hdim128 aligned_128    path=(4,) L= 56192 v11 real    31.97 zero    40.72 sdpaF    32.77  real/F 0.976 zero/F 1.243  inplace    34.20 maxdiff 0.0e+00
+[a] hdim128 aligned_128    path=(5,) L= 56192 v11 real    31.96 zero    40.75 sdpaF    32.77  real/F 0.975 zero/F 1.243  inplace    34.25 maxdiff 0.0e+00
+[a] hdim128 aligned_128    path=(6,) L= 56192 v11 real    33.15 zero    40.68 sdpaF    32.77  real/F 1.012 zero/F 1.241  inplace    35.41 maxdiff 0.0e+00
+[a] hdim128 classic_align1 path=(0,) L= 56175 v11 real    38.63 zero    44.42 sdpaF    33.56  real/F 1.151 zero/F 1.324
+[b] noncausal aligned_128    path=(0,) L= 56320 v9 real    38.53 zero    47.94 sdpaF    34.76  real/F 1.108 zero/F 1.379  inplace    40.44 maxdiff 0.0e+00
+[b] noncausal aligned_128    path=(1,) L= 56192 v9 real    38.34 zero    47.63 sdpaF    34.73  real/F 1.104 zero/F 1.372  inplace    40.40 maxdiff 0.0e+00
+[b] noncausal aligned_128    path=(2,) L= 56064 v9 real    38.17 zero    47.38 sdpaF    34.67  real/F 1.101 zero/F 1.367  inplace    39.98 maxdiff 0.0e+00
+[b] noncausal aligned_128    path=(3,) L= 56064 v9 real    38.17 zero    47.44 sdpaF    34.67  real/F 1.101 zero/F 1.368  inplace    40.05 maxdiff 0.0e+00
+[b] noncausal aligned_128    path=(4,) L= 56192 v9 real    38.12 zero    47.66 sdpaF    34.73  real/F 1.098 zero/F 1.373  inplace    40.05 maxdiff 0.0e+00
+[b] noncausal aligned_128    path=(5,) L= 56192 v9 real    38.14 zero    47.64 sdpaF    34.73  real/F 1.098 zero/F 1.372  inplace    40.08 maxdiff 0.0e+00
+[b] noncausal aligned_128    path=(6,) L= 56192 v9 real    37.89 zero    47.65 sdpaF    34.73  real/F 1.091 zero/F 1.372  inplace    39.83 maxdiff 0.0e+00
+[b] noncausal classic_align1 path=(0,) L= 56175 v9 real    48.76 zero    47.47 sdpaF    36.33  real/F 1.342 zero/F 1.307
+[c] bf16 hdim64 causal via cqsa_cuda_next_v11 [recipe module (kernel/stable copy)] /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/stable/cqsa_cuda_next_v11.cpython-311-x86_64-linux-gnu.so: NOT RUN (RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.)
+[c] bf16 hdim64 causal via cqsa_cuda_next_v11 [variant-dir build of the same v11 source] /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v11/cqsa_cuda_next_v11.cpython-311-x86_64-linux-gnu.so: L=56320 bf16 real 19.93 zero 22.73 sdpaF 18.06 real/F 1.104 zero/F 1.258 | same binary fp16 real 18.05 sdpaF 18.07 real/F 0.999
+[c] bf16 hdim64 causal via cqsa_cuda [shipped pre-v11 kernel (next/pkg), reference only] /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/pkg/cqsa_cuda.cpython-311-x86_64-linux-gnu.so: L=56320 bf16 real 24.25 zero 25.62 sdpaF 18.03 real/F 1.345 zero/F 1.420 | same binary fp16 real 23.40 sdpaF 18.02 real/F 1.299
+[d] L=56320 real       v11    18.04 ms  /sdpaF 1.000  masked  22.2% mixed  0.00%  finite=True lse[-1.54,11.6] nonfinite rows 0  fp64 {'rows': [18752, 18880], 'n_empty_rows': 0, 'max_abs': 1.1682240337254277e-05, 'max_abs_ref': 0.05881111628374107}
+[d] L=56320 zero       v11    22.79 ms  /sdpaF 1.263  masked   0.0% mixed  0.00%  finite=True lse[-1.54,12] nonfinite rows 0  fp64 {'rows': [18752, 18880], 'n_empty_rows': 0, 'max_abs': 1.1682240337254277e-05, 'max_abs_ref': 0.05881111628374107}
+[d] L=56320 allones    v11     2.51 ms  /sdpaF 0.139  masked 100.0% mixed  0.00%  finite=True lse[inf,inf] nonfinite rows 450560  fp64 {'rows': [0, 128], 'n_empty_rows': 128, 'max_abs': None, 'max_abs_ref': None}
+[d] L=56320 random3bit v11   158.43 ms  /sdpaF 8.782  masked   0.0% mixed 100.00%  finite=True lse[-2.28,inf] nonfinite rows 24  fp64 {'rows': [0, 128], 'n_empty_rows': 3, 'max_abs': 0.00045159067151689936, 'max_abs_ref': 3.046875}
+[e] N=100003 aligned_128    path=[0] L= 43008 (L%128=  0) v11 real    10.87 zero    13.80 sdpaF    10.82 real/F 1.005 zero/F 1.275 mixed 0.00%  inplace    11.51 maxdiff 0.0e+00
+[e] N=100003 aligned_128    path=[1] L= 42880 (L%128=  0) v11 real    10.84 zero    13.64 sdpaF    10.79 real/F 1.004 zero/F 1.264 mixed 0.00%
+[e] N=100003 aligned_128    path=[2] L= 42880 (L%128=  0) v11 real    10.80 zero    13.66 sdpaF    10.79 real/F 1.001 zero/F 1.265 mixed 0.00%
+[e] N=100003 aligned_128    path=[3] L= 42787 (L%128= 35) v11 real    14.41 zero    14.17 sdpaF    10.96 real/F 1.315 zero/F 1.294 mixed 0.00%
+[e] N=100003 aligned_128    path=[4] L= 42752 (L%128=  0) v11 real    10.67 zero    13.58 sdpaF    10.76 real/F 0.992 zero/F 1.262 mixed 0.00%
+[e] N=100003 aligned_128    path=[5] L= 42787 (L%128= 35) v11 real    14.27 zero    14.14 sdpaF    10.96 real/F 1.303 zero/F 1.291 mixed 0.00%
+[e] N=100003 aligned_128    path=[6] L= 42915 (L%128= 35) v11 real    11.91 zero    14.26 sdpaF    11.10 real/F 1.073 zero/F 1.284 mixed 0.00%
+[e] N=100003 classic_align1 path=[0] L= 42859 (L%128=107) v11 real    15.81 zero    14.16 sdpaF    11.01 real/F 1.436 zero/F 1.286 mixed 0.30%
+[e] N=100003 classic_align1 path=[1] L= 42858 (L%128=106) v11 real    15.88 zero    14.16 sdpaF    11.02 real/F 1.441 zero/F 1.285 mixed 0.30%
+[e] N=100003 classic_align1 path=[2] L= 42858 (L%128=106) v11 real    16.02 zero    14.14 sdpaF    11.02 real/F 1.454 zero/F 1.283 mixed 0.30%
+[e] N=100003 classic_align1 path=[3] L= 42858 (L%128=106) v11 real    15.87 zero    14.15 sdpaF    11.02 real/F 1.440 zero/F 1.284 mixed 0.30%
+[e] N=100003 classic_align1 path=[4] L= 42859 (L%128=107) v11 real    15.62 zero    14.12 sdpaF    11.01 real/F 1.418 zero/F 1.282 mixed 0.20%
+[e] N=100003 classic_align1 path=[5] L= 42858 (L%128=106) v11 real    15.69 zero    14.17 sdpaF    11.02 real/F 1.424 zero/F 1.286 mixed 0.20%
+[e] N=100003 classic_align1 path=[6] L= 42859 (L%128=107) v11 real    14.10 zero    14.16 sdpaF    11.01 real/F 1.280 zero/F 1.286 mixed 0.30%
+[e] recomposed aligned vs unaligned: maxabs 1.44e-05 rel 2.17e-05; fp64 aligned {'rows': [50001, 50065], 'max_abs': 6.218839407375748e-06, 'max_abs_ref': 0.03467801491359036} unaligned {'rows': [50001, 50065], 'max_abs': 6.412515827513426e-06, 'max_abs_ref': 0.03467801491359036}; mono sdpaF 56.75 ms
+[f] itr=2 aligned_128   : 49 tasks L 23936-24192; sum v11 real 155.4 zero 232.6 sdpaF 180.5 ms; real/F 0.861 zero/F 1.289; mixed 0.00% masked 39.7%
+[f] itr=2 classic_align1: 49 tasks L 24073-24075; sum v11 real 310.6 zero 247.6 sdpaF 184.8 ms; real/F 1.681 zero/F 1.340; mixed 0.58% masked 39.4%
+[f] wave one launch W=49 S=24192: packed 139.0 inplace 143.3 ms (packing 0.995); wave rows vs v11 maxdiff 0.0; recomposed aligned vs unaligned maxabs 1.81e-05 rel 3.65e-05; mono sdpaF 96.0 ms
+
+==================== KERNEL ROWS (ms, median of 5 after 1 warm-up; H=8; NVIDIA A100-SXM4-80GB) ====================
+FA-2 arm = torch SDPA with SDPBackend.FLASH_ATTENTION forced (flash_attn not installed); SDPA-flash is ~5% slower than the flash_attn package, so every ratio vs it is ~5% kinder than vs flash_attn
+                         row          layout    path       L L%128 |  cqs real  cqs zero     sdpaF | real/F zero/F |  inplace  ip diff | mixed% masked%
+ (a) hdim128 fp16 causal v11     aligned_128     [0]   56320     0 |     35.57     40.88     32.81 |  1.084  1.246 |    37.94  0.0e+00 |   0.00    22.2
+ (a) hdim128 fp16 causal v11     aligned_128     [1]   56192     0 |     32.02     40.76     32.77 |  0.977  1.244 |    34.30  0.0e+00 |   0.00    22.2
+ (a) hdim128 fp16 causal v11     aligned_128     [2]   56064     0 |     31.91     40.62     32.81 |  0.973  1.238 |    34.13  0.0e+00 |   0.00    22.3
+ (a) hdim128 fp16 causal v11     aligned_128     [3]   56064     0 |     31.87     40.57     32.81 |  0.972  1.237 |    34.14  0.0e+00 |   0.00    22.3
+ (a) hdim128 fp16 causal v11     aligned_128     [4]   56192     0 |     31.97     40.72     32.77 |  0.976  1.243 |    34.20  0.0e+00 |   0.00    22.3
+ (a) hdim128 fp16 causal v11     aligned_128     [5]   56192     0 |     31.96     40.75     32.77 |  0.975  1.243 |    34.25  0.0e+00 |   0.00    22.3
+ (a) hdim128 fp16 causal v11     aligned_128     [6]   56192     0 |     33.15     40.68     32.77 |  1.012  1.241 |    35.41  0.0e+00 |   0.00    22.3
+ (a) hdim128 fp16 causal v11  classic_align1     [0]   56175   111 |     38.63     44.42     33.56 |  1.151  1.324 |      nan      nan |   0.23    22.2
+     (b) noncausal hdim64 v9     aligned_128     [0]   56320     0 |     38.53     47.94     34.76 |  1.108  1.379 |    40.44  0.0e+00 |   0.00    22.2
+     (b) noncausal hdim64 v9     aligned_128     [1]   56192     0 |     38.34     47.63     34.73 |  1.104  1.372 |    40.40  0.0e+00 |   0.00    22.2
+     (b) noncausal hdim64 v9     aligned_128     [2]   56064     0 |     38.17     47.38     34.67 |  1.101  1.367 |    39.98  0.0e+00 |   0.00    22.3
+     (b) noncausal hdim64 v9     aligned_128     [3]   56064     0 |     38.17     47.44     34.67 |  1.101  1.368 |    40.05  0.0e+00 |   0.00    22.3
+     (b) noncausal hdim64 v9     aligned_128     [4]   56192     0 |     38.12     47.66     34.73 |  1.098  1.373 |    40.05  0.0e+00 |   0.00    22.3
+     (b) noncausal hdim64 v9     aligned_128     [5]   56192     0 |     38.14     47.64     34.73 |  1.098  1.372 |    40.08  0.0e+00 |   0.00    22.3
+     (b) noncausal hdim64 v9     aligned_128     [6]   56192     0 |     37.89     47.65     34.73 |  1.091  1.372 |    39.83  0.0e+00 |   0.00    22.3
+     (b) noncausal hdim64 v9  classic_align1     [0]   56175   111 |     48.76     47.47     36.33 |  1.342  1.307 |      nan      nan |   0.23    22.2
+      (c) bf16 hdim64 causal via cqsa_cuda_next_v11 [recipe module (kernel/stable copy)] /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/stable/cqsa_cuda_next_v11.cpython-311-x86_64-linux-gnu.so: NOT RUN: RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+      (c) bf16 hdim64 causal via cqsa_cuda_next_v11 [variant-dir build of the same v11 source] /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v11/cqsa_cuda_next_v11.cpython-311-x86_64-linux-gnu.so: L=56320 bf16 real 19.93 zero 22.73 sdpaF 18.06 real/F 1.104 zero/F 1.258 fp64 9.07e-05 | same binary fp16 real 18.05 zero 22.80 sdpaF 18.07 real/F 0.999 zero/F 1.261
+      (c) bf16 hdim64 causal via cqsa_cuda [shipped pre-v11 kernel (next/pkg), reference only] /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/pkg/cqsa_cuda.cpython-311-x86_64-linux-gnu.so: L=56320 bf16 real 24.25 zero 25.62 sdpaF 18.03 real/F 1.345 zero/F 1.420 fp64 9.07e-05 | same binary fp16 real 23.40 zero 25.83 sdpaF 18.02 real/F 1.299 zero/F 1.433
+            (d) pattern real     aligned_128     [0]   56320     0 |     18.04               18.04 |  1.000        |                   |   0.00    22.2   finite=True nonfinite-lse rows=0 fp64={'rows': [18752, 18880], 'n_empty_rows': 0, 'max_abs': 1.1682240337254277e-05, 'max_abs_ref': 0.05881111628374107}
+            (d) pattern zero     aligned_128     [0]   56320     0 |     22.79               18.04 |  1.263        |                   |   0.00     0.0   finite=True nonfinite-lse rows=0 fp64={'rows': [18752, 18880], 'n_empty_rows': 0, 'max_abs': 1.1682240337254277e-05, 'max_abs_ref': 0.05881111628374107}
+         (d) pattern allones     aligned_128     [0]   56320     0 |      2.51               18.04 |  0.139        |                   |   0.00   100.0   finite=True nonfinite-lse rows=450560 fp64={'rows': [0, 128], 'n_empty_rows': 128, 'max_abs': None, 'max_abs_ref': None}
+      (d) pattern random3bit     aligned_128     [0]   56320     0 |    158.43               18.04 |  8.782        |                   | 100.00     0.0   finite=True nonfinite-lse rows=24 fp64={'rows': [0, 128], 'n_empty_rows': 3, 'max_abs': 0.00045159067151689936, 'max_abs_ref': 3.046875}
+         (e) ragged N=100003     aligned_128     [0]   43008     0 |     10.87     13.80     10.82 |  1.005  1.275 |    11.51  0.0e+00 |   0.00    22.3
+         (e) ragged N=100003     aligned_128     [1]   42880     0 |     10.84     13.64     10.79 |  1.004  1.264 |      nan      nan |   0.00    22.2
+         (e) ragged N=100003     aligned_128     [2]   42880     0 |     10.80     13.66     10.79 |  1.001  1.265 |      nan      nan |   0.00    22.2
+         (e) ragged N=100003     aligned_128     [3]   42787    35 |     14.41     14.17     10.96 |  1.315  1.294 |      nan      nan |   0.00    22.2
+         (e) ragged N=100003     aligned_128     [4]   42752     0 |     10.67     13.58     10.76 |  0.992  1.262 |      nan      nan |   0.00    22.4
+         (e) ragged N=100003     aligned_128     [5]   42787    35 |     14.27     14.14     10.96 |  1.303  1.291 |      nan      nan |   0.00    22.4
+         (e) ragged N=100003     aligned_128     [6]   42915    35 |     11.91     14.26     11.10 |  1.073  1.284 |      nan      nan |   0.00    22.4
+         (e) ragged N=100003     aligned_128 SUM over 7 tasks (L 42752-43008): real 83.8  zero 97.2  sdpaF 76.2 ms  real/F 1.100 zero/F 1.277  mixed 0.00% masked 22.3%
+         (e) ragged N=100003  classic_align1     [0]   42859   107 |     15.81     14.16     11.01 |  1.436  1.286 |      nan      nan |   0.30    22.1
+         (e) ragged N=100003  classic_align1     [1]   42858   106 |     15.88     14.16     11.02 |  1.441  1.285 |      nan      nan |   0.30    22.1
+         (e) ragged N=100003  classic_align1     [2]   42858   106 |     16.02     14.14     11.02 |  1.454  1.283 |      nan      nan |   0.30    22.1
+         (e) ragged N=100003  classic_align1     [3]   42858   106 |     15.87     14.15     11.02 |  1.440  1.284 |      nan      nan |   0.30    22.1
+         (e) ragged N=100003  classic_align1     [4]   42859   107 |     15.62     14.12     11.01 |  1.418  1.282 |      nan      nan |   0.20    22.2
+         (e) ragged N=100003  classic_align1     [5]   42858   106 |     15.69     14.17     11.02 |  1.424  1.286 |      nan      nan |   0.20    22.2
+         (e) ragged N=100003  classic_align1     [6]   42859   107 |     14.10     14.16     11.01 |  1.280  1.286 |      nan      nan |   0.30    22.1
+         (e) ragged N=100003  classic_align1 SUM over 7 tasks (L 42858-42859): real 109.0  zero 99.1  sdpaF 77.1 ms  real/F 1.413 zero/F 1.285  mixed 0.27% masked 22.2%
+                             recomposed aligned vs unaligned: maxabs 1.44e-05 rel 2.17e-05; fp64 aligned 6.22e-06 unaligned 6.41e-06 (ref max 0.035); monolithic sdpaF at N 56.8 ms
+          (f) itr=2 N=131072     aligned_128 SUM over 49 tasks (L 23936-24192): real 155.4  zero 232.6  sdpaF 180.5 ms  real/F 0.861 zero/F 1.289  mixed 0.00% masked 39.7%
+          (f) itr=2 N=131072  classic_align1 SUM over 49 tasks (L 24073-24075): real 310.6  zero 247.6  sdpaF 184.8 ms  real/F 1.681 zero/F 1.340  mixed 0.58% masked 39.4%
+                             recomposed aligned vs unaligned: maxabs 1.81e-05 rel 3.65e-05; fp64 aligned 5.51e-06 unaligned 5.95e-06 (ref max 0.030); monolithic sdpaF at N 96.0 ms
+                             wave one launch W=49 S=24192: packed 139.0 ms  inplace 143.3 ms  uniform packing 0.995; wave rows vs v11 per task maxdiff 0.0; wave inplace vs packed maxdiff 0.0
+
+kernel names: {
+ "v11_hdim128_causal": [
+  "void flash::flash_fwd_kernel<Flash_fwd_kernel_traits<128, 128, 64, 4, false, false, cutlass::half_t, Flash_kernel_traits<128, 128, 64, 4, cutlass::half_t> >, false, true, false, false, true, true, false, false, 1>(flash::Flash_fwd_params)"
+ ],
+ "sdpa_flash_hdim128_float16_causal": [
+  "void pytorch_flash::flash_fwd_kernel<Flash_fwd_kernel_traits<128, 128, 64, 4, false, false, cutlass::half_t, Flash_kernel_traits<128, 128, 64, 4, cutlass::half_t> >, false, true, false, false, true, true, false, false>(pytorch_flash::Flash_fwd_params)"
+ ],
+ "v9_hdim64_noncausal": [
+  "void flash::flash_fwd_kernel<Flash_fwd_kernel_traits<64, 128, 128, 4, false, false, cutlass::half_t, Flash_kernel_traits<64, 128, 128, 4, cutlass::half_t> >, false, false, false, false, true, true, false, false>(flash::Flash_fwd_params)"
+ ],
+ "sdpa_flash_hdim64_float16_noncausal": [
+  "void pytorch_flash::flash_fwd_kernel<Flash_fwd_kernel_traits<64, 128, 128, 4, false, false, cutlass::half_t, Flash_kernel_traits<64, 128, 128, 4, cutlass::half_t> >, false, false, false, false, true, true, false, false>(pytorch_flash::Flash_fwd_params)"
+ ],
+ "sdpa_flash_hdim64_float16_causal": [
+  "void pytorch_flash::flash_fwd_kernel<Flash_fwd_kernel_traits<64, 128, 128, 4, false, false, cutlass::half_t, Flash_kernel_traits<64, 128, 128, 4, cutlass::half_t> >, false, true, false, false, true, true, false, false>(pytorch_flash::Flash_fwd_params)"
+ ],
+ "wave_hdim64_causal": [
+  "void flash::flash_fwd_kernel<Flash_fwd_kernel_traits<64, 128, 128, 4, false, false, cutlass::half_t, Flash_kernel_traits<64, 128, 128, 4, cutlass::half_t> >, false, true, false, false, true, true, false, false, 3>(flash::Flash_fwd_params)"
+ ]
+}
+
+wrote /scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/kernel_rows.json  (44 s)

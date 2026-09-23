@@ -160,6 +160,30 @@ def cqs_bwd(mod, do, q, k, v, o16, lse, tabs, causal, flags=None, deterministic=
     return dq, dk, dv
 
 
+class dpsum_smem:
+    """v12b b3's A/B switch for the dP_sum source of the ALIGNED kernel (env CQSA_V12B_DPSUM_SMEM, read by the
+    launcher on every call): "1" = staged in smem by cp.async next to the Q prefetch, "0" = upstream's global reads."""
+    def __init__(self, on):
+        self.on = on
+
+    def __enter__(self):
+        self.saved = os.environ.get("CQSA_V12B_DPSUM_SMEM")
+        os.environ["CQSA_V12B_DPSUM_SMEM"] = "1" if self.on else "0"
+
+    def __exit__(self, *exc):
+        if self.saved is None:
+            os.environ.pop("CQSA_V12B_DPSUM_SMEM", None)
+        else:
+            os.environ["CQSA_V12B_DPSUM_SMEM"] = self.saved
+
+
+def with_dpsum(on, fn):
+    def call():
+        with dpsum_smem(on):
+            return fn()
+    return call
+
+
 def census(mod, tabs, causal, D):
     """v12b's census on the device: (route, run table [num_n, slots, 2] as a numpy array, (block_m, block_n))."""
     route, runs, tile = mod.bwd_cqs_census(tabs[0], tabs[1], tabs[2], bool(causal), int(D))
@@ -325,6 +349,7 @@ def part_config(res, key, N, task, D, causal, iters, patterns=("real", "zero"), 
     ref_plain = [x.clone() for x in cqs_bwd(MODS["v11"], do, q, k, v, o16p, lsep, None, causal)]
     row("v11x_nocqs", "plain", lambda: cqs_bwd(MODS["v11x"], do, q, k, v, o16p, lsep, None, causal), ref_plain)
     row("v12b_plain", "plain", lambda: cqs_bwd(MODS["v12b"], do, q, k, v, o16p, lsep, None, causal), ref_plain)
+    row("v12b_plain_s", "plain", with_dpsum(True, lambda: cqs_bwd(MODS["v12b"], do, q, k, v, o16p, lsep, None, causal)), ref_plain)
     row("v11_plain", "plain", lambda: cqs_bwd(MODS["v11"], do, q, k, v, o16p, lsep, None, causal))
     del ref_plain, o16p, lsep
     for pattern in patterns:
@@ -333,6 +358,7 @@ def part_config(res, key, N, task, D, causal, iters, patterns=("real", "zero"), 
         route = census(MODS["v12b"], tabs, causal, D)[0]
         ref = row("v11", pattern, lambda: cqs_bwd(MODS["v11"], do, q, k, v, o16, lse, tabs, causal))
         row("v12b", pattern, lambda: cqs_bwd(MODS["v12b"], do, q, k, v, o16, lse, tabs, causal, flags=0), ref, route)
+        row("v12b_s", pattern, with_dpsum(True, lambda: cqs_bwd(MODS["v12b"], do, q, k, v, o16, lse, tabs, causal, flags=0)), ref, route)
         if legacy_arm and pattern == "real":
             row("v12b_legacy", pattern, lambda: cqs_bwd(MODS["v12b"], do, q, k, v, o16, lse, tabs, causal,
                                                          flags=FORCE_LEGACY), ref)
@@ -412,6 +438,7 @@ def part_c73(res, N, iters):
     r = dict(gpu=GPU, N=N, c=73, tasks=len(tasks), L_min=min(Ls), L_max=Lmax, sum_L=sum(Ls), D=D, causal=True,
              pattern="real", routes=routes)
     for arm, fn in (("v11", lambda: run_all(MODS["v11"])), ("v12b", lambda: run_all(MODS["v12b"], flags=0)),
+                    ("v12b_s", with_dpsum(True, lambda: run_all(MODS["v12b"], flags=0))),
                     ("v12b_legacy", lambda: run_all(MODS["v12b"], flags=FORCE_LEGACY)),
                     ("v11x_nocqs", lambda: run_all(MODS["v11x"], cqs=False)), ("flash_attn_loop", run_fa)):
         r[f"{arm}_ms"], r[f"{arm}_min_ms"] = timed(fn, iters)
@@ -435,14 +462,14 @@ def part_c73(res, N, iters):
     r["flash_attn_bwd_sum_ms"], r["sdpa_flash_bwd_sum_ms"] = fa_tot, sd_tot
     mono = fa2_arms(N, D, True, iters)
     r["monolithic_flash_attn_bwd_ms"], r["monolithic_sdpa_flash_bwd_ms"] = mono["flash_attn_bwd_ms"], mono["sdpa_flash_bwd_ms"]
-    for arm in ("v11", "v12b", "v12b_legacy", "v11x_nocqs", "flash_attn_loop"):
+    for arm in ("v11", "v12b", "v12b_s", "v12b_legacy", "v11x_nocqs", "flash_attn_loop"):
         r[f"{arm}_ratio_vs_flash_attn"] = r[f"{arm}_ms"] / fa_tot
         r[f"{arm}_ratio_vs_sdpa"] = r[f"{arm}_ms"] / sd_tot
         r[f"{arm}_ratio_vs_flash_attn_loop"] = r[f"{arm}_ms"] / r["flash_attn_loop_ms"]
     res["c73"] = r
     print(f"[c73] N={N} {len(tasks)} tasks L {min(Ls)}-{Lmax}: " + "  ".join(
         f"{arm} {r[arm + '_ms']:.1f} ms (/fa loop {r[arm + '_ratio_vs_flash_attn_loop']:.3f})"
-        for arm in ("v11", "v12b", "v12b_legacy", "v11x_nocqs", "flash_attn_loop"))
+        for arm in ("v11", "v12b", "v12b_s", "v12b_legacy", "v11x_nocqs", "flash_attn_loop"))
           + f"  | flash_attn sum {fa_tot:.1f}  sdpa sum {sd_tot:.1f}  monolithic flash_attn {mono['flash_attn_bwd_ms']:.1f}"
           f"  routes={routes} dk/dv equal={eq} dq max|d| {dq_max:.1e}", flush=True)
 
@@ -471,8 +498,8 @@ def report(res, path_md):
     L.append("flash_attn = the package's backward through autograd (as the SDPA arm); flash_attn direct = its extension's "
              "`bwd` called like our arms (recorded in the json as `flash_attn_direct_bwd_ms`).")
     L.append("")
-    L.append("| config | L | D | causal | flash_attn | SDPA | v11x NO_CQS | v12b plain | v11 real | v12b real | v12b LEGACY real | v11 zero | v12b zero | v12b route (real) | dk/dv == v11 (real, zero) | dq max vs v11 (real) |")
-    L.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    L.append("| config | L | D | causal | flash_attn | SDPA | v11x NO_CQS | v12b plain | v12b_s plain | v11 real | v12b real | v12b_s real | v12b LEGACY real | v11 zero | v12b zero | v12b_s zero | v12b route (real) | dk/dv == v11 (real, zero, s real, s zero) | dq max vs v11 (real) |")
+    L.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     drift = []
     for cfg in res.get("configs", []):
         g = lambda a, p: _row(res, cfg, a, p)
@@ -482,15 +509,17 @@ def report(res, path_md):
         fa, sd = base["flash_attn_bwd_ms"], base["sdpa_flash_bwd_ms"]
         cell = lambda r: "-" if r is None else f"{r['ms']:.2f} ({r['ms'] / fa:.3f} / {r['ms'] / sd:.3f})"
         rr, rz = g("v12b", "real"), g("v12b", "zero")
-        eq = f"{rr.get('dk_dv_equal_vs_v11') if rr else '-'}, {rz.get('dk_dv_equal_vs_v11') if rz else '-'}"
+        eq = ", ".join(str(x.get("dk_dv_equal_vs_v11")) if x else "-"
+                       for x in (rr, rz, g("v12b_s", "real"), g("v12b_s", "zero")))
         again = g("v11x_nocqs_again", "plain")
         if again:
             drift.append(f"{cfg}: v11x NO_CQS first {base['ms']:.2f} / last {again['ms']:.2f} ms"
                          + (f", v12b plain first {g('v12b_plain', 'plain')['ms']:.2f} / last {g('v12b_plain_again', 'plain')['ms']:.2f} ms"
                             if g("v12b_plain_again", "plain") else ""))
         L.append(f"| {cfg} | {base['L']} | {base['D']} | {int(base['causal'])} | {fa:.2f} | {sd:.2f} | {cell(base)} | "
-                 f"{cell(g('v12b_plain', 'plain'))} | {cell(g('v11', 'real'))} | {cell(rr)} | {cell(g('v12b_legacy', 'real'))} | "
-                 f"{cell(g('v11', 'zero'))} | {cell(rz)} | {rr.get('route') if rr else '-'} | {eq} | "
+                 f"{cell(g('v12b_plain', 'plain'))} | {cell(g('v12b_plain_s', 'plain'))} | {cell(g('v11', 'real'))} | {cell(rr)} | "
+                 f"{cell(g('v12b_s', 'real'))} | {cell(g('v12b_legacy', 'real'))} | "
+                 f"{cell(g('v11', 'zero'))} | {cell(rz)} | {cell(g('v12b_s', 'zero'))} | {rr.get('route') if rr else '-'} | {eq} | "
                  f"{('%.1e' % rr['maxdiff_dq_dk_dv_vs_v11'][0]) if rr else '-'} |")
     if drift:
         L.append("")
@@ -501,13 +530,20 @@ def report(res, path_md):
     L.append("| target | value | pass |")
     L.append("|---|---|---|")
     for cfg in res.get("configs", []):
-        z, n = _row(res, cfg, "v12b", "zero"), _row(res, cfg, "v11x_nocqs", "plain")
-        if z and n:
-            v = z["ms"] / n["ms"]
-            L.append(f"| {cfg}: v12b zero / v11x NO_CQS <= 1.05 | {v:.3f} | {v <= 1.05} |")
-    for cfg in res.get("configs", []):
-        r = _row(res, cfg, "v12b", "real")
+        n = _row(res, cfg, "v11x_nocqs_again", "plain") or _row(res, cfg, "v11x_nocqs", "plain")
+        for arm in ("v12b", "v12b_s"):
+            z = _row(res, cfg, arm, "zero")
+            if z and n:
+                v = z["ms"] / n["ms"]
+                L.append(f"| {cfg}: {arm} zero / v11x NO_CQS <= 1.05 | {v:.3f} | {v <= 1.05} |")
+        for arm in ("v12b_plain", "v12b_plain_s"):
+            z = _row(res, cfg, arm, "plain")
+            if z and n:
+                L.append(f"| {cfg}: {arm} / v11x NO_CQS (recorded) | {z['ms'] / n['ms']:.3f} | - |")
+    for cfg, arm in [(c_, a_) for c_ in res.get("configs", []) for a_ in ("v12b", "v12b_s")]:
+        r = _row(res, cfg, arm, "real")
         if r and r["L"] > 50000:
+            cfg = f"{cfg} [{arm}]"
             if r["causal"] and r["D"] == 64:
                 L.append(f"| {cfg}: v12b real / flash_attn bwd <= 0.85 | {r['ratio_vs_flash_attn']:.3f} | {r['ratio_vs_flash_attn'] <= 0.85} |")
                 L.append(f"| {cfg}: v12b real / SDPA bwd <= 1.30 (design P2.1 gate) | {r['ratio_vs_sdpa']:.3f} | {r['ratio_vs_sdpa'] <= 1.30} |")
@@ -527,7 +563,7 @@ def report(res, path_md):
         L.append("")
         L.append("| arm | ms | / flash_attn loop | / flash_attn per-task sum | / SDPA per-task sum |")
         L.append("|---|---|---|---|---|")
-        for arm in ("v11", "v12b", "v12b_legacy", "v11x_nocqs", "flash_attn_loop"):
+        for arm in [a for a in ("v11", "v12b", "v12b_s", "v12b_legacy", "v11x_nocqs", "flash_attn_loop") if a + "_ms" in c]:
             L.append(f"| {arm} | {c[arm + '_ms']:.1f} | {c[arm + '_ratio_vs_flash_attn_loop']:.3f} | "
                      f"{c[arm + '_ratio_vs_flash_attn']:.3f} | {c[arm + '_ratio_vs_sdpa']:.3f} |")
         L.append(f"| flash_attn per task (autograd), summed | {c['flash_attn_bwd_sum_ms']:.1f} | - | 1 | - |")

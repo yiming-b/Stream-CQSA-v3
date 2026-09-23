@@ -6,28 +6,33 @@ Job **14322302**, della-l07g4, **NVIDIA A100-SXM4-80GB** (`NVIDIA A100-SXM4-80GB
 
 flash_attn = the package's backward through autograd (as the SDPA arm); flash_attn direct = its extension's `bwd` called like our arms (recorded in the json as `flash_attn_direct_bwd_ms`).
 
-| config | L | D | causal | flash_attn | SDPA | v11x NO_CQS | v12b plain | v11 real | v12b real | v12b LEGACY real | v11 zero | v12b zero | v12b route (real) | dk/dv == v11 (real, zero) | dq max vs v11 (real) |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| c7_N32768_causal_d64 | 13952 | 64 | 1 | 3.27 | 3.50 | 3.14 (0.959 / 0.898) | 3.01 (0.918 / 0.859) | 5.94 (1.815 / 1.700) | 2.65 (0.811 / 0.759) | 5.94 (1.814 / 1.699) | 6.29 (1.920 / 1.798) | 3.11 (0.949 / 0.888) | 0 | True, True | 1.2e-04 |
-| c7_N65536_causal_d64 | 28032 | 64 | 1 | 11.20 | 12.16 | 11.11 (0.992 / 0.913) | 11.60 (1.036 / 0.954) | 21.83 (1.948 / 1.795) | 9.61 (0.858 / 0.790) | 21.84 (1.949 / 1.795) | 24.26 (2.165 / 1.995) | 11.95 (1.067 / 0.982) | 0 | True, True | 6.1e-05 |
-| c7_N131072_causal_d64 | 56064 | 64 | 1 | 43.90 | 47.65 | 43.82 (0.998 / 0.920) | 45.78 (1.043 / 0.961) | 85.43 (1.946 / 1.793) | 37.31 (0.850 / 0.783) | 85.43 (1.946 / 1.793) | 94.51 (2.153 / 1.984) | 47.10 (1.073 / 0.989) | 0 | True, True | 6.1e-05 |
-| c7_N131072_causal_d128 | 56064 | 128 | 1 | 80.28 | 83.82 | 79.74 (0.993 / 0.951) | 82.83 (1.032 / 0.988) | 124.79 (1.554 / 1.489) | 65.26 (0.813 / 0.779) | 124.77 (1.554 / 1.489) | 137.31 (1.710 / 1.638) | 82.03 (1.022 / 0.979) | 0 | True, True | 1.2e-04 |
-| c7_N131072_noncausal_d64 | 56064 | 64 | 0 | 86.37 | 92.97 | 87.16 (1.009 / 0.937) | 89.72 (1.039 / 0.965) | 131.23 (1.519 / 1.411) | 72.69 (0.842 / 0.782) | 131.14 (1.518 / 1.411) | 140.50 (1.627 / 1.511) | 93.56 (1.083 / 1.006) | 0 | True, True | 3.1e-05 |
+| config | L | D | causal | flash_attn | SDPA | v11x NO_CQS | v12b plain | v12b_s plain | v11 real | v12b real | v12b_s real | v12b LEGACY real | v11 zero | v12b zero | v12b_s zero | v12b route (real) | dk/dv == v11 (real, zero, s real, s zero) | dq max vs v11 (real) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| c7_N32768_causal_d64 | 13952 | 64 | 1 | 3.27 | 3.50 | 3.14 (0.959 / 0.898) | 3.01 (0.918 / 0.859) | - | 5.94 (1.815 / 1.700) | 2.65 (0.811 / 0.759) | - | 5.94 (1.814 / 1.699) | 6.29 (1.920 / 1.798) | 3.11 (0.949 / 0.888) | - | 0 | True, True, -, - | 1.2e-04 |
+| c7_N65536_causal_d64 | 28032 | 64 | 1 | 11.20 | 12.16 | 11.11 (0.992 / 0.913) | 11.60 (1.036 / 0.954) | - | 21.83 (1.948 / 1.795) | 9.61 (0.858 / 0.790) | - | 21.84 (1.949 / 1.795) | 24.26 (2.165 / 1.995) | 11.95 (1.067 / 0.982) | - | 0 | True, True, -, - | 6.1e-05 |
+| c7_N131072_causal_d64 | 56064 | 64 | 1 | 43.90 | 47.65 | 43.82 (0.998 / 0.920) | 45.78 (1.043 / 0.961) | - | 85.43 (1.946 / 1.793) | 37.31 (0.850 / 0.783) | - | 85.43 (1.946 / 1.793) | 94.51 (2.153 / 1.984) | 47.10 (1.073 / 0.989) | - | 0 | True, True, -, - | 6.1e-05 |
+| c7_N131072_causal_d128 | 56064 | 128 | 1 | 80.28 | 83.82 | 79.74 (0.993 / 0.951) | 82.83 (1.032 / 0.988) | - | 124.79 (1.554 / 1.489) | 65.26 (0.813 / 0.779) | - | 124.77 (1.554 / 1.489) | 137.31 (1.710 / 1.638) | 82.03 (1.022 / 0.979) | - | 0 | True, True, -, - | 1.2e-04 |
+| c7_N131072_noncausal_d64 | 56064 | 64 | 0 | 86.37 | 92.97 | 87.16 (1.009 / 0.937) | 89.72 (1.039 / 0.965) | - | 131.23 (1.519 / 1.411) | 72.69 (0.842 / 0.782) | - | 131.14 (1.518 / 1.411) | 140.50 (1.627 / 1.511) | 93.56 (1.083 / 1.006) | - | 0 | True, True, -, - | 3.1e-05 |
 
 ## Targets
 
 | target | value | pass |
 |---|---|---|
 | c7_N32768_causal_d64: v12b zero / v11x NO_CQS <= 1.05 | 0.989 | True |
+| c7_N32768_causal_d64: v12b_plain / v11x NO_CQS (recorded) | 0.957 | - |
 | c7_N65536_causal_d64: v12b zero / v11x NO_CQS <= 1.05 | 1.076 | False |
+| c7_N65536_causal_d64: v12b_plain / v11x NO_CQS (recorded) | 1.044 | - |
 | c7_N131072_causal_d64: v12b zero / v11x NO_CQS <= 1.05 | 1.075 | False |
+| c7_N131072_causal_d64: v12b_plain / v11x NO_CQS (recorded) | 1.045 | - |
 | c7_N131072_causal_d128: v12b zero / v11x NO_CQS <= 1.05 | 1.029 | True |
+| c7_N131072_causal_d128: v12b_plain / v11x NO_CQS (recorded) | 1.039 | - |
 | c7_N131072_noncausal_d64: v12b zero / v11x NO_CQS <= 1.05 | 1.073 | False |
-| c7_N131072_causal_d64: v12b real / flash_attn bwd <= 0.85 | 0.850 | True |
-| c7_N131072_causal_d64: v12b real / SDPA bwd <= 1.30 (design P2.1 gate) | 0.783 | True |
-| c7_N131072_causal_d128: v12b real / flash_attn bwd (recorded) | 0.813 | - |
-| c7_N131072_noncausal_d64: non-causal v12b real / SDPA bwd <= 1.10 (design P2.1 gate) | 0.782 | True |
-| c7_N131072_noncausal_d64: non-causal v12b real / flash_attn bwd (recorded) | 0.842 | - |
+| c7_N131072_noncausal_d64: v12b_plain / v11x NO_CQS (recorded) | 1.029 | - |
+| c7_N131072_causal_d64 [v12b]: v12b real / flash_attn bwd <= 0.85 | 0.850 | True |
+| c7_N131072_causal_d64 [v12b]: v12b real / SDPA bwd <= 1.30 (design P2.1 gate) | 0.783 | True |
+| c7_N131072_causal_d128 [v12b]: v12b real / flash_attn bwd (recorded) | 0.813 | - |
+| c7_N131072_noncausal_d64 [v12b]: non-causal v12b real / SDPA bwd <= 1.10 (design P2.1 gate) | 0.782 | True |
+| c7_N131072_noncausal_d64 [v12b]: non-causal v12b real / flash_attn bwd (recorded) | 0.842 | - |
 | c=73 N=131072 (L 16128-16384): v12b sum / SDPA sum <= 1.45 (design: L=16159 causal) | 0.859 | True |
 | c=73: v12b loop / flash_attn loop (recorded) | 0.956 | - |
 

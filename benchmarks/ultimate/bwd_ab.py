@@ -337,6 +337,11 @@ def part_config(res, key, N, task, D, causal, iters, patterns=("real", "zero"), 
             row("v12b_legacy", pattern, lambda: cqs_bwd(MODS["v12b"], do, q, k, v, o16, lse, tabs, causal,
                                                          flags=FORCE_LEGACY), ref)
         del ref, o16, lse
+    # drift check: the first arm again, after every other arm of this config ran (clocks / thermals)
+    o16p, lsep = plain_fwd(MODS["v11"], q, k, v, causal)
+    row("v11x_nocqs_again", "plain", lambda: cqs_bwd(MODS["v11x"], do, q, k, v, o16p, lsep, None, causal))
+    row("v12b_plain_again", "plain", lambda: cqs_bwd(MODS["v12b"], do, q, k, v, o16p, lsep, None, causal))
+    del o16p, lsep
     o16, lse = cqs_fwd(MODS["v11"], q, k, v, real, causal)
     kernel_names(f"v12b_real_D{D}_causal{int(causal)}", lambda: cqs_bwd(MODS["v12b"], do, q, k, v, o16, lse, real, causal, flags=0))
     kernel_names(f"v11_real_D{D}_causal{int(causal)}", lambda: cqs_bwd(MODS["v11"], do, q, k, v, o16, lse, real, causal))
@@ -468,6 +473,7 @@ def report(res, path_md):
     L.append("")
     L.append("| config | L | D | causal | flash_attn | SDPA | v11x NO_CQS | v12b plain | v11 real | v12b real | v12b LEGACY real | v11 zero | v12b zero | v12b route (real) | dk/dv == v11 (real, zero) | dq max vs v11 (real) |")
     L.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    drift = []
     for cfg in res.get("configs", []):
         g = lambda a, p: _row(res, cfg, a, p)
         base = g("v11x_nocqs", "plain")
@@ -477,10 +483,18 @@ def report(res, path_md):
         cell = lambda r: "-" if r is None else f"{r['ms']:.2f} ({r['ms'] / fa:.3f} / {r['ms'] / sd:.3f})"
         rr, rz = g("v12b", "real"), g("v12b", "zero")
         eq = f"{rr.get('dk_dv_equal_vs_v11') if rr else '-'}, {rz.get('dk_dv_equal_vs_v11') if rz else '-'}"
+        again = g("v11x_nocqs_again", "plain")
+        if again:
+            drift.append(f"{cfg}: v11x NO_CQS first {base['ms']:.2f} / last {again['ms']:.2f} ms"
+                         + (f", v12b plain first {g('v12b_plain', 'plain')['ms']:.2f} / last {g('v12b_plain_again', 'plain')['ms']:.2f} ms"
+                            if g("v12b_plain_again", "plain") else ""))
         L.append(f"| {cfg} | {base['L']} | {base['D']} | {int(base['causal'])} | {fa:.2f} | {sd:.2f} | {cell(base)} | "
                  f"{cell(g('v12b_plain', 'plain'))} | {cell(g('v11', 'real'))} | {cell(rr)} | {cell(g('v12b_legacy', 'real'))} | "
                  f"{cell(g('v11', 'zero'))} | {cell(rz)} | {rr.get('route') if rr else '-'} | {eq} | "
                  f"{('%.1e' % rr['maxdiff_dq_dk_dv_vs_v11'][0]) if rr else '-'} |")
+    if drift:
+        L.append("")
+        L.append("Drift check (the first arms re-timed after all others of the config): " + "; ".join(drift) + ".")
     L.append("")
     L.append("## Targets")
     L.append("")

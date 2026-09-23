@@ -28,7 +28,10 @@ P2 (this package) started 13:12.
 | tests/test_ultimate_v12b.py on vis1 | done 14:06: 44 passed | first build, no fix needed; profiler confirms the ALIGNED kernel does the work (L=28032: census 8 us, LEGACY launch 9 us, ALIGNED 31.9 ms vs v11 65.3 ms on the shared PCIe GPU) |
 | bwd_ab --smoke on vis1 | done | every arm and check runs; timings on the shared, 100%-busy PCIe GPU are noise (not used) |
 | static report | done | `results/ultimate/v12b_static.md`: ALIGNED hdim64 128x128 causal even: 255/72 B/2176 SASS vs v11 255/224/5624, v11x NO_CQS 255/112/2152, torch-FA2 255/96/2336 |
-| SXM job bwd_ab | submitted 14:12 | job 14322302 (gpu-test, sxm&gpu80, 12G, 45 min), snapshot `ultimate-50e64d2`, V12B_DIR = frozen/b1 |
+| SXM job bwd_ab (b1) | done 14:11, 57 s | job 14322302, snapshot `ultimate-50e64d2`, frozen/b1 -> `results/ultimate/bwd_ab_b1.{json,md}`. dk/dv torch.equal to v11 in every row; real 0.850x flash_attn at 56K causal D64 (gate 0.85: borderline), 0.813 D128, 0.842 non-causal; c=73 0.956x flash_attn loop, 2.18x faster than v11; BUT v12b zero / v11x NO_CQS = 0.989 / 1.076 / 1.075 (14K/28K/56K causal D64), 1.029 D128, 1.073 non-causal: the ALIGNED loop itself (plain) is 1.03-1.045x v11x's |
+| diagnosis b1 | done 14:15 | SASS (hdim64 128x128 causal even): same loop shape, fewer instructions than v11x (1235 vs 1306), but ptxas sank the four dP_sum global loads (issued after the top barrier in upstream's source) to ~27 instructions before their use in dS (v11x: ~70, behind the dP GEMM): global-load latency exposed on every tile |
+| b2: dP_sum loaded before the top barrier; next-m computed at the Q prefetch; run slot + sQ buffer in one register | built 14:30 (836 s: a new csv path changed the nvcc command line, so ninja rebuilt every unit), 44 tests pass, frozen/b2 | SASS: loads now 115 HMMAs ahead of use, but 17 STL + 17 LDL per tile (4 more live registers across the S GEMM) |
+| b3: dP_sum staged in smem by cp.async with the Q prefetch (2 x kBlockM floats past kSmemSize1colblock) | written | to build incrementally with CSV_TAG=b2 |
 | results, diff, commit | - | |
 
 ## Design as built (refinements of the task's sketch)

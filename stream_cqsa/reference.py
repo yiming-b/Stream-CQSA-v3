@@ -39,6 +39,7 @@ __all__ = [
     "C",
     "INTEREST_SET",
     "chunk_layout",
+    "level_align",
     "quorum_chunks",
     "build_path_state",
     "all_paths",
@@ -89,6 +90,12 @@ def chunk_layout(
     The tail goes to the *last* chunk on purpose: under ``sorted_gather`` the
     gathered chunks are concatenated in ascending id, so a ragged chunk c-1 is
     always last in the local sequence and cannot misalign anything after it.
+
+    Below ``c * align`` tokens the aligned layout is *degenerate*: there are
+    fewer whole blocks than chunks, so some chunks are empty and the last one
+    holds the tail (everything, below one block). It is still exact, but a
+    refinement of such a sequence can return the parent itself. See
+    ``level_align`` for the rule the decomposition uses to avoid that.
     """
     n_tokens, c, align = int(n_tokens), int(c), int(align)
     if align <= 1:
@@ -111,6 +118,27 @@ def chunk_layout(
     return sizes, starts, ends
 
 
+def level_align(n_tokens: int, c: int = C, align: int = 1, *, strict: bool = True) -> int:
+    """
+    The alignment one decomposition level of ``n_tokens`` local tokens is built
+    with.
+
+    A level can give every one of its ``c`` chunks a whole ``align``-token block
+    only when it holds at least ``c * align`` tokens. ``strict=True`` applies
+    ``align`` regardless (empty chunks below that; the caller guarantees a
+    block map for every task and stops refining before this point).
+    ``strict=False`` falls back to the even split for such a level: its
+    chunks are then never empty and its children always shrink, at the price
+    of the level -- and every task under it -- no longer being block-contiguous,
+    so those tasks carry no block map and are always gathered. Below
+    ``c * align`` tokens a subproblem is a few kernel tiles, so nothing is lost.
+    """
+    align = int(align)
+    if align <= 1 or strict or int(n_tokens) >= int(c) * align:
+        return align
+    return 1
+
+
 def quorum_chunks(owner: int, c: int = C, interest_set: Sequence[int] = INTEREST_SET) -> list[int]:
     """Chunks gathered by subsequence ``owner``: ``(owner + off) mod c``."""
     return [int((int(owner) + int(off)) % int(c)) for off in interest_set]
@@ -124,9 +152,20 @@ def build_path_state(
     *,
     sorted_gather: bool = False,
     align: int = 1,
+    strict_align: bool = True,
 ):
     """
     Walk a decomposition path and return the resulting local subsequence.
+
+    ``align`` is applied afresh at every level, on the LOCAL sequence of that
+    level (``chunk_layout(cur_len, c, align)``): with ``align > 1`` every level's
+    chunks except the last are whole blocks, so each level concatenates runs
+    that start on block boundaries and, by induction, every full block of the
+    final subsequence is one contiguous global run. Children of an aligned
+    task are therefore aligned by construction and never padded.
+    ``strict_align`` is ``level_align``'s ``strict``: whether a level too short
+    for whole-block chunks keeps the aligned layout or falls back to the even
+    split. ``trace[level]["align"]`` records what each level used.
 
     ``sorted_gather`` controls the order in which the quorum chunks are
     concatenated:
@@ -162,7 +201,8 @@ def build_path_state(
 
     for owner in path:
         cur_len = int(token_ids.shape[0])
-        _, starts, ends = chunk_layout(cur_len, c, align)
+        lvl_align = level_align(cur_len, c, align, strict=strict_align)
+        _, starts, ends = chunk_layout(cur_len, c, lvl_align)
         chunks = quorum_chunks(int(owner), c, interest_set)
         if sorted_gather:
             chunks = sorted(chunks)
@@ -198,6 +238,7 @@ def build_path_state(
                 "owner": int(owner),
                 "chunks": [int(x) for x in chunks],
                 "local_ranges": local_ranges,
+                "align": int(lvl_align),
             }
         )
 
@@ -222,6 +263,7 @@ def group_bits_for_path(
     *,
     sorted_gather: bool = False,
     align: int = 1,
+    strict_align: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Build the per-token int64 CQS group bitset for one path.
@@ -234,7 +276,8 @@ def group_bits_for_path(
     subsequence.
     """
     token_ids, label_history, trace = build_path_state(
-        N, path, c, interest_set, sorted_gather=sorted_gather, align=align
+        N, path, c, interest_set, sorted_gather=sorted_gather, align=align,
+        strict_align=strict_align,
     )
     local_size = int(token_ids.shape[0])
     bits = np.zeros((local_size,), dtype=np.int64)
@@ -268,6 +311,7 @@ def dense_keep_mask_for_path(
     interest_set: Sequence[int] = INTEREST_SET,
     sorted_gather: bool = False,
     align: int = 1,
+    strict_align: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Dense ``[L, L]`` boolean keep mask for one path.
@@ -277,7 +321,8 @@ def dense_keep_mask_for_path(
     those tokens are not adjacent in the original sequence.
     """
     token_ids, bits = group_bits_for_path(
-        N, path, c, interest_set, sorted_gather=sorted_gather, align=align
+        N, path, c, interest_set, sorted_gather=sorted_gather, align=align,
+        strict_align=strict_align,
     )
     b = torch.from_numpy(bits)
     keep = torch.bitwise_and(b[:, None], b[None, :]).eq(0).numpy()
@@ -301,6 +346,7 @@ def pair_coverage_counts(
     interest_set: Sequence[int] = INTEREST_SET,
     sorted_gather: bool = False,
     align: int = 1,
+    strict_align: bool = True,
 ) -> np.ndarray:
     """
     Count how many times each global pair ``(q, k)`` is retained across all leaf
@@ -310,7 +356,7 @@ def pair_coverage_counts(
     for path in all_paths(itr, c):
         token_ids, keep = dense_keep_mask_for_path(
             N, path, causal=causal, c=c, interest_set=interest_set,
-            sorted_gather=sorted_gather, align=align,
+            sorted_gather=sorted_gather, align=align, strict_align=strict_align,
         )
         rows, cols = np.nonzero(keep)
         np.add.at(counts, (token_ids[rows], token_ids[cols]), 1)
@@ -326,11 +372,12 @@ def check_pair_coverage(
     sorted_gather: bool = False,
     interest_set: Sequence[int] = INTEREST_SET,
     align: int = 1,
+    strict_align: bool = True,
 ) -> None:
     """Assert every target pair is retained exactly once."""
     counts = pair_coverage_counts(
         N, itr, causal=causal, c=c, sorted_gather=sorted_gather,
-        interest_set=interest_set, align=align,
+        interest_set=interest_set, align=align, strict_align=strict_align,
     )
 
     target = np.ones((int(N), int(N)), dtype=np.int32)
@@ -587,7 +634,8 @@ def segment_block_base(
     c: int = C,
     interest_set: Sequence[int] = INTEREST_SET,
     align: int = 128,
-) -> np.ndarray:
+    strict_align: bool = True,
+) -> np.ndarray | None:
     """
     Map each aligned block of the LOCAL subsequence to its global start row.
 
@@ -595,10 +643,17 @@ def segment_block_base(
     block never straddles a run boundary once chunks are ``align``-aligned (see
     ``chunk_layout``). This is what lets the kernel read the original Q/K/V in
     place instead of consuming a gathered copy.
+
+    Returns ``None`` when the path holds a level that fell back to the even
+    split (``strict_align=False`` below ``c * align`` tokens): such a
+    subsequence is not block-contiguous and has no block map.
     """
-    token_ids, _, _ = build_path_state(
-        N, path, c, interest_set, sorted_gather=True, align=align
+    token_ids, _, trace = build_path_state(
+        N, path, c, interest_set, sorted_gather=True, align=align,
+        strict_align=strict_align,
     )
+    if any(int(t["align"]) != int(align) for t in trace):
+        return None
     L = int(token_ids.shape[0])
     n_blocks = (L + align - 1) // align
     base = token_ids[: n_blocks * align : align]

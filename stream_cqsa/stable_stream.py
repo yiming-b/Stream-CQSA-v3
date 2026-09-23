@@ -61,7 +61,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import torch
 
-from .reference import all_paths, group_bits_for_path, segment_block_base
+from .reference import all_paths, group_bits_for_path, level_align, segment_block_base
 from .progress import Progress, verbose_enabled, describe_call, expected_seconds
 import sys
 
@@ -72,6 +72,12 @@ __all__ = [
     "build_tasks",
     "build_tasks_cached",
     "clear_task_cache",
+    "TASK_SEG_ALIGN",
+    "task_layout",
+    "task_seg_align_for",
+    "min_refinable_tokens",
+    "max_depth_for",
+    "refine_task",
     "estimate_task_bytes",
     "choose_parallelism",
     "plan_decomposition",
@@ -367,7 +373,68 @@ def is_oom(exc: BaseException) -> bool:
         "out of memory" in str(exc).lower()
 
 
-def max_depth_for(N: int, c: int = 7) -> int:
+# Chunk boundaries of every task fall on multiples of this many tokens: the
+# kernel's 128-row tile and the unit of its in-place block map (one base row
+# per block; ``native_wave.SEG_ALIGN`` is the same number). Measured on the v11
+# kernel (results/ultimate/layout_ab.json, A100-SXM4): the unaligned layout's
+# straddling tiles cost 1.365x FA-2 at L~56K where the aligned one runs at
+# 1.004x, so alignment is the default for every task, not only in-place ones.
+TASK_SEG_ALIGN = 128
+
+
+def task_layout(seg_align: int | None) -> tuple[int, bool]:
+    """
+    ``(align, strict)`` of the chunk layout behind a ``seg_align`` argument of
+    ``build_tasks`` / ``refine_task``.
+
+    ``None`` (the default): ``TASK_SEG_ALIGN`` wherever a level holds enough
+    tokens for whole-block chunks, the even split below that
+    (``reference.level_align``) -- which only a fixed-depth build of a tiny N
+    reaches, since refinement stops at ``min_refinable_tokens``; it keeps every
+    task of such a build non-empty. An explicit alignment is enforced at every
+    level, which is what the in-place readers need: a block map for every task
+    (the wave engine, segmented reads, the shared chunk pool). ``0`` is the
+    legacy even split at every level, kept reachable for A/B measurements.
+    """
+    if seg_align is None:
+        return TASK_SEG_ALIGN, False
+    a = int(seg_align)
+    return (a, True) if a > 1 else (1, True)
+
+
+def task_seg_align_for(seg_align: int, *, in_place: bool) -> int | None:
+    """
+    The ``seg_align`` an engine call hands ``build_tasks``.
+
+    The engine's own ``seg_align`` is the block unit of its in-place readers
+    (0 = legacy unaligned tasks, A/B only). Modes that read Q/K/V in place need
+    the strict layout; every other call takes the default, which aligns
+    wherever alignment is well defined.
+    """
+    if not seg_align:
+        return 0
+    return int(seg_align) if in_place else None
+
+
+def min_refinable_tokens(c: int, seg_align: int | None = None) -> int:
+    """
+    Fewest tokens a subproblem may hold and still be refined under ``seg_align``.
+
+    Refining splits the subproblem into ``c`` chunks of whole blocks, so below
+    ``c * align`` tokens some chunks are empty and a child can come out equal
+    to its parent -- the recovery would then grow the subproblem it was called
+    to shrink, and could only climb to the depth cap and fail. Refinement
+    therefore stops at ``c * align`` for every aligned layout, the adaptive
+    default included: a subproblem that small is a few kernel tiles and is
+    never what ran out of memory (docs/ultimate/01_design_a100.md, 5.1). Only a
+    fixed-depth build of a tiny N goes below it, on the even split
+    (``task_layout``). The legacy layout needs one token per chunk.
+    """
+    align, _ = task_layout(seg_align)
+    return int(c) * align
+
+
+def max_depth_for(N: int, c: int = 7, *, align: int = 1, l: int = 3) -> int:
     """
     Deepest decomposition the sequence structurally admits.
 
@@ -375,6 +442,11 @@ def max_depth_for(N: int, c: int = 7) -> int:
     when a chunk can no longer hold a token. This is the only principled bound on
     depth: everything shallower is a policy choice, and nothing deeper is
     meaningful.
+
+    Under a strict block alignment the bound is tighter: a level needs
+    ``c * align`` local tokens to give every chunk a whole block, and a task at
+    depth d holds about ``N * (l/c)**d`` tokens (``l`` = interest-set size), so
+    every level is well formed only while ``d <= log_{c/l}(N / (c * align))``.
     """
     n, ci = int(N), int(c)
     if n <= 0 or ci <= 1:
@@ -382,7 +454,24 @@ def max_depth_for(N: int, c: int = 7) -> int:
     k = 0
     while ci ** (k + 1) <= n:
         k += 1
-    return k
+    a, li = int(align), int(l)
+    if a <= 1:
+        return k
+    d = 0
+    while d < k and n * li ** (d + 1) >= ci * a * ci ** (d + 1):
+        d += 1
+    return d
+
+
+def _block_map(N, path, c, interest_set, align: int, strict: bool) -> torch.Tensor | None:
+    """The task's in-place block map (int32, one global row per block), or None
+    when it has none: unaligned layout, or a level that fell back to the even
+    split."""
+    if align <= 1:
+        return None
+    base = segment_block_base(N, path, c=c, interest_set=interest_set,
+                              align=align, strict_align=strict)
+    return None if base is None else torch.from_numpy(base)
 
 
 def refine_task(
@@ -397,7 +486,7 @@ def refine_task(
     pin: bool = True,
     c: int = 7,
     interest_set: Sequence[int] = (0, 1, 3),
-    seg_align: int = 0,
+    seg_align: int | None = None,
 ) -> list["SubproblemTask"]:
     """
     Decompose one subproblem a further level, returning its ``c`` children.
@@ -413,13 +502,31 @@ def refine_task(
     Refining a single task rather than the whole problem is also what produces
     the hybrid schedules of the paper: branches that fit stay coarse, and only
     those that failed are split.
+
+    The children are built with the same ``seg_align`` as the parent must have
+    been (the engine passes one value throughout a call): each level's layout is
+    computed on that level's local sequence, so an aligned parent's children are
+    aligned and smaller by construction -- never padded (a child holds ``l`` of
+    the parent's ``c`` whole chunks). What cannot shrink is a parent below
+    ``min_refinable_tokens``; refusing it here keeps the recovery honest.
     """
+    L_parent = int(task.local_size)
+    if L_parent < min_refinable_tokens(c, seg_align):
+        align, _ = task_layout(seg_align)
+        raise ValueError(
+            f"Stream-CQSA: a {L_parent}-token subproblem (itr={task.itr}, path "
+            f"{tuple(task.path)}) cannot be refined: splitting it into c={c} "
+            f"chunks of whole {align}-token blocks needs at least "
+            f"{min_refinable_tokens(c, seg_align)} tokens, below which some "
+            f"chunks are empty and a child can equal its parent."
+        )
     kids: list[SubproblemTask] = []
-    align = int(seg_align) if seg_align else 1
+    align, strict = task_layout(seg_align)
     for j in range(int(c)):
         path = tuple(task.path) + (int(j),)
         ids_np, bits_np = group_bits_for_path(
-            N, path, c, interest_set, sorted_gather=sorted_gather, align=align)
+            N, path, c, interest_set, sorted_gather=sorted_gather, align=align,
+            strict_align=strict)
         L = int(ids_np.shape[0])
         if L == 0:
             continue
@@ -427,11 +534,7 @@ def refine_task(
         bits = torch.from_numpy(bits_np.astype(np.int64, copy=False))
         from .interface import CQS_BLK_SIZE, cqs_block_summaries
         blk_or, blk_and = cqs_block_summaries(bits, CQS_BLK_SIZE)
-        seg_base = None
-        if seg_align:
-            seg_base = torch.from_numpy(
-                segment_block_base(N, path, c=c, interest_set=interest_set,
-                                   align=int(seg_align)))
+        seg_base = _block_map(N, path, c, interest_set, align, strict)
         if pin and torch.cuda.is_available():
             ids = ids.pin_memory()
             bits = bits.pin_memory()
@@ -466,7 +569,7 @@ def build_tasks(
     pin: bool = True,
     c: int = 7,
     interest_set: Sequence[int] = (0, 1, 3),
-    seg_align: int = 0,
+    seg_align: int | None = None,
 ) -> list[SubproblemTask]:
     """
     Materialise every leaf subproblem's token ids and CQS group bits.
@@ -475,12 +578,19 @@ def build_tasks(
     non-zero residue mod ``c`` occurs exactly once as a difference of two
     members, which is what makes the off-diagonal chunk pairs covered exactly
     once. ``c = l^2 - l + 1`` for ``l = len(interest_set)``.
+
+    ``seg_align`` selects the chunk layout (``task_layout``). The default aligns
+    every level's chunk boundaries to ``TASK_SEG_ALIGN`` tokens wherever the
+    level is long enough, so no kernel tile straddles a chunk boundary
+    (``extra["seg_base"]`` is then the task's in-place block map); ``0`` is the
+    legacy even split, for A/B measurements only.
     """
     tasks: list[SubproblemTask] = []
+    align, strict = task_layout(seg_align)
     for path_idx, path in enumerate(all_paths(itr, c)):
-        align = int(seg_align) if seg_align else 1
         ids_np, bits_np = group_bits_for_path(
-            N, path, c, interest_set, sorted_gather=sorted_gather, align=align)
+            N, path, c, interest_set, sorted_gather=sorted_gather, align=align,
+            strict_align=strict)
         L = int(ids_np.shape[0])
         if L == 0:
             continue
@@ -490,11 +600,7 @@ def build_tasks(
         # every attention call.
         from .interface import CQS_BLK_SIZE, cqs_block_summaries
         blk_or, blk_and = cqs_block_summaries(bits, CQS_BLK_SIZE)
-        seg_base = None
-        if seg_align:
-            seg_base = torch.from_numpy(
-                segment_block_base(N, path, c=c, interest_set=interest_set,
-                                   align=int(seg_align)))
+        seg_base = _block_map(N, path, c, interest_set, align, strict)
         if pin and torch.cuda.is_available():
             ids = ids.pin_memory()
             bits = bits.pin_memory()
@@ -1281,23 +1387,29 @@ def stream_cqsa_forward(
             "lse": lse0,
         }
 
-    # Segmented input needs sorted gather (runs must be ascending) and the
-    # CUDA inner kernel; the torch fallback has no notion of a block map.
-    use_seg = bool(segmented) and device.type == "cuda" and sorted_gather and not host_resident
-    # The alignment the TASKS are built with, which is not the same as the
-    # seg_align argument: outside segment/shared-chunk mode the token ids must
-    # not be padded at all. Escalation rebuilds tasks mid-run and has to use
-    # this same value -- padding a refined child to a 128-token boundary made it
-    # LARGER than the parent it replaced (63 real tokens became 256), so the
-    # recovery grew the subproblem it was called to shrink and could only ever
-    # climb to the depth cap and fail.
-    task_seg_align = int(seg_align) if (use_seg or shared_chunks) else 0
+    # Segmented input needs sorted gather (runs must be ascending), a block
+    # unit and the CUDA inner kernel; the torch fallback has no notion of a
+    # block map.
+    use_seg = (bool(segmented) and bool(seg_align) and device.type == "cuda"
+               and sorted_gather and not host_resident)
+    # The layout the TASKS are built with: chunk boundaries on 128-token
+    # blocks for every task, gathered ones included, because a kernel tile
+    # that straddles a chunk boundary is what made the unaligned layout run at
+    # 1.365x FA-2 where the aligned one runs at 1.004x (layout_ab.json). The
+    # in-place modes (segmented reads, shared chunk pool: the pool's block map
+    # assumes a tile never straddles a chunk and therefore a slot boundary)
+    # enforce it at every level; otherwise a level too short for whole-block
+    # chunks falls back to the even split. Escalation rebuilds tasks mid-run
+    # and has to use this same value: every level's layout is computed on that
+    # level's local sequence, so a child is never padded and never larger than
+    # its parent (results/ultimate/align_census.json), and refinement stops at
+    # min_refinable_tokens instead of producing a child equal to its parent.
+    task_seg_align = task_seg_align_for(seg_align, in_place=(use_seg or shared_chunks))
+    task_align, _ = task_layout(task_seg_align)
     tasks = build_tasks_cached(
         N, itr, B=B, H=H, D=D, itemsize=q.element_size(),
         sorted_gather=sorted_gather, pin=(device.type == "cuda"), c=c,
         interest_set=tuple(interest_set),
-        # shared_chunks also needs block-aligned chunks: the pool's block map
-        # assumes a tile never straddles a chunk (and therefore a slot) boundary.
         seg_align=task_seg_align,
     )
     if task_subset is not None:
@@ -1394,6 +1506,11 @@ def stream_cqsa_forward(
             raise ValueError(
                 "shared_chunks currently supports itr=1, where a subsequence is a "
                 f"union of whole top-level chunks (got itr={itr})"
+            )
+        if not seg_align:
+            raise ValueError(
+                "shared_chunks needs block-aligned chunks (seg_align > 0): the "
+                "pool's block map assumes a tile never straddles a slot boundary"
             )
         from .reference import chunk_layout
         sizes, starts, _ = chunk_layout(N, c, seg_align)
@@ -1690,7 +1807,8 @@ def stream_cqsa_forward(
     # budget is a backstop against an unforeseen loop, so it has to sit well
     # above what a legitimate run can reach -- a fixed 64 aborted deep
     # escalations, where one failure per task already exhausts it.
-    oom_retry_budget = 64 + 16 * max(1, len(pending)) * max(1, max_depth_for(N, c))
+    depth_cap = max_depth_for(N, c, align=task_align, l=len(interest_set))
+    oom_retry_budget = 64 + 16 * max(1, len(pending)) * max(1, depth_cap)
     # Only worth scoping when CPU tensors are actually on the critical path.
     thread_ctx = _cpu_threads(cpu_threads if acc_device.type == "cpu" else None)
     with thread_ctx:
@@ -1742,7 +1860,6 @@ def stream_cqsa_forward(
                   # Nothing was merged for this task -- the merge follows the
                   # kernel -- so replacing it double counts nothing, and the
                   # children's retained pairs partition exactly the parent's.
-                  depth_cap = max_depth_for(N, c)
                   if not allow_escalation:
                       # A fixed-depth measurement wants the out-of-memory result
                       # itself. Refining here would answer a different question --
@@ -1754,14 +1871,29 @@ def stream_cqsa_forward(
                           f"fit and escalation is disabled (allow_escalation="
                           f"False), so this depth genuinely does not fit."
                       ) from exc
+                  if int(task.local_size) < min_refinable_tokens(c, task_seg_align):
+                      # Below this the split leaves chunks empty and a child can
+                      # equal its parent, so refining could not shrink anything.
+                      # A subproblem this small (a few kernel tiles) is never
+                      # what ran out of memory; the resident terms did.
+                      info["depth_capped"] = True
+                      raise torch.cuda.OutOfMemoryError(
+                          f"Stream-CQSA: a {task.local_size}-token subproblem at "
+                          f"itr={task.itr} does not fit with one subsequence resident "
+                          f"and is too small to refine (c={c} chunks of whole "
+                          f"{task_align}-token blocks need {min_refinable_tokens(c, task_seg_align)} "
+                          f"tokens). The O(N*H*D) resident terms dominate; offload them, "
+                          f"or reduce N, H or D."
+                      ) from exc
                   if int(task.itr) >= depth_cap:
                       info["depth_capped"] = True
                       raise torch.cuda.OutOfMemoryError(
                           f"Stream-CQSA: a subproblem at itr={task.itr} does not fit "
                           f"with one subsequence resident, and itr={depth_cap} is the "
-                          f"deepest decomposition N={N} admits at c={c}. The O(N*H*D) "
-                          f"resident terms dominate and no depth reduces them; offload "
-                          f"them, or reduce N, H or D."
+                          f"deepest decomposition N={N} admits at c={c}"
+                          + (f" with chunks of whole {task_align}-token blocks" if task_align > 1 else "")
+                          + ". The O(N*H*D) resident terms dominate and no depth reduces "
+                          f"them; offload them, or reduce N, H or D."
                       ) from exc
                   kids = refine_task(
                       task, N, B=B, H=H, D=D, itemsize=q.element_size(),
@@ -2271,6 +2403,10 @@ def stream_cqsa_backward(
     # Same meaning as in the forward. The backward's own planner never returns a
     # depth below 1, so this only ever raises the depth further.
     min_itr: int = 0,
+    # Chunk layout of the subproblems, as in the forward: block-aligned chunk
+    # boundaries (the default) or the legacy even split (0, for A/B only). The
+    # backward always gathers, so alignment only decides where its tiles fall.
+    seg_align: int = 128,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Stream-CQSA exact attention backward. All of q/k/v/dout/out are
@@ -2327,10 +2463,12 @@ def stream_cqsa_backward(
     if scale is None:
         scale = float(D) ** -0.5
 
+    task_seg_align = task_seg_align_for(seg_align, in_place=False)
+    task_align, _ = task_layout(task_seg_align)
     tasks = build_tasks_cached(
         N, itr, B=B, H=H, D=D, itemsize=q.element_size(),
         sorted_gather=sorted_gather, pin=True, c=c,
-        interest_set=tuple(interest_set),
+        interest_set=tuple(interest_set), seg_align=task_seg_align,
     )
     # Multi-device: run only these subproblems (by path_idx). The returned
     # dq/dk/dv are then the fp32 partial sums over that subset, and the caller
@@ -2371,7 +2509,7 @@ def stream_cqsa_backward(
         # at whole-call granularity instead: the accumulators are allocated
         # inside the call, so a failed attempt leaves nothing to unwind and the
         # retry simply rebuilds the task list one level deeper.
-        depth_cap = max_depth_for(N, c)
+        depth_cap = max_depth_for(N, c, align=task_align, l=len(interest_set))
         depth = int(itr)
         tasks_at_depth = tasks
         while True:
@@ -2420,6 +2558,7 @@ def stream_cqsa_backward(
                 tasks_at_depth = build_tasks_cached(
                     N, depth, B=B, H=H, D=D, itemsize=q.element_size(),
                     sorted_gather=sorted_gather, c=c, interest_set=interest_set,
+                    seg_align=task_seg_align,
                 )
                 if task_subset is not None:
                     # A whole-call escalation rebuilds the task list one level
@@ -2488,7 +2627,7 @@ def stream_cqsa_backward(
     # Same recovery policy as the forward. The backward has no concurrency to
     # surrender, so an out-of-memory failure goes straight to decomposing the
     # offending subproblem a further level and retrying its children.
-    depth_cap = max_depth_for(N, c)
+    depth_cap = max_depth_for(N, c, align=task_align, l=len(interest_set))
     pending = list(tasks)
     retries = 0
     # See the forward: the depth bound is what terminates, this only backstops.
@@ -2519,17 +2658,20 @@ def stream_cqsa_backward(
                 torch.cuda.synchronize(device)
                 torch.cuda.empty_cache()
             if not allow_escalation or int(task.itr) >= depth_cap \
+                    or int(task.local_size) < min_refinable_tokens(c, task_seg_align) \
                     or retries > retry_budget:
                 raise torch.cuda.OutOfMemoryError(
-                    f"Stream-CQSA backward: a subproblem at itr={task.itr} does "
-                    f"not fit, and itr={depth_cap} is the deepest decomposition "
-                    f"N={N} admits at c={c}. The O(N*H*D) resident terms dominate "
-                    f"and no depth reduces them; offload them, or reduce N, H or D."
+                    f"Stream-CQSA backward: a {task.local_size}-token subproblem "
+                    f"at itr={task.itr} does not fit and cannot be refined further "
+                    f"(itr={depth_cap} is the deepest decomposition N={N} admits at "
+                    f"c={c}; a subproblem needs {min_refinable_tokens(c, task_seg_align)} "
+                    f"tokens to split). The O(N*H*D) resident terms dominate and no "
+                    f"depth reduces them; offload them, or reduce N, H or D."
                 ) from exc
             kids = refine_task(
                 task, N, B=B, H=H, D=D, itemsize=q.element_size(),
                 sorted_gather=sorted_gather, pin=True, c=c,
-                interest_set=interest_set, seg_align=0,
+                interest_set=interest_set, seg_align=task_seg_align,
             )
             if bwd_info is not None:
                 bwd_info["depth_escalations"] += 1

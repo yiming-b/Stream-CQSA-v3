@@ -41,11 +41,19 @@ from typing import Any
 import torch
 import torch.distributed as dist
 
-from .stable_stream import stream_cqsa_forward, stream_cqsa_backward, build_tasks_cached
+from .stable_stream import (stream_cqsa_forward, stream_cqsa_backward, build_tasks_cached,
+                            task_seg_align_for)
 
 
-def _shard(n_tasks: int, rank: int, world: int) -> list[int]:
-    return list(range(rank, n_tasks, world))
+def _shard(tasks, rank: int, world: int) -> list[int]:
+    """path_idx of this rank's round-robin share of the task list."""
+    return [int(t.path_idx) for t in tasks[rank::world]]
+
+
+def _task_seg_align(engine_kw: dict[str, Any], *, in_place: bool) -> int | None:
+    """The engine builds its task list from these same kwargs; the layout must
+    match it exactly for the shard (by path_idx) to be a partition."""
+    return task_seg_align_for(int(engine_kw.get("seg_align", 128)), in_place=in_place)
 
 
 def dist_stream_cqsa_forward(
@@ -71,11 +79,17 @@ def dist_stream_cqsa_forward(
 
     # Identical task list on every rank; shard it round-robin so the largest
     # subproblems (there is some variation from uneven chunks) spread out.
+    # Block-aligned like the engine's own list: the in-place modes need the
+    # strict layout, everything else the default (see task_seg_align_for).
+    sorted_gather = bool(engine_kw.get("sorted_gather", True))
+    in_place = bool(engine_kw.get("shared_chunks")) or (
+        bool(engine_kw.get("segmented")) and sorted_gather
+        and q.is_cuda and not bool(engine_kw.get("stream_from_host")))
     tasks = build_tasks_cached(
         N, itr, B=B, H=H, D=D, itemsize=q.element_size(),
-        sorted_gather=bool(engine_kw.get("sorted_gather", True)),
-        pin=False, c=c, interest_set=interest_set, seg_align=0)
-    mine = _shard(len(tasks), rank, world)
+        sorted_gather=sorted_gather, pin=False, c=c, interest_set=interest_set,
+        seg_align=_task_seg_align(engine_kw, in_place=in_place))
+    mine = _shard(tasks, rank, world)
 
     t0 = time.perf_counter()
     out_r, info = stream_cqsa_forward(
@@ -152,8 +166,9 @@ def dist_stream_cqsa_backward(
     tasks = build_tasks_cached(
         N, itr, B=B, H=H, D=D, itemsize=q.element_size(),
         sorted_gather=bool(engine_kw.get("sorted_gather", True)),
-        pin=False, c=c, interest_set=interest_set, seg_align=0)
-    mine = _shard(len(tasks), rank, world)
+        pin=False, c=c, interest_set=interest_set,
+        seg_align=_task_seg_align(engine_kw, in_place=False))   # the backward always gathers
+    mine = _shard(tasks, rank, world)
 
     t0 = time.perf_counter()
     grads = stream_cqsa_backward(

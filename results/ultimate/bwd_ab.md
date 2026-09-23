@@ -110,3 +110,13 @@ atomics 34.40 ms (3 reruns torch.equal: False, dq drift 6.1e-05); deterministic 
 - v12b_real_D64_causal0: `Memset (Device)`; `flash::(anonymous namespace)::cqs_bwd_census_kernel(long const*, long const*, long const*, int, int, int, bool, int2*, int*)`; `void flash::flash_bwd_convert_dq_kernel<Flash_bwd_kernel_traits<64, 128, 128, 8, 4, 4, 4, false, false, cutlass::half_t, Flash_kernel_traits`; `void flash::flash_bwd_dot_do_o_kernel<true, Flash_bwd_kernel_traits<64, 128, 128, 8, 4, 4, 4, false, false, cutlass::half_t, Flash_kernel_tr`; `void flash::flash_bwd_dq_dk_dv_loop_seqk_parallel_aligned_kernel<Flash_bwd_kernel_traits<64, 128, 128, 8, 4, 4, 4, false, false, cutlass::ha`; `void flash::flash_bwd_dq_dk_dv_loop_seqk_parallel_kernel<Flash_bwd_kernel_traits<64, 128, 128, 8, 4, 4, 4, false, false, cutlass::half_t, Fl`
 - v11_real_D64_causal0: `void flash::flash_bwd_convert_dq_kernel<Flash_bwd_kernel_traits<64, 128, 128, 8, 4, 4, 4, false, false, cutlass::half_t, Flash_kernel_traits`; `void flash::flash_bwd_dot_do_o_kernel<true, Flash_bwd_kernel_traits<64, 128, 128, 8, 4, 4, 4, false, false, cutlass::half_t, Flash_kernel_tr`; `void flash::flash_bwd_dq_dk_dv_loop_seqk_parallel_kernel<Flash_bwd_kernel_traits<64, 128, 128, 8, 4, 4, 4, false, false, cutlass::half_t, Fl`
 
+
+## F23 corrections (2026-09-23, job 14330595; see docs/ultimate/03_kernels_report.md 5)
+
+- "LEGACY (forced) = v11 within 0.1% everywhere": the +1.0% at L=13952 was noise; re-measured 5.93 = 5.93 ms (0.999).
+  The automatic LEGACY route (memset + census + ALIGNED no-op + LEGACY) costs 1.004x / 1.001x v11 at L=14043 / 56173.
+- SDPA ratios (0.72x, c=73 0.795x) are flattered by SDPA's 8.5% slower backward; the flash_attn and flash_attn-loop
+  ratios (0.783x, 0.885x) are the kernel figures.
+- deterministic=True 1.94x comes from the ceil grid (112 CTAs at 1 CTA/SM = 2 rounds); peak extra memory 1701 MiB vs
+  277 MiB (atomics).
+- dk/dv identity checks now write into NaN-pre-filled buffers (bwd_ab.py sentinel_outputs).

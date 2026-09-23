@@ -166,3 +166,17 @@ Job MaxRSS 2.1 GB, 76 s of harness.
    co-instantiation (v11x shows code size alone also removes it): either fix suffices.
 5. Census + dual launch per call: 10.4-17.8 us census and 7.7-8.6 us LEGACY no-op at L=56064; 30 us / 25-27 us at
    224640; 4 us / 3.5-3.8 us at 6912; over the 73 c=73 tasks 0.38 + 0.33 + 0.08 (memset) = 0.79 ms of 108.8 ms (0.73%).
+
+## F23 corrections (2026-09-23, job 14330595 and the kernel reviews; see docs/ultimate/03_kernels_report.md 4.2)
+
+- The flash_attn arm at causal D=64 L=56064 (18.22-18.23 ms) was this job's first timed arm, without a clock warm-up.
+  Warmed up (job 14330595) the package takes 16.84 ms against the in-tree plain kernel's 17.59: it is ~4% FASTER than
+  our build of the same kernel. Re-based, v12f real / flash_attn = 0.766 (target <= 0.82 still met); the in-tree ratio
+  (real / v11 plain 0.731-0.733) is the stable figure. The SDPA arm was bimodal here; the flash_attn/SDPA factor 1.077
+  and the "SDPA 19.64 vs 19.70" reproducibility claim are withdrawn.
+- 0.939 (zero / v11 plain) includes a 4.8% descending-order scheduling gain; with the same (ascending) order on both
+  sides the tax figure is 0.986 (0.985 in 14330595; 0.982 at H=32). The non-causal order penalty was noise (neutral).
+- c=73: the end-to-end figure is 1.202x monolithic flash_attn; 0.881x the per-task flash_attn sum is a same-layout
+  dense (sparsity) reference.
+- Bit-identity with v11 holds for finite K/V (a non-finite V in a dead masking-step tile makes v11's rows NaN, v12f's
+  stay finite and match the masked reference).

@@ -132,3 +132,17 @@ to v11 (fp32 out, lse, fp16 out) and the census routed every aligned pattern to 
 6. Cross-job reproducibility with exp_build_ab (job 14308401, della-l07g4): v11 plain 17.30 = 17.30 ms, v11 zero
    22.51 vs 22.55, v11x zero 19.43 vs 19.35, SDPA 19.64 vs 19.70. In-job flash_attn factor over SDPA-flash (design
    3.3): 1.077 causal D=64, 1.084 D=128, 1.034 / 1.049 non-causal, 1.055 at 225K.
+
+## F23 corrections (2026-09-23, job 14330595 and the kernel reviews; see docs/ultimate/03_kernels_report.md 4.2)
+
+- The flash_attn arm at causal D=64 L=56064 (18.22-18.23 ms) was this job's first timed arm, without a clock warm-up.
+  Warmed up (job 14330595) the package takes 16.84 ms against the in-tree plain kernel's 17.59: it is ~4% FASTER than
+  our build of the same kernel. Re-based, v12f real / flash_attn = 0.766 (target <= 0.82 still met); the in-tree ratio
+  (real / v11 plain 0.731-0.733) is the stable figure. The SDPA arm was bimodal here; the flash_attn/SDPA factor 1.077
+  and the "SDPA 19.64 vs 19.70" reproducibility claim are withdrawn.
+- 0.939 (zero / v11 plain) includes a 4.8% descending-order scheduling gain; with the same (ascending) order on both
+  sides the tax figure is 0.986 (0.985 in 14330595; 0.982 at H=32). The non-causal order penalty was noise (neutral).
+- c=73: the end-to-end figure is 1.202x monolithic flash_attn; 0.881x the per-task flash_attn sum is a same-layout
+  dense (sparsity) reference.
+- Bit-identity with v11 holds for finite K/V (a non-finite V in a dead masking-step tile makes v11's rows NaN, v12f's
+  stay finite and match the masked reference).

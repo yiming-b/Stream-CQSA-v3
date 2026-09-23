@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import math
 import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
@@ -44,6 +45,14 @@ CPU_THREADS = int(os.environ.get("CQSA_CPU_THREADS", "8"))
 # (H*D*4 bytes per packed token) are its memory cost. 2M tokens = 4 GiB at H=8, D=64.
 DEFAULT_MAX_WAVE_TOKENS = int(os.environ.get("CQSA_MAX_WAVE_TOKENS", str(2 << 20)))
 MIN_WAVE_BUDGET_TOKENS = int(os.environ.get("CQSA_MIN_WAVE_TOKENS", 1 << 19))   # floor of the default wave budget
+
+
+def merge_async_enabled() -> bool:
+    """acc=CPU: fold each wave's partial on a worker thread while the next wave runs (CQSA_WAVE_MERGE_ASYNC=0
+    keeps the synchronous fold for A/B). Read per call so a test can flip it without a re-import."""
+    return os.environ.get("CQSA_WAVE_MERGE_ASYNC", "1") != "0"
+
+
 from .reference import chunk_layout
 from .progress import Progress, verbose_enabled, describe_call, expected_seconds
 
@@ -330,26 +339,10 @@ def merge_rows_torch(acc, acc_l, acc_m, out_pack, lse_pack, order, seg, uniq):
         acc_m[tok] = m_new
 
 
-def _merge_wave_to_host(merge_fn, acc_h, l_h, m_h, tb, stage, dev):
-    """
-    acc=CPU merge of one wave: ``merge_fn(acc, l, m, uniq)`` merges the wave's packed rows on
-    the device into accumulators over the U tokens this wave touches (``tb.uniq`` remapped to
-    0..U-1); the triple is copied to pinned host memory and folded into the host accumulators
-    with the max-shifted formula the device merge uses, so the result equals the acc=GPU path
-    up to fp32 summation order.
-    """
-    U = int(tb.uniq.numel())
-    H, D = acc_h.shape[1], acc_h.shape[2]
-    acc_w = torch.zeros((U, H, D), device=dev, dtype=torch.float32)
-    l_w = torch.zeros((U, H), device=dev, dtype=torch.float32)
-    m_w = torch.full((U, H), float("-inf"), device=dev, dtype=torch.float32)
-    local = torch.arange(U, device=dev, dtype=tb.uniq.dtype)
-    merge_fn(acc_w, l_w, m_w, local)
-    sa, sl, sm = (t[:U] for t in stage)
-    sa.copy_(acc_w, non_blocking=True); sl.copy_(l_w, non_blocking=True); sm.copy_(m_w, non_blocking=True)
-    idx = tb.uniq.to("cpu", non_blocking=True)
-    torch.cuda.synchronize(dev)
-    del acc_w, l_w, m_w, local
+def _fold_host(acc_h, l_h, m_h, idx, sa, sl, sm):
+    """Fold one wave's merged partial (``sa, sl, sm`` over the tokens ``idx``) into the host accumulators
+    with the max-shifted formula the device merge uses; runs under the CPU thread cap on whichever
+    thread calls it (the OpenMP team is per thread, so the worker sets its own)."""
     with _cpu_threads(CPU_THREADS):
         m_old = m_h[idx]
         m_new = torch.maximum(m_old, sm)
@@ -358,6 +351,77 @@ def _merge_wave_to_host(merge_fn, acc_h, l_h, m_h, tb, stage, dev):
         acc_h[idx] = acc_h[idx] * w_old.unsqueeze(-1) + sa * w_new.unsqueeze(-1)
         l_h[idx] = l_h[idx] * w_old + sl * w_new
         m_h[idx] = m_new
+
+
+class _HostMerge:
+    """
+    acc=CPU merge of the waves: ``merge_fn(acc, l, m, uniq)`` merges a wave's packed rows on the device
+    into accumulators over the U tokens it touches (``tb.uniq`` remapped to 0..U-1); the triple lands
+    in a pinned slot by a non-blocking D2H and is folded into the host accumulators by ``_fold_host``,
+    so the result equals the acc=GPU path up to fp32 summation order.
+
+    Asynchronous mode (the classic engine's CQSA_FWD_MERGE_ASYNC design): the fold of wave k runs on
+    ONE worker thread after the wave's D2H event, while the main thread streams and launches wave k+1;
+    the GPU no longer idles through the fold. One worker executes the folds in submission order, so
+    the fold order is the wave order and the result is bit-identical to the synchronous mode. Two
+    pinned slots bound the waves in flight: a slot is reused only once the fold that read it has
+    returned, which is also where that fold's exception resurfaces on the caller's thread.
+    """
+
+    def __init__(self, acc_h, l_h, m_h, u_max: int, dev, async_merge: bool):
+        H, D = acc_h.shape[1], acc_h.shape[2]
+        self.acc_h, self.l_h, self.m_h, self.dev = acc_h, l_h, m_h, dev
+        n_slots = 2 if async_merge else 1
+        self.slots = [(torch.empty((u_max, H, D), dtype=torch.float32).pin_memory(),
+                       torch.empty((u_max, H), dtype=torch.float32).pin_memory(),
+                       torch.empty((u_max, H), dtype=torch.float32).pin_memory(),
+                       torch.empty(u_max, dtype=torch.int64).pin_memory()) for _ in range(n_slots)]
+        self.pending = [None] * n_slots       # future of the fold reading each slot (async)
+        self.pool = ThreadPoolExecutor(max_workers=1) if async_merge else None
+        self.n = 0
+
+    def _wait(self, slot: int):
+        f = self.pending[slot]
+        if f is not None:
+            self.pending[slot] = None
+            f.result()                        # re-raises the fold's exception here, not in the worker
+
+    def merge(self, merge_fn, tb: WaveTables):
+        slot = self.n % len(self.slots); self.n += 1
+        self._wait(slot)
+        U = int(tb.uniq.numel())
+        H, D = self.acc_h.shape[1], self.acc_h.shape[2]
+        dev = self.dev
+        acc_w = torch.zeros((U, H, D), device=dev, dtype=torch.float32)
+        l_w = torch.zeros((U, H), device=dev, dtype=torch.float32)
+        m_w = torch.full((U, H), float("-inf"), device=dev, dtype=torch.float32)
+        local = torch.arange(U, device=dev, dtype=tb.uniq.dtype)
+        merge_fn(acc_w, l_w, m_w, local)
+        sa, sl, sm, si = (t[:U] for t in self.slots[slot])
+        sa.copy_(acc_w, non_blocking=True); sl.copy_(l_w, non_blocking=True); sm.copy_(m_w, non_blocking=True)
+        si.copy_(tb.uniq, non_blocking=True)
+        landed = torch.cuda.Event(); landed.record(torch.cuda.current_stream(dev))
+        del acc_w, l_w, m_w, local           # stream-ordered: the allocator reuses them only after the D2H
+        if self.pool is None:
+            landed.synchronize()
+            _fold_host(self.acc_h, self.l_h, self.m_h, si, sa, sl, sm)
+        else:
+            def job():
+                landed.synchronize()
+                _fold_host(self.acc_h, self.l_h, self.m_h, si, sa, sl, sm)
+            self.pending[slot] = self.pool.submit(job)
+
+    def drain(self):
+        """Every submitted fold has been applied (or its exception raised)."""
+        for slot in range(len(self.slots)):
+            self._wait(slot)
+
+    def close(self):
+        """Release the worker and the pinned slots; never raises (used on the error path too)."""
+        if self.pool is not None:
+            self.pool.shutdown(wait=True)
+            self.pool = None
+        self.slots = []
 
 
 def wave_forward(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *, causal: bool = True, scale: Optional[float] = None,
@@ -425,17 +489,20 @@ def wave_forward(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *, causal: b
     acc = torch.zeros((N, H, D), device=acc_dev, dtype=torch.float32)
     acc_l = torch.zeros((N, H), device=acc_dev, dtype=torch.float32)
     acc_m = torch.empty((N, H), device=acc_dev, dtype=torch.float32)
-    stage = None
+    merger = None
     if not acc_gpu:
-        # pinned staging for one wave's merged partial (sized to the largest wave)
-        u_max = max(min(N, sum(int(t.local_size) for t in w)) for w in waves)
-        stage = (torch.empty((u_max, H, D), dtype=torch.float32).pin_memory(),
-                 torch.empty((u_max, H), dtype=torch.float32).pin_memory(),
-                 torch.empty((u_max, H), dtype=torch.float32).pin_memory())
+        # pinned slots for a wave's merged partial, sized to the most tokens a wave can touch: a task's
+        # tokens lie in its level-1 chunks, so the union of those chunks bounds U tighter than sum L
+        sizes = chunk_layout(N, c, SEG_ALIGN)[0]
+        u_max = max(min(sum(int(t.local_size) for t in w),
+                        sum(sizes[j] for j in set().union(*[set(level1_chunks(t, c, interest_set)) for t in w])))
+                    for w in waves)
+        merger = _HostMerge(acc, acc_l, acc_m, u_max, dev, merge_async_enabled())
     info = dict(n_subproblems=len(tasks), n_waves=len(waves), wave_sizes=[len(w) for w in waves],
                 wave_tokens=[sum(int(t.local_size) for t in w) for w in waves], max_wave_tokens=int(max_tokens),
                 itr=int(itr), c=int(c), interest_set=tuple(interest_set), host_resident=not on_device,
-                accumulate_on_gpu=acc_gpu, kernel=kern, pool_slots=(None if pool is None else pool.n_slots))
+                accumulate_on_gpu=acc_gpu, kernel=kern, pool_slots=(None if pool is None else pool.n_slots),
+                merge_async=(None if merger is None else merger.pool is not None))
     total_tokens = sum(int(t.local_size) for t in tasks) * B
     progress = Progress(
         total_tokens, enabled=verbose_enabled(verbose), unit="tok",
@@ -450,7 +517,8 @@ def wave_forward(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *, causal: b
         # token-major host views (a copy only if the storage is not already token-major)
         with _cpu_threads(CPU_THREADS):
             q_tm, k_tm, v_tm = (t.transpose(1, 2).contiguous() for t in (q, k, v))
-    for b in range(B):
+    try:
+      for b in range(B):
         acc.zero_(); acc_l.zero_(); acc_m.fill_(float("-inf"))
         if on_device:
             qt, kt, vt = (t[b].transpose(0, 1) for t in (q, k, v))       # [N, H, D] strided views, read in place
@@ -482,7 +550,7 @@ def wave_forward(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *, causal: b
                 if acc_gpu:
                     merge_fn(acc, acc_l, acc_m, tb.uniq)
                 else:
-                    _merge_wave_to_host(merge_fn, acc, acc_l, acc_m, tb, stage, dev)
+                    merger.merge(merge_fn, tb)
                 if progress.enabled:
                     torch.cuda.synchronize(dev)
                 progress.update(sum(int(t.local_size) for t in wave))
@@ -517,17 +585,22 @@ def wave_forward(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *, causal: b
                 ext.wave_merge(acc, acc_l, acc_m, out_pack, lse_pack, tb.order, tb.seg, tb.uniq, int(tb.S))
             else:
                 merge_fn = lambda a, l, m, uniq: ext.wave_merge(a, l, m, out_pack, lse_pack, tb.order, tb.seg, uniq, int(tb.S))
-                _merge_wave_to_host(merge_fn, acc, acc_l, acc_m, tb, stage, dev)
+                merger.merge(merge_fn, tb)
             if progress.enabled:
                 torch.cuda.synchronize(dev)      # the bar reports finished work, not queued launches
             progress.update(sum(int(t.local_size) for t in wave))
             del out_pack, lse_pack, tb, bb
+        if merger is not None:
+            merger.drain()                  # the host accumulators are complete for this batch
         with _cpu_threads(CPU_THREADS):
             out[b].copy_((acc / acc_l.clamp_min(1e-30).unsqueeze(-1)).transpose(0, 1))
             lse_b = acc_m + torch.log(acc_l.clamp_min(1e-30))
             lse[b].copy_(torch.where(torch.isfinite(acc_m), lse_b, torch.full_like(lse_b, float("-inf"))).transpose(0, 1))
+    finally:
+        if merger is not None:
+            merger.close()                  # on an error the worker finishes its queue, then exits
     info["lse"] = lse
-    del acc, acc_l, acc_m, stage
+    del acc, acc_l, acc_m, merger
     if pool is not None:
         pool.release()
     progress.close(f"{len(tasks)} subproblems in {len(waves)} wave{'s' if len(waves) != 1 else ''} ({kern} kernel)")

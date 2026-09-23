@@ -170,8 +170,23 @@ def run_arm_again(arms):
     return [(m, p, None if f == "again" else f) if f != "again" else (m, p, None) for m, p, f in arms]
 
 
+def gpu_spin(seconds):
+    """Back-to-back fp16 GEMMs for `seconds`: SM clocks at their steady state before the first timed row (review:
+    the first FA arm of jobs 14319938 / 14324080 ran at 18.2 ms at L=56064 while the same kernel took 17.1 ms at
+    L=56173 later in the same job)."""
+    a = torch.randn(8192, 8192, device=DEV, dtype=DT)
+    t0 = time.time()
+    while time.time() - t0 < seconds:
+        for _ in range(10):
+            a @ a
+        torch.cuda.synchronize()
+    del a
+    torch.cuda.empty_cache()
+
+
 def part_fwd_headline(res, N, H_list=(8, 32)):
     task = min(F.c_tasks(N, 7), key=lambda t: int(t.local_size))
+    L = int(task.local_size)
     for H in H_list:
         arms = [a for a in FWD_ARMS]
         rows0 = len(res["rows"])
@@ -181,6 +196,10 @@ def part_fwd_headline(res, N, H_list=(8, 32)):
         plain11 = [r for r in rs if r["module"] == "v11" and r["pattern"] == "plain"]
         if len(plain11) == 2:
             plain11[1]["again"] = True
+        # the FA arms re-timed after every other arm of the group (drift / first-arm effect)
+        res.setdefault("fa_again", []).append(dict(gpu=GPU, part="fwd_headline", L=L, H=H, D=64, causal=True,
+                                                   **fa_fwd_arms(L, 64, True, H)))
+        pr("fa_again", res["fa_again"][-1])
 
 
 def part_fwd_ragged(res, N):
@@ -490,6 +509,12 @@ def report(res, path_md):
                      f"descending gain on its own: zero desc / zero asc = {zd['ms'] / za['ms']:.3f}, real desc / real asc = "
                      f"{rd['ms'] / ra['ms']:.3f}; default (flags 0) real / v11 plain (in-tree) = {r0['ms'] / p11['ms']:.3f}, "
                      f"/ flash_attn = {r0['ratio_vs_flash_attn']:.3f}; default zero / v11 plain = {z0['ms'] / p11['ms']:.3f}.")
+    for fa in res.get("fa_again", []):
+        first = next((r for r in rows if r["part"] == "fwd_headline" and r["H"] == fa["H"]), None)
+        if first:
+            L.append(f"- H={fa['H']}: FA arms re-timed at the end of the group: flash_attn {first['flash_attn_ms']:.2f} -> "
+                     f"{fa['flash_attn_ms']:.2f} ms (min {fa['flash_attn_min_ms']:.2f}), SDPA-flash {first['sdpa_flash_ms']:.2f} -> "
+                     f"{fa['sdpa_flash_ms']:.2f} ms (min {fa['sdpa_flash_min_ms']:.2f}).")
     ev = sel("fwd_ragged", module="v12f", pattern="real", flags=0)
     if len(ev) == 2:
         e, rg = sorted(ev, key=lambda r: r["L_mod_128"])
@@ -596,6 +621,7 @@ def main():
     res["info"]["modules"] = {k: getattr(m, "__file__", k) for k, m in {**F.MODS, **B.MODS}.items()}
     print(json.dumps(res["info"]), flush=True)
     fa_fwd_arms(4096, 64, True, 8); fa_bwd_arms(4096, 64, True)       # first-use init outside every timed row
+    gpu_spin(5.0 if not a.smoke else 0.5)                               # clocks up before the first timed row
     parts = {
         "fwd_headline": lambda: part_fwd_headline(res, N56, H_list),
         "fwd_ragged": lambda: part_fwd_ragged(res, N100),

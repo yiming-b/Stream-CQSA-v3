@@ -1,7 +1,7 @@
 diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/build.sh v12f/build.sh
 --- v11/build.sh	1969-12-31 19:00:00.000000000 -0500
-+++ v12f/build.sh	2026-09-23 14:47:23.501094914 -0400
-@@ -0,0 +1,50 @@
++++ v12f/build.sh	2026-09-23 15:43:21.316560418 -0400
+@@ -0,0 +1,70 @@
 +#!/bin/bash
 +# Build v12f (ultimate program P3: ALIGNED run-table forward + LEGACY v11 forward).
 +#   TAG=b1 bash next/kernel/v12f/build.sh          # incremental: reuses up-to-date objects
@@ -42,10 +42,30 @@ diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pyc
 +  nvcc --version | tail -1
 +} > "$LOG"
 +# LEGACY's ptxas took up to ~35 min in v11's build; 60 min flags a hang, not a slow unit.
-+bash $DEV/next/kernel/watchdog.sh 60 > "$WATCH_LOG" 2>&1 &
-+WD=$!
++# F23: scoped watchdog (v12b's pattern) -- only ptxas processes descended from THIS build are
++# touched; next/kernel/watchdog.sh kills ANY old ptxas, including other agents' builds on vis1.
 +t0=$(date +%s)
-+python setup.py build_ext --inplace >> "$LOG" 2>&1
++python setup.py build_ext --inplace >> "$LOG" 2>&1 &
++BUILD=$!
++(
++  while kill -0 $BUILD 2>/dev/null; do
++    for pid in $(pgrep -x ptxas); do
++      p=$pid; mine=0
++      while [ -n "$p" ] && [ "$p" -gt 1 ]; do
++        [ "$p" = "$BUILD" ] && { mine=1; break; }
++        p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
++      done
++      [ $mine = 1 ] || continue
++      mins=$(ps -o etimes= -p "$pid" 2>/dev/null | awk '{print int($1/60)}')
++      if [ -n "$mins" ] && [ "$mins" -ge 60 ]; then
++        echo "$(date) killing ptxas $pid after $mins min"; kill -9 "$pid"
++      fi
++    done
++    sleep 60
++  done
++) > "$WATCH_LOG" 2>&1 &
++WD=$!
++wait $BUILD
 +rc=$?
 +echo "build v12f $TAG finished rc=$rc in $(( $(date +%s) - t0 )) s  $(date)" | tee -a "$LOG"
 +kill $WD 2>/dev/null
@@ -54,7 +74,7 @@ diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pyc
 +exit $rc
 diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/csrc/flash_attn/flash_api.cpp v12f/csrc/flash_attn/flash_api.cpp
 --- v11/csrc/flash_attn/flash_api.cpp	2026-09-11 23:16:22.128645000 -0400
-+++ v12f/csrc/flash_attn/flash_api.cpp	2026-09-23 13:26:42.768388000 -0400
++++ v12f/csrc/flash_attn/flash_api.cpp	2026-09-23 15:41:24.668338000 -0400
 @@ -16,6 +16,7 @@
  #include "namespace_config.h"
  #include "hardware_info.h"
@@ -79,7 +99,7 @@ diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pyc
  void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split_kernel=false) {
  #ifdef CQSA_MINIMAL_FWD_KERNELS
  #ifndef CQSA_MINIMAL_BOTH_DTYPES
-@@ -476,12 +486,19 @@
+@@ -476,28 +486,37 @@
      TORCH_CHECK(params.d == 64 || params.d == 128,
                  "this CQSA build only supports head_dim=64 or 128; rebuild with "
                  "CQSA_KERNEL_SET=full for other head dims.");
@@ -88,6 +108,13 @@ diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pyc
 +    // then LEGACY, whose CTAs return at once unless the census found a mixed
 +    // tile; without a census LEGACY alone computes the call. Both launches go
 +    // to the same stream, so the route is decided without a host sync.
++    // F23 review fix: the ALIGNED launch dereferences the census buffers with
++    // no null check of its own, so a route implies the summaries it was built
++    // from (mha_fwd_impl sets them together).
++    TORCH_CHECK(params.cqs_route == nullptr
++                    || (params.cqs_enabled && params.cqs_group_bits != nullptr && params.cqs_blk_or != nullptr
++                        && params.cqs_blk_and != nullptr && params.cqs_runs != nullptr),
++                "v12f: census route set without group bits / summaries");
      FP16_SWITCH(!params.is_bf16, [&] {
          BOOL_SWITCH(params.is_causal, Is_causal, [&] {
              if (params.d == 64) {
@@ -101,7 +128,29 @@ diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pyc
              }
          });
      });
-@@ -616,7 +633,8 @@
+ #endif
+ #else
+-    FP16_SWITCH(!params.is_bf16, [&] {
+-        HEADDIM_SWITCH(params.d, [&] {
+-            BOOL_SWITCH(params.is_causal, Is_causal, [&] {
+-                if (params.num_splits <= 1 && !force_split_kernel) {  // If we don't set it num_splits == 0
+-                    run_mha_fwd_<elem_type, kHeadDim, Is_causal>(params, stream);
+-                } else {
+-                    run_mha_fwd_splitkv_dispatch<elem_type, kHeadDim, Is_causal>(params, stream);
+-                }
+-            });
+-        });
+-    });
++    // F23 review fix: v12f's CQS-on routing (census -> ALIGNED -> LEGACY, and
++    // LEGACY alone for a call without a census) exists only in the branch
++    // above. This upstream dispatch would send every CQS call through
++    // run_mha_fwd_ -> the ALIGNED launcher with null census buffers, and
++    // split-kv calls past both. setup.py always defines the macro.
++#error "v12f requires CQSA_MINIMAL_FWD_KERNELS: the CQS-on ALIGNED/LEGACY routing exists only in that branch"
+ #endif
+ }
+ 
+@@ -616,7 +635,8 @@
          std::optional<int64_t> cqs_blk_size_ = std::nullopt,
          std::optional<at::Tensor> cqs_out_acc_ = std::nullopt,
          std::optional<at::Tensor> cqs_block_base_ = std::nullopt,
@@ -111,18 +160,28 @@ diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pyc
  
      // Otherwise the kernel will be launched from cuda:0 device
      at::cuda::CUDAGuard device_guard{q.device()};
-@@ -842,6 +860,25 @@
+@@ -842,6 +862,35 @@
  
      set_params_alibi(params, alibi_slopes_, batch_size, num_heads);
  
 +    // next/ v12f: the census and the ALIGNED forward serve the group-bits mode
 +    // with summaries in the production configuration; anything else (and a
 +    // forced LEGACY call) keeps params.cqs_route null and runs v11's forward.
++    // F23 review fix (blocker): the gate reads the parameters set_params_fprop
++    // actually set, not the is_causal argument. A causal call with a sliding
++    // window (window_size_left >= 0) has params.is_causal == false; gating on
++    // the argument sent it to the NON-causal ALIGNED kernel, which applies
++    // neither the window nor the causal mask (silently wrong). Any local /
++    // windowed call -- causal or not -- is LEGACY; ALIGNED serves exactly
++    // Is_local == false (upstream's LOCAL_SWITCH condition).
++    const bool cqs_is_local = !params.is_causal
++        && (params.window_size_left >= 0 || params.window_size_right >= 0);
 +    at::Tensor cqs_census;
 +    if (params.cqs_enabled && params.cqs_group_bits != nullptr && params.cqs_blk_or != nullptr
++        && params.cqs_blk_and != nullptr
 +        && (cqs_fwd_flags & kCqsFwdForceLegacy) == 0
 +        && p_dropout == 0.f && !return_softmax && softcap == 0.f && params.alibi_slopes_ptr == nullptr
-+        && (is_causal || (window_size_left < 0 && window_size_right < 0))
++        && !cqs_is_local
 +        && (head_size == 64 || head_size == 128) && !seqlenq_ngroups_swapped) {
 +        // Sized for any row-block height >= 64; the route word is padded to 8
 +        // bytes so the int2 runs that follow it are aligned.
@@ -137,7 +196,7 @@ diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pyc
      if (seqlen_k > 0) {
          auto stream = at::cuda::getCurrentCUDAStream().stream();
          run_mha_fwd(params, stream);
-@@ -949,7 +986,8 @@
+@@ -949,7 +998,8 @@
                         std::optional<int64_t> cqs_blk_size_ = std::nullopt,
                         std::optional<at::Tensor> cqs_out_acc_ = std::nullopt,
                         std::optional<at::Tensor> cqs_block_base_ = std::nullopt,
@@ -147,7 +206,7 @@ diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pyc
      auto cqs_group_bits_opt = std::optional<at::Tensor>(cqs_group_bits);
      return mha_fwd_impl(
          q,
-@@ -973,7 +1011,42 @@
+@@ -973,7 +1023,42 @@
          cqs_blk_size_,
          cqs_out_acc_,
          cqs_block_base_,
@@ -191,7 +250,7 @@ diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pyc
  }
  
  void run_mha_bwd(Flash_bwd_params &params, cudaStream_t stream);
-@@ -2465,7 +2538,14 @@
+@@ -2465,7 +2550,14 @@
            pybind11::arg("cqs_blk_size") = pybind11::none(),
            pybind11::arg("cqs_out_acc") = pybind11::none(),
            pybind11::arg("cqs_block_base") = pybind11::none(),
@@ -387,8 +446,8 @@ diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pyc
 +}  // namespace FLASH_NAMESPACE
 diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/csrc/flash_attn/src/flash_fwd_aligned.h v12f/csrc/flash_attn/src/flash_fwd_aligned.h
 --- v11/csrc/flash_attn/src/flash_fwd_aligned.h	1969-12-31 19:00:00.000000000 -0500
-+++ v12f/csrc/flash_attn/src/flash_fwd_aligned.h	2026-09-23 10:35:19.227903000 -0400
-@@ -0,0 +1,438 @@
++++ v12f/csrc/flash_attn/src/flash_fwd_aligned.h	2026-09-23 15:43:12.601357000 -0400
+@@ -0,0 +1,444 @@
 +/******************************************************************************
 + * next/ v12f: the ALIGNED CQS-on forward.
 + *
@@ -412,6 +471,12 @@ diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pyc
 + * fully masked tile is exact as well: v11 computes it as all -inf scores,
 + * which rescale by exp2(0) = 1 and add exp2(-inf) = 0 (or, before any live
 + * tile, leave (-inf, 0, 0) unchanged).
++ *
++ * Caveat (F23 review): the bit-identity holds for FINITE K/V. v11 runs the
++ * fully masked tiles of the causal masking window (e.g. the diagonal tile of
++ * a non-owner row block) as P = 0 followed by P @ V, so an inf/NaN in those V
++ * rows makes v11's rows NaN (0 * inf); ALIGNED never loads them, so its rows
++ * stay finite and match the masked math reference. All finite elements agree.
 + ******************************************************************************/
 +
 +#pragma once

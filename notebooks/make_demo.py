@@ -340,7 +340,6 @@ comparison is `results/profile_sweep/` in the README.
 """)
 code("""
 from stream_cqsa import attention, kernels_available
-from stream_cqsa.api import _pick_wave
 from stream_cqsa.native_wave import wave_forward
 print("kernels in this environment:", kernels_available())
 cap(40.0)
@@ -370,10 +369,13 @@ for label, kernel, kw in [
     del out
 """)
 code("""
-# What `kernel="auto"` decides, by subproblem count (the wave engine from 20 subproblems; acc=CPU stays classic)
+# What `kernel="auto"` decides: the planner routes by the memory model (the wave engine for device-resident,
+# device-accumulator calls whenever its wave fits, with the wave budget W and gathered / in-place reads chosen
+# from the budget; a host accumulator on device-resident inputs is an unplanned combination -> classic engine)
 for c_, itr_, acc_ in [(7, 1, True), (13, 1, True), (21, 1, True), (7, 2, True), (133, 1, True), (133, 1, False)]:
     kw = dict(c=c_, itr=itr_) | ({} if acc_ else dict(accumulate_on_gpu=False))
-    print(f"c={c_:3d} itr={itr_} acc={'GPU' if acc_ else 'CPU'}: {c_**itr_:4d} subproblems ->", "wave engine" if _pick_wave("auto", kw, True, qd, "fwd") else "classic engine")
+    p_ = attention(qd, kd, vd, is_causal=True, plan_only=True, **kw)
+    print(f"c={c_:3d} itr={itr_} acc={'GPU' if acc_ else 'CPU'}: {c_**itr_:4d} subproblems ->", p_.name())
 """)
 code("""
 # The wave engine directly: waves are planned under a packed-token budget (default min(2M, max(512K, N)));

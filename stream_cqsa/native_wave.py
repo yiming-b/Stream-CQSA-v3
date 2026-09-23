@@ -273,6 +273,97 @@ def bwd_bytes_per_token(H: int, D: int, itemsize: int) -> int:
     return 7 * H * D * itemsize + H * Dr * 4 + H * 8 + 8 * 4
 
 
+def default_wave_tokens(N: int) -> int:
+    """The default packed-token budget per wave (v2.2.1): min(DEFAULT_MAX_WAVE_TOKENS, max(MIN_WAVE_BUDGET_TOKENS, N)).
+    The wave engine's device peak is a*N + b*W_wave (profile sweep); a cap of about N tokens cost <= 1.3% of
+    time on an A100-SXM4-80GB (131K-512K, itr=1) while cutting the packed term by two thirds below the 2M
+    saturation. Small calls still fit in one wave."""
+    return min(DEFAULT_MAX_WAVE_TOKENS, max(MIN_WAVE_BUDGET_TOKENS, int(N)))
+
+
+def task_tokens_estimate(N: int, itr: int, c: int, l: int) -> int:
+    """Upper estimate of the largest subproblem of (N, itr, c, l) without building the tasks: the block-aligned
+    layout rounds every chunk up to 128 rows at each level, so a task is at most l blocks longer than the
+    ideal N * (l/c)^itr per level."""
+    L = float(N)
+    for _ in range(int(itr)):
+        L = -(-L * l / c // SEG_ALIGN) * SEG_ALIGN + (l - 1) * SEG_ALIGN
+    return int(L)
+
+
+def wave_token_ladder(N: int, itr: int, c: int, l: int, start: Optional[int] = None) -> list[int]:
+    """Wave budgets the planner may choose from, largest first: the default budget halved down to the floor
+    of one subproblem per wave (below that the budget changes nothing: plan_waves never splits a task)."""
+    floor = task_tokens_estimate(N, itr, c, l)
+    w = int(default_wave_tokens(N) if start is None else start)
+    ladder = []
+    while w > floor:
+        ladder.append(w); w //= 2
+    ladder.append(floor)
+    return ladder
+
+
+def wave_token_floor(N: int, itr: int, c: int, interest_set: Sequence[int], *, H: int, D: int, itemsize: int) -> int:
+    """The exact floor of the wave budget: the largest task's tokens (from the cached task list)."""
+    return max(int(t.local_size) for t in wave_tasks(N, itr, c, interest_set, H=H, D=D, itemsize=itemsize))
+
+
+def in_place_possible(N: int, causal: bool) -> bool:
+    """Whether the CUDA wave kernel may read device-resident Q/K/V in place. The causal (uniform) layout loads
+    full 128-row tiles without predication, so the ragged last block of the sequence would run past the
+    tensor unless N is 128-aligned; the non-causal (varlen) layout predicates and is always safe."""
+    return int(N) % SEG_ALIGN == 0 or not causal
+
+
+def estimate_wave_peak_bytes(N: int, wave_tokens: int, *, B: int, H: int, D: int, itemsize: int, itr: int, c: int, l: int,
+                             stream_from_host: bool, accumulate_on_gpu: bool, gather: bool,
+                             direction: str = "fwd", out_bytes_per_el: int = 4) -> int:
+    """
+    Predicted peak device memory of the wave engine: ``a*N + b*W`` like the measured fits
+    (results/profile_sweep/fits.json: itr=1 acc=GPU 7.149 GiB/M tokens + 1.78 GiB/M packed tokens;
+    this analytic count gives 7.0 + 2.07 at H=8, D=64, fp16 -- the a-term within 2%, the wave term
+    16% conservative because the sort scratch it counts is transient).
+
+      resident   Q/K/V when they are read in place (device-resident inputs), or the chunk pool of the
+                 level-1 chunks a wave needs (host-resident: ``min(c, l * tasks_per_wave)`` slots of one
+                 aligned chunk each); the fp32 output and accumulator when the accumulator is on the
+                 device, else the delivered output (``out_bytes_per_el``, as the classic estimate).
+      per wave   ``fwd_bytes_per_token`` per packed token (fp32 partial output, lse, tables, merge
+                 scratch), plus the per-token merge accumulators with a host accumulator, plus the
+                 three gathered fp16 copies when ``gather`` (in place: none).
+      backward   the wave backward keeps fp32 dq/dk/dv and dpsum resident next to q/k/v/dout/out and
+                 always gathers (``bwd_bytes_per_token``); the peak of the fwd+bwd step is its own.
+
+    ``wave_tokens`` below one task's tokens is raised to it: a wave holds at least one subproblem.
+    """
+    el = int(N) * int(B) * int(H) * int(D)
+    L = task_tokens_estimate(N, itr, c, l)
+    W = max(int(wave_tokens), L)
+    if direction == "bwd":
+        floor = (3 * 4) * el + 2 * N * B * H * 4                     # fp32 gradients, lse + dpsum
+        if not stream_from_host:
+            floor += (4 * itemsize + 4) * el                          # q, k, v, dout and the saved fp32 out
+        floor += 3 * itemsize * el                                    # the gradients cast to the input dtype at the end
+        return int(floor + W * bwd_bytes_per_token(H, D, itemsize))
+    floor = 0
+    if not stream_from_host:
+        floor += 3 * itemsize * el
+    else:
+        chunk = -(-math.ceil(N / c) // SEG_ALIGN) * SEG_ALIGN
+        slots = min(int(c), int(l) * -(-W // L))
+        floor += slots * chunk * 3 * H * D * itemsize
+    if accumulate_on_gpu:
+        floor += 4 * el + 4 * N * H * D + 8 * N * H
+    else:
+        floor += int(out_bytes_per_el) * el
+    per_tok = fwd_bytes_per_token(H, D)
+    if not accumulate_on_gpu:
+        per_tok += 4 * H * D + 8 * H
+    if gather:
+        per_tok += 3 * H * D * itemsize
+    return int(floor + W * per_tok)
+
+
 def plan_waves(tasks: Sequence[SubproblemTask], max_tokens: int, max_subproblems: Optional[int] = None) -> list[list[SubproblemTask]]:
     """Greedy contiguous grouping under a token budget (and an optional count cap)."""
     waves, cur, cur_tok = [], [], 0
@@ -428,14 +519,19 @@ def wave_forward(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *, causal: b
                  itr: int = 1, c: int = 7, interest_set: Sequence[int] = (0, 1, 3),
                  max_wave_tokens: Optional[int] = None, max_wave_subproblems: Optional[int] = None,
                  memory_fraction: float = 0.85, device=None, pool_slots: Optional[int] = None,
-                 accumulate_on_gpu: bool = True, kernel: str = "auto", verbose: Optional[bool] = None):
+                 accumulate_on_gpu: bool = True, kernel: str = "auto", gather: Optional[bool] = None,
+                 verbose: Optional[bool] = None):
     """
     Exact attention by CQS decomposition on the wave kernel: ``kernel="cuda"`` (cqsa_native,
     the fast path), ``"triton"`` (the same wave layout on the Triton kernel, no build), or
     ``"auto"`` (CUDA when the extension is built for this dtype and head dim, else Triton).
 
-    q/k/v: ``[B, H, N, D]`` fp16/bf16, on the device (read in place, no gather)
-    or on the host (streamed into a device chunk pool wave by wave).
+    q/k/v: ``[B, H, N, D]`` fp16/bf16, on the device or on the host (streamed into a device
+    chunk pool wave by wave). Device-resident inputs are either gathered into three packed
+    copies per wave (``gather=True``; 3-6% faster kernel time, layout_ab) or read in place
+    through the block map (``gather=False``; no copies, only when ``in_place_possible``);
+    ``None`` reads in place whenever possible. The Triton kernel and the chunk pool have no
+    choice (gathered / in place). ``info["gather"]`` records what ran.
     Returns ``(out [B, H, N, D] fp32, info)``; ``info["lse"]`` is ``[B, H, N]``.
 
     ``accumulate_on_gpu=False`` (the classic engine's acc=CPU): every wave is merged on
@@ -455,14 +551,16 @@ def wave_forward(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *, causal: b
     acc_gpu = bool(accumulate_on_gpu)
     # device accumulators: the whole output (acc=GPU), or one wave's touched tokens (acc=CPU)
     acc_bytes = (N * H * D * 4 + 2 * N * H * 4) if acc_gpu else 0
+    if kern == "triton" or not on_device:
+        gather = kern == "triton"                # the Triton kernel has no block map; the pool is read in place
+    elif gather is None or (not gather and not in_place_possible(N, causal)):
+        gather = not in_place_possible(N, causal)
     per_tok = fwd_bytes_per_token(H, D) + (0 if acc_gpu else 4 * H * D + 8 * H)
+    if on_device and gather:
+        per_tok += 3 * H * D * q.element_size()   # the three packed copies of a gathered wave
 
-    # Default wave budget (v2.2.1): min(DEFAULT_MAX_WAVE_TOKENS, max(MIN_WAVE_BUDGET_TOKENS, N)) packed
-    # tokens. The wave engine's device peak is a*N + b*W_wave (profile sweep); a cap of about N tokens
-    # cost <= 1.3% of time on an A100-SXM4-80GB (131K-512K, itr=1) while cutting the packed term by
-    # two thirds below the 2M saturation. Small calls still fit in one wave; max_wave_tokens overrides.
     if max_wave_tokens is None:
-        max_wave_tokens = min(DEFAULT_MAX_WAVE_TOKENS, max(MIN_WAVE_BUDGET_TOKENS, int(N)))
+        max_wave_tokens = default_wave_tokens(N)
     if on_device:
         max_tokens = _budget_tokens(dev, per_tok, acc_bytes + (256 << 20), memory_fraction, max_wave_tokens)
         waves = plan_waves(tasks, max_tokens, max_wave_subproblems)
@@ -502,14 +600,15 @@ def wave_forward(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *, causal: b
                 wave_tokens=[sum(int(t.local_size) for t in w) for w in waves], max_wave_tokens=int(max_tokens),
                 itr=int(itr), c=int(c), interest_set=tuple(interest_set), host_resident=not on_device,
                 accumulate_on_gpu=acc_gpu, kernel=kern, pool_slots=(None if pool is None else pool.n_slots),
-                merge_async=(None if merger is None else merger.pool is not None))
+                gather=bool(gather), merge_async=(None if merger is None else merger.pool is not None))
     total_tokens = sum(int(t.local_size) for t in tasks) * B
     progress = Progress(
         total_tokens, enabled=verbose_enabled(verbose), unit="tok",
         banner=describe_call(what=f"forward (wave engine, {kern} kernel)", N=N, B=B, H=H, D=D, c=int(c), itr=int(itr),
                              n_tasks=len(tasks), causal=bool(causal), device=str(dev),
                              extra=f"{len(waves)} wave{'s' if len(waves) != 1 else ''} of {info['wave_sizes']} subproblems"
-                                   + (f", chunk pool of {pool.n_slots} slots" if pool is not None else ", Q/K/V read in place")),
+                                   + (f", chunk pool of {pool.n_slots} slots" if pool is not None else
+                                      (", Q/K/V gathered per wave" if gather else ", Q/K/V read in place"))),
         expected_s=expected_seconds(N=N, B=B, H=H, D=D, itr=int(itr), c=int(c), causal=bool(causal),
                                     stream_from_host=not on_device))
     q_tm = k_tm = v_tm = None
@@ -558,21 +657,19 @@ def wave_forward(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *, causal: b
                 continue
             # causal: uniform layout (batch of W padded sequences); non-causal: varlen layout
             tb = build_wave_tables(wave, dev, uniform=bool(causal))
-            if on_device and (N % SEG_ALIGN == 0 or tb.S == 0):
-                # in place: the block map addresses the original tensor. The uniform layout
-                # loads full 128-row tiles without predication, so the ragged last block
-                # of the sequence would run past the tensor unless N is 128-aligned.
+            if on_device and not gather:
+                # in place: the block map addresses the original tensor (see in_place_possible)
                 bb = block_base_for(tb, lambda g: g).to(dev, non_blocking=True)
                 qs, ks, vs = qt, kt, vt
             elif on_device:
                 # gathered wave with finite (zero) padding rows
                 valid = tb.tok >= 0
                 pos = torch.nonzero(valid).squeeze(1); src = tb.tok[valid]
-                def gather(t):
+                def gather_rows(t):
                     g = torch.zeros((tb.total, H, D), device=dev, dtype=t.dtype)
                     g[pos] = t[src]
                     return g
-                qs, ks, vs = gather(qt), gather(kt), gather(vt); bb = None
+                qs, ks, vs = gather_rows(qt), gather_rows(kt), gather_rows(vt); bb = None
             else:
                 with _cpu_threads(CPU_THREADS):
                     pool.load(wave, interest_set, b, q_tm, k_tm, v_tm)
@@ -697,9 +794,9 @@ def wave_backward(q, k, v, out, dout, lse, *, causal: bool = True, scale: Option
 # ---------------------------------------------------------------------------
 class _WaveAttn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, causal, scale, itr, c, interest_set, bwd_itr, max_wave_tokens, verbose):
+    def forward(ctx, q, k, v, causal, scale, itr, c, interest_set, bwd_itr, max_wave_tokens, gather, verbose):
         out, info = wave_forward(q, k, v, causal=causal, scale=scale, itr=itr, c=c, interest_set=interest_set,
-                                 max_wave_tokens=max_wave_tokens, verbose=verbose)
+                                 max_wave_tokens=max_wave_tokens, gather=gather, verbose=verbose)
         ctx.save_for_backward(q, k, v, out, info["lse"])
         ctx.meta = (causal, scale, itr if bwd_itr is None else bwd_itr, c, tuple(interest_set), max_wave_tokens, verbose)
         return out
@@ -710,13 +807,14 @@ class _WaveAttn(torch.autograd.Function):
         causal, scale, itr, c, interest_set, mwt, verbose = ctx.meta
         (dq, dk, dv), _ = wave_backward(q, k, v, out, dout.to(q.dtype), lse, causal=causal, scale=scale, itr=itr, c=c,
                                         interest_set=interest_set, max_wave_tokens=mwt, verbose=verbose)
-        return dq, dk, dv, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None
 
 
 def wave_attention(q, k, v, *, causal=True, scale=None, itr=1, c=7, interest_set=(0, 1, 3), bwd_itr=None, max_wave_tokens=None,
-                   verbose=None):
-    """Differentiable Stream-CQSA attention on the native wave kernel; returns fp32 ``[B, H, N, D]``."""
-    return _WaveAttn.apply(q, k, v, causal, scale, itr, c, tuple(interest_set), bwd_itr, max_wave_tokens, verbose)
+                   gather=None, verbose=None):
+    """Differentiable Stream-CQSA attention on the native wave kernel; returns fp32 ``[B, H, N, D]``.
+    ``gather`` is the forward's (the backward always gathers)."""
+    return _WaveAttn.apply(q, k, v, causal, scale, itr, c, tuple(interest_set), bwd_itr, max_wave_tokens, gather, verbose)
 
 
 # ---------------------------------------------------------------------------

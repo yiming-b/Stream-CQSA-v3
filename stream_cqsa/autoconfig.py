@@ -208,6 +208,13 @@ class CostModel:
     masked_frac: float = 0.22        # kept for calibrate(); the planner uses (l-1)/l^2 per quorum set
     depth_factor: float = 1.0        # residual per-depth factor (per-task overhead now explicit below)
     task_overhead_s: float = 3.0e-3  # fixed cost per subproblem (launch, scheduling, small-L kernel inefficiency); fitted from c=7..73 at N=131K
+    # Wave engine: one launch per wave of several subproblems. Per subproblem only its grid tail remains
+    # (wave_task_s); the launch gap is paid once per wave (wave_launch_s). The two sum to task_overhead_s, so a
+    # W=1 wave costs what a classic subproblem costs (measured equal within 0.6%, bit-identical; layout_ab), and
+    # a wave of 49 saves 48 launch gaps (139 vs 155 ms at itr=2, kernel_rows).
+    wave_launch_s: float = 1.5e-3
+    wave_task_s: float = 1.5e-3
+    inplace_ratio: float = 1.045     # kernel time reading Q/K/V in place through the block map / gathered copies (+3-6%, layout_ab)
     bwd_ratio: float = 3.0           # backward (fwd+bwd of a subproblem) / forward time per pair
     # Host-stage costs per gathered token of H*D = 512 fp16 elements (the
     # measured shape); scaled by (B*H*D)/512 for other shapes.
@@ -228,21 +235,30 @@ class CostModel:
 
     def cqsa_time(self, N: int, B: int, H: int, D: int, itr: int, causal: bool, acc: str,
                   stream_from_host: bool, n_par: int, world: int = 1, hw: HardwareSpec | None = None,
-                  c: int = 7, l: int = 3, direction: str = "fwd") -> float:
+                  c: int = 7, l: int = 3, direction: str = "fwd", engine: str = "classic",
+                  wave_tokens: int = 0, gather: bool = True) -> float:
+        """``engine="wave"``: waves of ``wave_tokens`` packed tokens (at least one subproblem each) replace the
+        per-subproblem launches; ``gather=False`` reads Q/K/V in place at ``inplace_ratio`` the kernel time."""
         L = N * (l / c) ** itr
         n_tasks = c ** itr
         tokens = n_tasks * L                       # gathered tokens over all subproblems
         masked = (l - 1) / (l * l)                 # non-owner diagonal blocks of a subproblem
         pairs = n_tasks * B * H * L * L * (0.5 if causal else 1.0) * (1 - masked)
-        compute = pairs / self.pair_rate * self.kernel_ratio * (self.depth_factor ** (itr - 1)) + n_tasks * self.task_overhead_s
+        kernel = pairs / self.pair_rate * self.kernel_ratio * (self.depth_factor ** (itr - 1))
+        if engine == "wave":
+            n_waves = math.ceil(tokens / max(float(wave_tokens), L))
+            compute = kernel * (1.0 if gather else self.inplace_ratio) + n_waves * self.wave_launch_s + n_tasks * self.wave_task_s
+        else:
+            compute = kernel + n_tasks * self.task_overhead_s
         if direction == "bwd":
             compute *= self.bwd_ratio
         ts = tokens * (B * H * D) / 512.0          # token-equivalents of the calibrated shape
-        gather = ts * (self.gather_s_per_tok if stream_from_host else self.gather_dev_s_per_tok)
+        gather_s = ts * (self.gather_s_per_tok if stream_from_host else self.gather_dev_s_per_tok)
         merge = ts * (self.merge_cpu_s_per_tok if acc == "cpu" else self.merge_gpu_s_per_tok)
         d2h = ts * self.d2h_s_per_tok if acc == "cpu" else 0.0
-        host = gather + merge + d2h
-        ov = self.overlap_npar2 if n_par >= 2 else self.overlap
+        host = gather_s + merge + d2h
+        # the wave's host fold runs on a worker under the next wave (P0.3), like a second subproblem in flight
+        ov = self.overlap_npar2 if (n_par >= 2 or (engine == "wave" and acc == "cpu")) else self.overlap
         t = compute + host * (1 - ov) + max(0.0, host * ov - compute)   # hidden part cannot exceed compute
         if world > 1:
             per_rank = math.ceil(n_tasks / world) / n_tasks
@@ -322,11 +338,17 @@ class Plan:
     reason: str = ""
     candidates: list[dict] = field(default_factory=list)
     evict_inputs: bool = False     # Q/K/V are on the device now and are moved to host memory for the computation
+    engine: str = "classic"        # 'wave' (several subproblems per launch) or 'classic' (the pinned per-task pipeline)
+    wave_tokens: int = 0           # wave engine: packed-token budget per wave (W)
+    gather: bool = True            # wave engine: gathered copies of Q/K/V per wave (True) or read in place (False)
 
     def name(self) -> str:
         if self.mode == "mono":
             return "monolithic"
-        s = f"cqsa c={self.c} itr={self.itr} acc={self.acc} n_par={self.n_par}" + ((" Q/K/V evicted to host" if self.evict_inputs else " host-resident Q/K/V") if self.stream_from_host else "")
+        s = f"cqsa c={self.c} itr={self.itr} acc={self.acc}"
+        s += (f" wave W={self.wave_tokens:,} {'gathered' if self.gather else 'in place'}" if self.engine == "wave"
+              else f" n_par={self.n_par}")
+        s += ((" Q/K/V evicted to host" if self.evict_inputs else " host-resident Q/K/V") if self.stream_from_host else "")
         return s + (f" on {self.world} devices" if self.world > 1 else "")
 
     def engine_kwargs(self) -> dict:
@@ -350,11 +372,24 @@ def plan(*, N: int, B: int = 1, H: int = 8, D: int = 64, dtype=torch.float16, ca
          max_itr: int = 3, n_pars: Sequence[int] = (1, 2, 4), allow_distributed: bool = True,
          quorum_sets: dict[int, Sequence[int]] | None = None, direction: str = "fwd",
          safety: float = 0.85, tol: float = 0.02, out_bytes_per_el: int = 4,
-         resident_input_bytes: int = 0, budget_excludes_inputs: bool = True, evict_inputs: bool = False) -> Plan:
+         resident_input_bytes: int = 0, budget_excludes_inputs: bool = True, evict_inputs: bool = False,
+         engines: Sequence[str] | None = None, allow_mono: bool = True) -> Plan:
     """
     Choose the configuration for one attention call on `hardware` (detected if None).
     ``out_bytes_per_el``: device bytes per element the delivered forward output costs when the
     accumulator is on the host (4 = classic engine default, 2 = fp16 to a device caller, 0 = host caller).
+
+    ``engines``: the executors this call may use, ``("wave", "classic")`` by default when the wave
+    extension is importable (``attention()`` passes what its ``kernel=`` allows and the build supports).
+    The wave engine is the executor of every device-resident, device-accumulator call when it is
+    available: a W=1 wave is the classic engine's launch per subproblem (equal within 0.6%,
+    bit-identical), so the classic is not enumerated there. Its wave budget W is an axis: the
+    default budget halved down to one subproblem per wave (``wave_token_ladder``), gathered copies of
+    Q/K/V (3-6% faster) at every rung before the in-place rungs, so under a tight budget the wave
+    shrinks before the depth grows and in place is chosen only when the copies do not fit. Host-resident
+    inputs are enumerated on both engines and the memory model decides (the wave streams a chunk pool
+    and folds on a worker; the classic pipelines pinned tasks in less device memory).
+    ``allow_mono=False`` plans among the decompositions only (a call whose depth the caller pinned).
 
     `quorum_sets` ({c: interest_set}, default QUORUM_SETS) is the fourth axis:
     every (c, itr) pair is a candidate. Measured at N=131K (A100-40GB): for the
@@ -373,11 +408,18 @@ def plan(*, N: int, B: int = 1, H: int = 8, D: int = 64, dtype=torch.float16, ca
     ``evict_inputs`` their bytes are freed for the computation (the candidate is marked
     ``evict``); without it they stay and are charged on top of the estimate.
     """
+    from .native_wave import native_available, estimate_wave_peak_bytes, wave_token_ladder, in_place_possible
     hw = hardware or detect_hardware()
     cm = model or load_cost_model() or CostModel()
     itemsize = torch.empty((), dtype=dtype).element_size()
     if not hw.devices:
         raise RuntimeError("no CUDA device in the hardware description")
+    if engines is None:
+        engines = ("wave", "classic") if native_available() else ("classic",)
+    engines = tuple(engines)
+    if not engines or any(e not in ("wave", "classic") for e in engines):
+        raise ValueError(f"engines must be a non-empty subset of ('wave', 'classic') (got {engines!r})")
+    wave_ok = "wave" in engines
     # Heterogeneous machines: plan on the largest identical group (the engine
     # splits tasks evenly, so mixing device speeds would idle the fast ones).
     groups = {}
@@ -393,7 +435,7 @@ def plan(*, N: int, B: int = 1, H: int = 8, D: int = 64, dtype=torch.float16, ca
     mono = estimate_monolithic_bytes(N, B=B, H=H, D=D, itemsize=itemsize) * (2.2 if bwd else 1.0)
     cands.append(dict(mode="mono", itr=0, c=7, interest_set=(0, 1, 3), acc="gpu", stream_from_host=False, n_par=1, world=1,
                       time=cm.mono_time(N, B, H, causal, direction), peak=mono / GIB, host=0.0,
-                      ok=mono <= dev_budget))
+                      ok=bool(allow_mono and mono <= dev_budget)))
     worlds = [1] + ([w for w in range(2, len(devs) + 1)] if allow_distributed else [])
     qsets = dict(quorum_sets) if quorum_sets is not None else dict(QUORUM_SETS)
     for c, iset in qsets.items():
@@ -409,6 +451,43 @@ def plan(*, N: int, B: int = 1, H: int = 8, D: int = 64, dtype=torch.float16, ca
                     for host in (False, True):
                         if acc == "cpu" and not host:
                             continue
+                        hostb = _host_bytes(N, B, H, D, itemsize, host, acc) * (2.0 if bwd else 1.0)
+                        evict = bool(host and R and evict_inputs)
+                        stay = R if (host and R and not evict) else 0      # streaming next to the unevicted device copy
+                        base = dict(mode="cqsa" if w == 1 else "cqsa_dist", itr=itr, c=c, interest_set=tuple(iset),
+                                    acc=acc, stream_from_host=host, evict=evict, world=w, host=hostb / GIB)
+                        # the wave engine: single device; every (acc, host) forward, device-resident backward
+                        # (the wave backward keeps its fp32 gradients on the device)
+                        wave_here = wave_ok and w == 1 and (not bwd or (not host and acc == "gpu"))
+                        if wave_here:
+                            # Gathered rungs (3-6% faster) down the whole ladder first; the in-place rungs only when no
+                            # gathered rung fits, so the wave shrinks before the copies are given up (at small N one
+                            # extra launch costs about what the in-place tax costs, and the tie would otherwise go to
+                            # the smaller in-place wave). The chunk pool is always read in place, the backward gathers.
+                            if host:
+                                modes = (False,)
+                            elif bwd or not in_place_possible(N, causal):
+                                modes = (True,)
+                            else:
+                                modes = (True, False)
+                            for gather in modes:
+                                if not gather and any(x["ok"] for x in cands if x is not None and x.get("engine") == "wave"
+                                                      and x["itr"] == itr and x["c"] == c and x["acc"] == acc
+                                                      and x["stream_from_host"] == host and x["gather"]):
+                                    break
+                                for W in wave_token_ladder(N, itr, c, l):
+                                    peak = estimate_wave_peak_bytes(N, W, B=B, H=H, D=D, itemsize=itemsize, itr=itr, c=c, l=l,
+                                                                    stream_from_host=host, accumulate_on_gpu=(acc == "gpu"),
+                                                                    gather=gather, direction=direction, out_bytes_per_el=int(out_bytes_per_el))
+                                    t = cm.cqsa_time(N, B, H, D, itr, causal, acc, host, 1, world=w, hw=hw, c=c, l=l, direction=direction,
+                                                     engine="wave", wave_tokens=W, gather=gather)
+                                    cands.append(dict(base, engine="wave", wave_tokens=int(W), gather=bool(gather), n_par=1,
+                                                      time=t, peak=(peak + stay) / GIB,
+                                                      ok=(peak + stay <= dev_budget and hostb <= hw.host_budget_bytes)))
+                        if wave_here and not host and acc == "gpu":
+                            continue                                       # the wave covers this residency (W=1 == classic)
+                        if "classic" not in engines:
+                            continue
                         for n_par in n_pars:
                             if n_par > n_tasks:
                                 continue
@@ -416,13 +495,9 @@ def plan(*, N: int, B: int = 1, H: int = 8, D: int = 64, dtype=torch.float16, ca
                             extra = {} if bwd else {"out_bytes_per_el": int(out_bytes_per_el)}
                             peak = est(N, itr, B=B, H=H, D=D, itemsize=itemsize, n_par=n_par, c=c, l=l,
                                        stream_from_host=host, accumulate_on_gpu=(acc == "gpu"), **extra)
-                            hostb = _host_bytes(N, B, H, D, itemsize, host, acc) * (2.0 if bwd else 1.0)
                             t = cm.cqsa_time(N, B, H, D, itr, causal, acc, host, n_par, world=w, hw=hw, c=c, l=l, direction=direction)
-                            evict = bool(host and R and evict_inputs)
-                            stay = R if (host and R and not evict) else 0      # streaming next to the unevicted device copy
-                            cands.append(dict(mode="cqsa" if w == 1 else "cqsa_dist", itr=itr, c=c, interest_set=tuple(iset),
-                                              acc=acc, stream_from_host=host, evict=evict,
-                                              n_par=n_par, world=w, time=t, peak=(peak + stay) / GIB, host=hostb / GIB,
+                            cands.append(dict(base, engine="classic", wave_tokens=0, gather=True, n_par=n_par, time=t,
+                                              peak=(peak + stay) / GIB,
                                               ok=(peak + stay <= dev_budget and hostb <= hw.host_budget_bytes)))
     feas = [c for c in cands if c["ok"]]
     if not feas:
@@ -433,21 +508,20 @@ def plan(*, N: int, B: int = 1, H: int = 8, D: int = 64, dtype=torch.float16, ca
         fb = min(off, key=lambda c: (c["peak"], c["time"]))
         p = Plan(mode="cqsa", itr=fb["itr"], c=fb["c"], interest_set=tuple(fb["interest_set"]), direction=direction,
                  acc="cpu", stream_from_host=True, n_par=1, world=1, evict_inputs=bool(R and evict_inputs),
+                 engine=fb["engine"], wave_tokens=fb["wave_tokens"], gather=fb["gather"],
                  devices=[d.name for d in devs[:1]], candidates=cands,
                  reason=(f"nothing fits: device budget {dev_budget / GIB:.1f} GiB, host budget {hw.host_budget_bytes / GIB:.0f} GiB; "
                          f"the O(N.H.D) device floor with everything offloaded is {floor / GIB:.1f} GiB. "
                          f"Falling back to the most frugal configuration (c={fb['c']}, itr={fb['itr']}, everything offloaded, "
                          f"~{fb['peak']:.1f} GiB); the engine escalates on its own if that still does not fit."))
         return p
-    front = [c for c in feas if not any((o["time"] < c["time"]) and (o["peak"] < c["peak"]) for o in feas)]
-    best_t = min(c["time"] for c in front)
-    near = [c for c in front if c["time"] <= best_t * (1 + tol)]
-    pick = min(near, key=lambda c: c["peak"])
+    pick, front = frontier_pick(feas, tol)
     p = Plan(mode=pick["mode"], itr=pick["itr"], c=pick["c"], interest_set=tuple(pick["interest_set"]), direction=direction,
              acc=pick["acc"], stream_from_host=pick["stream_from_host"],
              n_par=pick["n_par"], world=pick["world"], devices=[d.name for d in devs[:pick["world"]]],
              est_time_s=pick["time"], est_peak_gib=pick["peak"], est_host_gib=pick["host"], candidates=cands,
-             evict_inputs=bool(pick.get("evict", False)))
+             evict_inputs=bool(pick.get("evict", False)), engine=pick.get("engine", "classic"),
+             wave_tokens=int(pick.get("wave_tokens", 0)), gather=bool(pick.get("gather", True)))
     mono_c = cands[0]
     if pick["mode"] == "mono":
         p.reason = (f"monolithic fits ({mono_c['peak']:.2f} GiB <= {dev_budget / GIB:.1f} GiB budget) and is the fastest "
@@ -463,10 +537,21 @@ def plan(*, N: int, B: int = 1, H: int = 8, D: int = 64, dtype=torch.float16, ca
     return p
 
 
+def frontier_pick(feas: Sequence[dict], tol: float = 0.02) -> tuple[dict, list[dict]]:
+    """The planner's rule on feasible candidates: the (time, peak) Pareto frontier, its fastest point, and among
+    the points within ``tol`` of that time the smallest peak. Returns (pick, frontier)."""
+    front = [c for c in feas if not any((o["time"] < c["time"]) and (o["peak"] < c["peak"]) for o in feas)]
+    best_t = min(c["time"] for c in front)
+    near = [c for c in front if c["time"] <= best_t * (1 + tol)]
+    return min(near, key=lambda c: c["peak"]), front
+
+
 def _cname(c: dict) -> str:
     if c["mode"] == "mono":
         return "mono"
-    return f"c{c.get('c', 7)}/itr{c['itr']}/{c['acc']}{'/host' if c['stream_from_host'] else ''}/np{c['n_par']}" + (f"x{c['world']}" if c["world"] > 1 else "")
+    tail = (f"/wave{c['wave_tokens'] >> 10}K{'' if c.get('gather', True) else '/inplace'}" if c.get("engine") == "wave"
+            else f"/np{c['n_par']}")
+    return f"c{c.get('c', 7)}/itr{c['itr']}/{c['acc']}{'/host' if c['stream_from_host'] else ''}{tail}" + (f"x{c['world']}" if c["world"] > 1 else "")
 
 
 # ---------------------------------------------------------------------------
@@ -556,7 +641,7 @@ def autotune(*, N: int, B: int = 1, H: int = 8, D: int = 64, dtype=torch.float16
     cheap enough to run a few times (say under a minute) and will be repeated.
     """
     from .devkit import Config, quick_bench
-    p = plan(N=N, B=B, H=H, D=D, dtype=dtype, causal=causal, hardware=hardware)
+    p = plan(N=N, B=B, H=H, D=D, dtype=dtype, causal=causal, hardware=hardware, engines=("classic",))   # quick_bench runs the classic configs
     feas = [c for c in p.candidates if c["ok"] and c["world"] == 1]
     feas.sort(key=lambda c: c["time"])
     cfgs = []
@@ -599,7 +684,7 @@ def auto_attention(q, k, v, *, causal: bool = False, scale: float | None = None,
     if isinstance(hardware, dict):
         hardware = hardware_from_dict(hardware)
     B, H, N, D = q.shape
-    p = plan(N=N, B=B, H=H, D=D, dtype=q.dtype, causal=causal, hardware=hardware, model=model)
+    p = plan(N=N, B=B, H=H, D=D, dtype=q.dtype, causal=causal, hardware=hardware, model=model, engines=("classic",))
     if p.mode == "cqsa_dist":
         import torch.distributed as dist
         if not (dist.is_available() and dist.is_initialized() and dist.get_world_size() == p.world):

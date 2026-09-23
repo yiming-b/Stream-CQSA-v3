@@ -200,9 +200,15 @@ ratio of Triton's FlashAttention-2 forward), and the wave engine is within 3-4% 
 engine on the same kernel. The linear and constant terms are the engine overheads: acc=CPU adds
 about 1 s per M tokens; itr=2 adds the launches, which the wave engine removes (its itr=2, acc=GPU
 linear term is 0.03 against 0.40). At 2M tokens with acc=CPU the classic engine is 5-7% faster
-than the wave engine because its per-subproblem host transfers overlap with compute while the wave
-engine merges each wave on the host synchronously; this is why `attention()` keeps the classic
-engine for host-accumulator forwards. Peak device memory is linear in N for the classic engine
+than the wave engine in this sweep because its per-subproblem host transfers overlap with compute while
+the wave engine then merged each wave on the host synchronously (the fold now runs on a worker under
+the next wave and the wave is 1-3% ahead, `results/ultimate/wave_merge_ab.json`). `attention()` now
+routes by the memory model (`autoconfig.plan`, engines axis): the wave engine runs every device-resident,
+device-accumulator call whenever its wave fits (a W=1 wave costs what a classic subproblem costs), with
+the wave budget W halved down to one subproblem per wave before the depth grows and gathered Q/K/V copies
+(3-6% faster than in-place reads) given up only when they do not fit; host-resident inputs are enumerated
+on both engines and the smaller device footprint wins a tie; host-accumulator backwards stay on the classic
+pipeline. Peak device memory is linear in N for the classic engine
 (9.0 GiB per M tokens at itr=1 acc=GPU, 5.3 at acc=CPU, 6.8 / 4.8 at itr=2). The wave engine's is
 not: it holds a whole wave of packed partial outputs, and the wave is capped by a token budget (2M
 packed tokens by default), so the fit is `peak = a*N + b*W_wave + c` with W_wave the largest wave the

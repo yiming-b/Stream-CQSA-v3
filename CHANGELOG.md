@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+* Routing by the memory model (ultimate P0.2): `CQSA_WAVE_MIN_SUBPROBLEMS` is retired. `autoconfig.plan`
+  gains an engine axis (`engines=`, `allow_mono=`): the wave engine is the executor of every device-resident,
+  device-accumulator call whenever its wave fits (a W=1 wave costs what a classic subproblem costs, measured
+  equal within 0.6% and bit-identical), the classic pipeline covers host-resident inputs where it is smaller
+  (both engines are enumerated there) and host-accumulator backwards. The wave's peak is modelled as
+  `a*N + b*W` (`native_wave.estimate_wave_peak_bytes`; analytic count, a within 2% of the profile-sweep fit)
+  and the wave budget W is a planner axis (`wave_token_ladder`: the default budget halved down to one
+  subproblem per wave), so a tight budget shrinks the wave before the depth grows; gathered Q/K/V copies
+  (3-6% faster than in-place reads, `layout_ab`) are chosen at every rung and in-place reads only when the
+  copies do not fit (`wave_forward(gather=)`, `in_place_possible`). An out-of-memory inside a wave halves the
+  budget first, then reads in place, and only then retries on the classic engine. `Plan` carries `engine`,
+  `wave_tokens`, `gather`; `attention(..., plan_only=True)` with a pinned `itr=`/`c=` shows the decomposition
+  plan and applies the device-resident preference itself; `return_info` reports `engine`, `max_wave_tokens`,
+  `gather`, `n_waves`, `wave_sizes`, `wave_oom_retries`; the verbose plan/ran lines state the wave budget and
+  the read mode; `max_wave_tokens=` and `gather=` are call overrides; `estimate(kernel=)`.
+
 * One entry point: `stream_cqsa.attention` is documented as the function to use (README table, package
   docstring, notebooks rewritten around it with the engine layer in a separate part); it gains `bwd_itr=`;
   `calibrate` is exported at the top level; `attention_oom_safe`, `stream_cqsa_auto` and `auto_attention`

@@ -1,0 +1,24 @@
+/scratch/gpfs/AKEY/yb2807/VENVs/CQSA311/bin/python
+della-l07g3
+NVIDIA A100-SXM4-80GB, 210 MHz, 1410 MHz, 81920 MiB
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/stream_cqsa/__init__.py 2.10.0+cu130
+73dc023 benchmarks/ultimate/dist_telemetry.py + slurm/ultimate/dist4.slurm: M5 multi-device telemetry baseline
+{'gpu': 'NVIDIA A100-SXM4-80GB', 'torch': '2.10.0+cu130', 'node': 'della-l07g3', 'slurm_job': '14308145', 'cpu_threads': '8', 'nvidia_smi': 'NVIDIA A100-SXM4-80GB, 765 MHz, 1410 MHz, 81920 MiB'}
+arm check: {'N': 131072, 'c': 7, 'rel_align128_vs_align0': 2.0766847278137218e-05, 'rel_wave_vs_align128': 2.7942992609586618e-08, 'rel_align128_vs_sdpa': 0.00022198306202786058, 'rel_align0_vs_sdpa': 0.00022217696870908713}
+N=  131072 c=  7 classic_align0  :     149.9 ms (min 149.4, runs [150.7, 149.4, 149.6])  peak 1.19 GiB  n_par=2 waves=None
+N=  131072 c=  7 classic_align128:     135.1 ms (min 135.0, runs [135.1, 135.3, 135.0])  peak 1.19 GiB  n_par=2 waves=None
+N=  131072 c=  7 wave            :     139.7 ms (min 139.1, runs [140.8, 139.1, 139.4])  peak 1.66 GiB  n_par=None waves=1
+N=  131072 c=  7 sdpa_flash      :      95.8 ms (min 94.7, runs [97.8, 94.7, 94.8])  peak 0.50 GiB  n_par=None waves=None
+N=  131072 c= 73 classic_align0  :     222.2 ms (min 222.1, runs [222.1, 222.3, 222.1])  peak 0.90 GiB  n_par=2 waves=None
+N=  131072 c= 73 classic_align128:     179.4 ms (min 178.7, runs [180.8, 178.8, 178.7])  peak 0.90 GiB  n_par=2 waves=None
+N=  131072 c= 73 wave            :     162.8 ms (min 161.7, runs [164.0, 162.8, 161.7])  peak 1.92 GiB  n_par=None waves=3
+N=  131072 c= 73 sdpa_flash      :      96.3 ms (min 94.4, runs [99.9, 94.4, 94.7])  peak 0.50 GiB  n_par=None waves=None
+N= 1048576 c=  7 classic_align0  :    7759.0 ms (min 7758.4, runs [7758.4, 7760.1, 7758.6])  peak 9.48 GiB  n_par=2 waves=None
+N= 1048576 c=  7 classic_align128:    7576.0 ms (min 7575.6, runs [7576.1, 7576.3, 7575.6])  peak 9.48 GiB  n_par=2 waves=None
+N= 1048576 c=  7 wave            :    7958.7 ms (min 7956.0, runs [7956.0, 7957.5, 7962.8])  peak 9.12 GiB  n_par=None waves=4
+N= 1048576 c=  7 sdpa_flash      :    6273.6 ms (min 6271.5, runs [6271.5, 6273.2, 6276.1])  peak 4.03 GiB  n_par=None waves=None
+
+summary (mean ms; ratios to sdpa_flash):
+  N=  131072 c=  7: align0    149.9 (1.57x)  align128    135.1 (1.41x)  wave    139.7 (1.46x)  sdpa     95.8  align128/align0 0.901
+  N=  131072 c= 73: align0    222.2 (2.31x)  align128    179.4 (1.86x)  wave    162.8 (1.69x)  sdpa     96.3  align128/align0 0.808
+  N= 1048576 c=  7: align0   7759.0 (1.24x)  align128   7576.0 (1.21x)  wave   7958.7 (1.27x)  sdpa   6273.6  align128/align0 0.976

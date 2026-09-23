@@ -11,6 +11,7 @@ unchanged). Both launch on the stream; the losing one's CTAs return at once (no 
 Rows (docs/ultimate/01_design_a100.md 7.1 P3.1; package P3 of the ultimate program):
   aligned c=7 task, N=131072 (L=56064): causal and non-causal x D in {64, 128};
   aligned c=7 task, N=524288 (L~225K): causal D=64;
+  aligned c=7 task, N=16384 (L~7K, the small-L regime of design 7.1 P3.1): causal D=64;
   c=73, N=131072 (73 tasks, L~16K): per-task times summed, causal D=64;
   mixed-tile patterns (unaligned c=7 task, random 3-bit) at N=131072, D=64: LEGACY vs v11 / v9.
 Arms: flash_attn (the FA-2 package), SDPA-flash (torch SDPA, FLASH_ATTENTION backend; the arm of every
@@ -436,7 +437,7 @@ def report(res):
              f"flash_attn {info.get('flash_attn', '?').split()[0]}, fp16, H={res['H']}, {res['timing']}. "
              f"Harness `benchmarks/ultimate/fwd_ab.py`, raw rows `fwd_ab.json`. Kernels: flash_attn "
              f"{res.get('kernel_names', {}).get('flash_attn')}; SDPA-flash {res.get('kernel_names', {}).get('sdpa_flash')}.", ""]
-    for key in ("task56k", "task225k"):
+    for key in ("task56k", "task225k", "task7k"):
         rows = res.get(key, [])
         if not rows:
             continue
@@ -504,9 +505,9 @@ def main():
         print(f"wrote {md}")
         return
     load_modules()
-    n56, n225, n73, iters = 131072, 524288, 131072, a.iters
+    n56, n225, n73, n7k, iters = 131072, 524288, 131072, 16384, a.iters
     if a.smoke:
-        n56, n225, n73, iters = 16384, 32768, 16384 * 4, 2
+        n56, n225, n73, n7k, iters = 16384, 32768, 16384 * 4, 8192, 2
         a.out = a.out.replace(".json", "_smoke.json")
     t0 = time.time()
     res = dict(info=gpu_info(), H=H, dtype="float16", iters=iters, smoke=a.smoke,
@@ -518,7 +519,8 @@ def main():
     parts = ((part_task, (n56, ((True, 64), (True, 128), (False, 64), (False, 128)), iters, "task56k")),
              (part_task, (n225, ((True, 64),), iters, "task225k")),
              (part_c73, (n73, iters)),
-             (part_mixed, (n56, iters)))
+             (part_mixed, (n56, iters)),
+             (part_task, (n7k, ((True, 64),), iters, "task7k")))
     for part, args in parts:
         try:
             part(res, *args)

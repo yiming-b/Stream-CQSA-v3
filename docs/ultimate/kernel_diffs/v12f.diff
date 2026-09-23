@@ -1,7 +1,7 @@
 diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/build.sh v12f/build.sh
 --- v11/build.sh	1969-12-31 19:00:00.000000000 -0500
-+++ v12f/build.sh	2026-09-23 10:38:33.887073227 -0400
-@@ -0,0 +1,45 @@
++++ v12f/build.sh	2026-09-23 14:47:23.501094914 -0400
+@@ -0,0 +1,50 @@
 +#!/bin/bash
 +# Build v12f (ultimate program P3: ALIGNED run-table forward + LEGACY v11 forward).
 +#   TAG=b1 bash next/kernel/v12f/build.sh          # incremental: reuses up-to-date objects
@@ -25,7 +25,11 @@ diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pyc
 +export MAX_JOBS=8
 +export NVCC_THREADS=4
 +export CQSA_BWD_NO_CQS=1
-+export CQSA_NVCC_TIME_CSV=$DEV/next/logs/build_v12f_${TAG}_nvcc_time.csv
++# One csv path for every build: it is part of each nvcc command (-time), so a TAG-dependent path made
++# ninja rebuild every unit on a new TAG (b2 rebuilt all 12 in 79 min for a flash_api.cpp-only change).
++# Units rebuilt by this run append to it; it is copied to the TAG's name at the end.
++export CQSA_NVCC_TIME_CSV=$DEV/next/logs/build_v12f_nvcc_time.csv
++TAG_CSV=$DEV/next/logs/build_v12f_${TAG}_nvcc_time.csv
 +LOG=$DEV/next/logs/05_build_v12f_${TAG}.log
 +WATCH_LOG=$DEV/next/logs/watchdog_v12f_${TAG}.log
 +rm -f "$CQSA_NVCC_TIME_CSV"
@@ -34,7 +38,7 @@ diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pyc
 +rm -f cqsa_cuda_next_v12f*.so
 +{
 +  echo "build v12f $TAG: kernel_set=$CQSA_KERNEL_SET MAX_JOBS=$MAX_JOBS NVCC_THREADS=$NVCC_THREADS clean=${CLEAN:-0} host=$(hostname) load=$(cut -d' ' -f1-3 /proc/loadavg)  $(date)"
-+  echo "flags: CQSA_BWD_NO_CQS=1 -lineinfo -Xptxas -v -time $CQSA_NVCC_TIME_CSV"
++  echo "flags: CQSA_BWD_NO_CQS=1 -lineinfo -Xptxas -v -time $CQSA_NVCC_TIME_CSV (copied to $TAG_CSV)"
 +  nvcc --version | tail -1
 +} > "$LOG"
 +# LEGACY's ptxas took up to ~35 min in v11's build; 60 min flags a hang, not a slow unit.
@@ -45,11 +49,12 @@ diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pyc
 +rc=$?
 +echo "build v12f $TAG finished rc=$rc in $(( $(date +%s) - t0 )) s  $(date)" | tee -a "$LOG"
 +kill $WD 2>/dev/null
++cp -f "$CQSA_NVCC_TIME_CSV" "$TAG_CSV" 2>/dev/null
 +ls -la $DEV/next/kernel/v12f/cqsa_cuda_next_v12f*.so 2>&1 | tee -a "$LOG"
 +exit $rc
 diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pycache__' '--exclude=*.egg-info' '--exclude=cutlass' v11/csrc/flash_attn/flash_api.cpp v12f/csrc/flash_attn/flash_api.cpp
 --- v11/csrc/flash_attn/flash_api.cpp	2026-09-11 23:16:22.128645000 -0400
-+++ v12f/csrc/flash_attn/flash_api.cpp	2026-09-23 10:37:09.444457000 -0400
++++ v12f/csrc/flash_attn/flash_api.cpp	2026-09-23 13:26:42.768388000 -0400
 @@ -16,6 +16,7 @@
  #include "namespace_config.h"
  #include "hardware_info.h"
@@ -58,18 +63,23 @@ diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pyc
  #include "static_switch.h"
  #include <array>
  #include <algorithm>
-@@ -460,6 +461,10 @@
+@@ -460,6 +461,15 @@
      params.deterministic = deterministic;
  }
  
 +// next/ v12f: cqs_fwd_flags of fwd_cqs_group_bits.
 +constexpr int kCqsFwdForceLegacy = 1;   // skip the census: v11's CQS forward (A/B and tests)
 +constexpr int kCqsFwdReverseM = 2;      // ALIGNED visits row blocks in descending order
++constexpr int kCqsFwdAscendingM = 4;    // ALIGNED visits row blocks in ascending order
++// Neither order flag: descending for causal calls, ascending for non-causal ones. On an
++// A100-SXM4-80GB (job 14319938, results/ultimate/fwd_ab.md) descending order cut the causal
++// ALIGNED forward by 1.5-6.1% (heaviest row blocks first, no drain tail) and was neutral to
++// +1.0% non-causal, where every row block has the same work. Outputs are bit-identical.
 +
  void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split_kernel=false) {
  #ifdef CQSA_MINIMAL_FWD_KERNELS
  #ifndef CQSA_MINIMAL_BOTH_DTYPES
-@@ -476,12 +481,19 @@
+@@ -476,12 +486,19 @@
      TORCH_CHECK(params.d == 64 || params.d == 128,
                  "this CQSA build only supports head_dim=64 or 128; rebuild with "
                  "CQSA_KERNEL_SET=full for other head dims.");
@@ -91,7 +101,7 @@ diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pyc
              }
          });
      });
-@@ -616,7 +628,8 @@
+@@ -616,7 +633,8 @@
          std::optional<int64_t> cqs_blk_size_ = std::nullopt,
          std::optional<at::Tensor> cqs_out_acc_ = std::nullopt,
          std::optional<at::Tensor> cqs_block_base_ = std::nullopt,
@@ -101,7 +111,7 @@ diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pyc
  
      // Otherwise the kernel will be launched from cuda:0 device
      at::cuda::CUDAGuard device_guard{q.device()};
-@@ -842,6 +855,24 @@
+@@ -842,6 +860,25 @@
  
      set_params_alibi(params, alibi_slopes_, batch_size, num_heads);
  
@@ -120,13 +130,14 @@ diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pyc
 +        cqs_census = torch::empty({2 + max_m_blocks * kCqsRunSlots * 2}, opts.dtype(torch::kInt32));
 +        params.cqs_route = cqs_census.data_ptr<int>();
 +        params.cqs_runs = reinterpret_cast<const int2 *>(params.cqs_route + 2);
-+        params.cqs_reverse_m = (cqs_fwd_flags & kCqsFwdReverseM) != 0;
++        params.cqs_reverse_m = (cqs_fwd_flags & kCqsFwdReverseM) != 0
++            || (params.is_causal && (cqs_fwd_flags & kCqsFwdAscendingM) == 0);
 +    }
 +
      if (seqlen_k > 0) {
          auto stream = at::cuda::getCurrentCUDAStream().stream();
          run_mha_fwd(params, stream);
-@@ -949,7 +980,8 @@
+@@ -949,7 +986,8 @@
                         std::optional<int64_t> cqs_blk_size_ = std::nullopt,
                         std::optional<at::Tensor> cqs_out_acc_ = std::nullopt,
                         std::optional<at::Tensor> cqs_block_base_ = std::nullopt,
@@ -136,7 +147,7 @@ diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pyc
      auto cqs_group_bits_opt = std::optional<at::Tensor>(cqs_group_bits);
      return mha_fwd_impl(
          q,
-@@ -973,7 +1005,42 @@
+@@ -973,7 +1011,42 @@
          cqs_blk_size_,
          cqs_out_acc_,
          cqs_block_base_,
@@ -180,7 +191,7 @@ diff -ruN '--exclude=build' '--exclude=frozen' '--exclude=*.so' '--exclude=__pyc
  }
  
  void run_mha_bwd(Flash_bwd_params &params, cudaStream_t stream);
-@@ -2465,7 +2532,14 @@
+@@ -2465,7 +2538,14 @@
            pybind11::arg("cqs_blk_size") = pybind11::none(),
            pybind11::arg("cqs_out_acc") = pybind11::none(),
            pybind11::arg("cqs_block_base") = pybind11::none(),

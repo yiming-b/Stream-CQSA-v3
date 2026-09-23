@@ -14,8 +14,12 @@
 # ranks ~42 GiB, x1.5 for the pinned allocator's power-of-two rounding -> 64 GiB; 75G.
 # The PCIe node type is measured throughout; never compare these times with SXM rows.
 set -uo pipefail
-ROOT=/scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate
+# Code comes from a frozen snapshot (CQSA_SRC, a `git archive` of one commit) so edits to the live
+# worktree while this job waits in the queue cannot change what it runs; results go to the worktree.
+OUT=/scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate
+ROOT=${CQSA_SRC:-$OUT}
 cd "$ROOT"
+echo "code: $ROOT"
 source /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/env_next.sh
 export PYTHONPATH=$ROOT:/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/stable:${PYTHONPATH:-}:/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/native
 export CQSA_CUDA_MODULE=cqsa_cuda_next_v11 CQSA_CUDA_MODULE_NONCAUSAL=cqsa_cuda_next_v9 CQSA_CPU_THREADS=4 OMP_NUM_THREADS=4
@@ -27,6 +31,6 @@ python -P -c "import stream_cqsa, torch; print(stream_cqsa.__file__, torch.__ver
 # The torchrun on PATH belongs to another env; launch the module of this one.
 python -P -m torch.distributed.run --standalone --nproc_per_node=4 \
     "$ROOT/benchmarks/ultimate/dist_telemetry.py" 1048576 2097152 --itr 1 2 --acc gpu --seg-align 0 128 \
-    --out "$ROOT/results/ultimate/dist_telemetry.json"
+    --out "$OUT/results/ultimate/dist_telemetry.json"
 echo "exit $?  $(date +%T)"
 sacct -j "$SLURM_JOB_ID" -o JobID,MaxRSS,Elapsed -P 2>/dev/null | tail -3

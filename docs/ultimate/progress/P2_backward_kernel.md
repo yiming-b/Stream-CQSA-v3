@@ -28,7 +28,7 @@ P2 (this package) started 13:12.
 | tests/test_ultimate_v12b.py on vis1 | done 14:06: 44 passed | first build, no fix needed; profiler confirms the ALIGNED kernel does the work (L=28032: census 8 us, LEGACY launch 9 us, ALIGNED 31.9 ms vs v11 65.3 ms on the shared PCIe GPU) |
 | bwd_ab --smoke on vis1 | done | every arm and check runs; timings on the shared, 100%-busy PCIe GPU are noise (not used) |
 | static report | done | `results/ultimate/v12b_static.md`: ALIGNED hdim64 128x128 causal even: 255/72 B/2176 SASS vs v11 255/224/5624, v11x NO_CQS 255/112/2152, torch-FA2 255/96/2336 |
-| SXM job bwd_ab | - | |
+| SXM job bwd_ab | submitted 14:12 | job 14322302 (gpu-test, sxm&gpu80, 12G, 45 min), snapshot `ultimate-50e64d2`, V12B_DIR = frozen/b1 |
 | results, diff, commit | - | |
 
 ## Design as built (refinements of the task's sketch)
@@ -77,7 +77,8 @@ Files changed in v12b vs v11: `setup.py`, `csrc/flash_attn/flash_api.cpp`, `src/
 
 ## Job ids / builds
 
-- b1: clean build started 2026-09-23 13:34 on vis1 (`TAG=b1 CLEAN=1 nohup setsid bash next/kernel/v12b/build.sh`).
+- b1: clean build 2026-09-23 13:34-14:02 on vis1 (`TAG=b1 CLEAN=1 nohup setsid bash next/kernel/v12b/build.sh`), rc=0.
+- 14322302: bwd_ab on A100-SXM4-80GB (snapshot ultimate-50e64d2, frozen/b1) -> results/ultimate/bwd_ab.{json,md}, bwd_ab_14322302.out.
 
 ## Next step for a resumed agent
 

@@ -54,12 +54,6 @@ def merge_async_enabled() -> bool:
     return os.environ.get("CQSA_WAVE_MERGE_ASYNC", "1") != "0"
 
 
-def fold_workers() -> int:
-    """acc=CPU asynchronous fold: worker threads, each owning a fixed range of token ids (CQSA_WAVE_FOLD_WORKERS,
-    default 1; read per call for A/B). Read per call so a harness can flip it without a re-import."""
-    return max(1, int(os.environ.get("CQSA_WAVE_FOLD_WORKERS", "1")))
-
-
 from .reference import chunk_layout
 from .progress import Progress, verbose_enabled, describe_call, expected_seconds
 
@@ -460,17 +454,17 @@ class _HostMerge:
 
     Asynchronous mode (the classic engine's CQSA_FWD_MERGE_ASYNC design): the fold of wave k runs on
     a worker thread after the wave's D2H event, while the main thread streams and launches wave k+1;
-    the GPU no longer idles through the fold. With ``workers`` > 1 each worker owns a fixed range of
-    token ids and folds that part of every wave (``tb.uniq`` is sorted, so a part is a slice): the
-    fold is elementwise per token and every token is folded by one worker in submission order, so the
-    fold order per token is the wave order and the result is bit-identical to the synchronous mode for
-    any worker count. (Workers taking whole waves would race on the tokens two waves share.) Two
-    pinned slots bound the waves in flight: a slot is reused only once every fold that read it has
+    the GPU no longer idles through the fold. One worker folds the waves in submission order, so the
+    result is bit-identical to the synchronous mode. (A token-range split over 2 workers was measured
+    and removed: job 14313570, A100-SXM4-80GB, results/ultimate/fold_workers_ab.json -- one worker was
+    fastest in all 6 cells, 2 workers 1.006-1.071x slower; merge_wait_s was the same for 1 and 2 workers,
+    so the fold is already hidden behind the next wave and a second worker only adds host contention.) Two
+    pinned slots bound the waves in flight: a slot is reused only once the fold that read it has
     returned, which is also where a fold's exception resurfaces on the caller's thread.
-    ``fold_s``/``wait_s``: seconds spent folding (summed over workers) and blocked waiting for a slot.
+    ``fold_s``/``wait_s``: seconds spent folding and blocked waiting for a slot (telemetry).
     """
 
-    def __init__(self, acc_h, l_h, m_h, u_max: int, dev, async_merge: bool, workers: int = 1):
+    def __init__(self, acc_h, l_h, m_h, u_max: int, dev, async_merge: bool):
         H, D = acc_h.shape[1], acc_h.shape[2]
         self.acc_h, self.l_h, self.m_h, self.dev = acc_h, l_h, m_h, dev
         n_slots = 2 if async_merge else 1
@@ -479,30 +473,28 @@ class _HostMerge:
                        torch.empty((u_max, H), dtype=torch.float32, pin_memory=True),
                        torch.empty((u_max, H), dtype=torch.float32, pin_memory=True),
                        torch.empty(u_max, dtype=torch.int64, pin_memory=True)) for _ in range(n_slots)]
-        self.pending = [[] for _ in range(n_slots)]      # futures of the folds reading each slot (async)
-        n_workers = max(1, int(workers)) if async_merge else 0
-        self.pools = [ThreadPoolExecutor(max_workers=1) for _ in range(n_workers)]
-        N = acc_h.shape[0]
-        self.bounds = torch.tensor([N * j // max(1, n_workers) for j in range(n_workers + 1)], dtype=torch.int64)
-        self.fold_s = [0.0] * max(1, n_workers)
+        self.pending = [None] * n_slots                  # future of the fold reading each slot (async)
+        self.pool = ThreadPoolExecutor(max_workers=1) if async_merge else None
+        self.async_merge = bool(async_merge)
+        self.fold_s = 0.0
         self.wait_s = 0.0
         self.n = 0
 
     def _wait(self, slot: int):
-        futures, self.pending[slot] = self.pending[slot], []
+        future, self.pending[slot] = self.pending[slot], None
+        if future is None:
+            return
         t0 = time.perf_counter()
-        for f in futures:
-            f.result()                        # re-raises the fold's exception here, not in the worker
-        self.wait_s += time.perf_counter() - t0
+        try:
+            future.result()                   # re-raises the fold's exception here, not in the worker
+        finally:
+            self.wait_s += time.perf_counter() - t0
 
-    def _fold(self, j: int, landed, si, sa, sl, sm):
+    def _fold(self, landed, si, sa, sl, sm):
         landed.synchronize()
         t0 = time.perf_counter()
-        if len(self.pools) > 1:
-            a, b = torch.searchsorted(si, self.bounds[j:j + 2]).tolist()
-            si, sa, sl, sm = si[a:b], sa[a:b], sl[a:b], sm[a:b]
         _fold_host(self.acc_h, self.l_h, self.m_h, si, sa, sl, sm)
-        self.fold_s[j] += time.perf_counter() - t0
+        self.fold_s += time.perf_counter() - t0
 
     def merge(self, merge_fn, tb: WaveTables):
         slot = self.n % len(self.slots); self.n += 1
@@ -520,10 +512,10 @@ class _HostMerge:
         si.copy_(tb.uniq, non_blocking=True)
         landed = torch.cuda.Event(); landed.record(torch.cuda.current_stream(dev))
         del acc_w, l_w, m_w, local           # stream-ordered: the allocator reuses them only after the D2H
-        if not self.pools:
-            self._fold(0, landed, si, sa, sl, sm)
+        if self.pool is None:
+            self._fold(landed, si, sa, sl, sm)
         else:
-            self.pending[slot] = [pool.submit(self._fold, j, landed, si, sa, sl, sm) for j, pool in enumerate(self.pools)]
+            self.pending[slot] = self.pool.submit(self._fold, landed, si, sa, sl, sm)
 
     def drain(self):
         """Every submitted fold has been applied (or its exception raised)."""
@@ -531,10 +523,10 @@ class _HostMerge:
             self._wait(slot)
 
     def close(self):
-        """Release the workers and the pinned slots; never raises (used on the error path too)."""
-        for pool in self.pools:
-            pool.shutdown(wait=True)
-        self.pools = []
+        """Release the worker and the pinned slots; never raises (used on the error path too)."""
+        if self.pool is not None:
+            self.pool.shutdown(wait=True)
+            self.pool = None
         self.slots = []
 
 
@@ -618,13 +610,12 @@ def wave_forward(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *, causal: b
         u_max = max(min(sum(int(t.local_size) for t in w),
                         sum(sizes[j] for j in set().union(*[set(level1_chunks(t, c, interest_set)) for t in w])))
                     for w in waves)
-        merger = _HostMerge(acc, acc_l, acc_m, u_max, dev, merge_async_enabled(), fold_workers())
+        merger = _HostMerge(acc, acc_l, acc_m, u_max, dev, merge_async_enabled())
     info = dict(n_subproblems=len(tasks), n_waves=len(waves), wave_sizes=[len(w) for w in waves],
                 wave_tokens=[sum(int(t.local_size) for t in w) for w in waves], max_wave_tokens=int(max_tokens),
                 itr=int(itr), c=int(c), interest_set=tuple(interest_set), host_resident=not on_device,
                 accumulate_on_gpu=acc_gpu, kernel=kern, pool_slots=(None if pool is None else pool.n_slots),
-                gather=bool(gather), merge_async=(None if merger is None else bool(merger.pools)),
-                fold_workers=(None if merger is None else len(merger.pools)))
+                gather=bool(gather), merge_async=(None if merger is None else merger.async_merge))
     total_tokens = sum(int(t.local_size) for t in tasks) * B
     progress = Progress(
         total_tokens, enabled=verbose_enabled(verbose), unit="tok",
@@ -719,8 +710,8 @@ def wave_forward(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *, causal: b
             lse[b].copy_(torch.where(torch.isfinite(acc_m), lse_b, torch.full_like(lse_b, float("-inf"))).transpose(0, 1))
     finally:
         if merger is not None:
-            merger.close()                  # on an error the workers finish their queues, then exit
-            info.update(merge_fold_s=sum(merger.fold_s), merge_wait_s=merger.wait_s)
+            merger.close()                  # on an error the worker finishes its queue, then exits
+            info.update(merge_fold_s=merger.fold_s, merge_wait_s=merger.wait_s)
     info["lse"] = lse
     del acc, acc_l, acc_m, merger
     if pool is not None:

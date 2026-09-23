@@ -18,6 +18,11 @@ shape; the parent first checks at N=131072 that every wave arm is bit-identical 
 classic engine agrees to rel 1e-5. GPU name in every row. No FA-2 arm: this A/B compares host folds.
 
     python -P benchmarks/ultimate/fold_workers_ab.py run --out results/ultimate/fold_workers_ab.json
+
+VERDICT (job 14313570, A100-SXM4-80GB, snapshot ultimate-aeb401b; results/ultimate/fold_workers_ab.json):
+wave_w1 fastest in all 6 cells; wave_w2 1.006-1.071x slower with the same merge_wait_s. The multi-worker
+option (CQSA_WAVE_FOLD_WORKERS) was then removed from native_wave.py, so on later code the wave_w2 arm
+equals wave_w1; the harness is kept for the record and for the fold telemetry arms.
 """
 import argparse, gc, json, os, resource, socket, subprocess, sys, time
 

@@ -1,0 +1,1387 @@
+{
+ "info": {
+  "gpu": "NVIDIA A100-SXM4-80GB",
+  "torch": "2.10.0+cu130",
+  "node": "della-l09g2",
+  "slurm_job": "14313570",
+  "cpu_threads": 8,
+  "cpus": 16,
+  "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+  "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB"
+ },
+ "config": {
+  "B": 1,
+  "H": 8,
+  "D": 64,
+  "dtype": "fp16",
+  "causal": true,
+  "acc": "cpu",
+  "residency": "host",
+  "reps": 2,
+  "warmup": 1,
+  "shapes": [
+   [
+    7,
+    1
+   ],
+   [
+    73,
+    1
+   ],
+   [
+    7,
+    2
+   ]
+  ],
+  "arms": [
+   "wave_sync",
+   "wave_w1",
+   "wave_w2",
+   "wave_w1_2t",
+   "classic"
+  ]
+ },
+ "arm_check": {
+  "c7_itr1": {
+   "wave_arms_bit_identical": true,
+   "rel_classic_vs_wave": 2.7502939009358737e-08
+  },
+  "c73_itr1": {
+   "wave_arms_bit_identical": true,
+   "rel_classic_vs_wave": 5.332909719482408e-08
+  },
+  "c7_itr2": {
+   "wave_arms_bit_identical": true,
+   "rel_classic_vs_wave": 4.4023067131746626e-08
+  }
+ },
+ "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs",
+ "rows": [
+  {
+   "arm": "wave_sync",
+   "N": 1048576,
+   "c": 7,
+   "itr": 1,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    9.645984200993553,
+    9.61922574788332
+   ],
+   "mean_s": 9.632604974438436,
+   "min_s": 9.61922574788332,
+   "merge_fold_s": [
+    0.934405145002529,
+    0.9245497959200293
+   ],
+   "merge_wait_s": [
+    3.896886482834816e-06,
+    2.964865416288376e-06
+   ],
+   "peak_gib": 6.254309177398682,
+   "host_maxrss_gib": 13.001018524169922,
+   "n_waves": 4,
+   "wave_sizes": [
+    2,
+    2,
+    2,
+    1
+   ],
+   "fold_workers": 0,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  },
+  {
+   "arm": "wave_w1",
+   "N": 1048576,
+   "c": 7,
+   "itr": 1,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    8.918436162173748,
+    8.883329378208145
+   ],
+   "mean_s": 8.900882770190947,
+   "min_s": 8.883329378208145,
+   "merge_fold_s": [
+    1.0452451091259718,
+    0.9970535540487617
+   ],
+   "merge_wait_s": [
+    1.3309591910801828,
+    1.3305248296819627
+   ],
+   "peak_gib": 6.254309177398682,
+   "host_maxrss_gib": 15.246776580810547,
+   "n_waves": 4,
+   "wave_sizes": [
+    2,
+    2,
+    2,
+    1
+   ],
+   "fold_workers": 1,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  },
+  {
+   "arm": "wave_w2",
+   "N": 1048576,
+   "c": 7,
+   "itr": 1,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    9.048763487953693,
+    8.984382978873327
+   ],
+   "mean_s": 9.01657323341351,
+   "min_s": 8.984382978873327,
+   "merge_fold_s": [
+    1.6656801188364625,
+    1.7041687637101859
+   ],
+   "merge_wait_s": [
+    1.344666477991268,
+    1.327100852271542
+   ],
+   "peak_gib": 6.254309177398682,
+   "host_maxrss_gib": 15.001285552978516,
+   "n_waves": 4,
+   "wave_sizes": [
+    2,
+    2,
+    2,
+    1
+   ],
+   "fold_workers": 2,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  },
+  {
+   "arm": "wave_w1_2t",
+   "N": 1048576,
+   "c": 7,
+   "itr": 1,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    8.93150321720168,
+    8.944131473079324
+   ],
+   "mean_s": 8.937817345140502,
+   "min_s": 8.93150321720168,
+   "merge_fold_s": [
+    1.0513028148561716,
+    1.0356785783078521
+   ],
+   "merge_wait_s": [
+    1.3406110492069274,
+    1.3455326557159424
+   ],
+   "peak_gib": 6.254309177398682,
+   "host_maxrss_gib": 15.12405776977539,
+   "n_waves": 4,
+   "wave_sizes": [
+    2,
+    2,
+    2,
+    1
+   ],
+   "fold_workers": 1,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  },
+  {
+   "arm": "classic",
+   "N": 1048576,
+   "c": 7,
+   "itr": 1,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    9.188425009837374,
+    9.251380868023261
+   ],
+   "mean_s": 9.219902938930318,
+   "min_s": 9.188425009837374,
+   "merge_fold_s": [
+    null,
+    null
+   ],
+   "merge_wait_s": [
+    null,
+    null
+   ],
+   "peak_gib": 3.88059663772583,
+   "host_maxrss_gib": 14.543262481689453,
+   "n_waves": null,
+   "wave_sizes": null,
+   "fold_workers": null,
+   "n_parallel": 2,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  },
+  {
+   "arm": "wave_sync",
+   "N": 1048576,
+   "c": 73,
+   "itr": 1,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    11.73335687816143,
+    11.691149345133454
+   ],
+   "mean_s": 11.712253111647442,
+   "min_s": 11.691149345133454,
+   "merge_fold_s": [
+    2.3879374279640615,
+    2.377913160249591
+   ],
+   "merge_wait_s": [
+    6.174203008413315e-06,
+    6.151385605335236e-06
+   ],
+   "peak_gib": 6.543076515197754,
+   "host_maxrss_gib": 12.6419677734375,
+   "n_waves": 10,
+   "wave_sizes": [
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    1
+   ],
+   "fold_workers": 0,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  },
+  {
+   "arm": "wave_w1",
+   "N": 1048576,
+   "c": 73,
+   "itr": 1,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    9.642753259046003,
+    9.695344667881727
+   ],
+   "mean_s": 9.669048963463865,
+   "min_s": 9.642753259046003,
+   "merge_fold_s": [
+    2.53688784991391,
+    2.6366931833326817
+   ],
+   "merge_wait_s": [
+    0.27431370015256107,
+    0.32249380089342594
+   ],
+   "peak_gib": 6.543076515197754,
+   "host_maxrss_gib": 14.757911682128906,
+   "n_waves": 10,
+   "wave_sizes": [
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    1
+   ],
+   "fold_workers": 1,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  },
+  {
+   "arm": "wave_w2",
+   "N": 1048576,
+   "c": 73,
+   "itr": 1,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    10.316776772029698,
+    10.397837821859866
+   ],
+   "mean_s": 10.357307296944782,
+   "min_s": 10.316776772029698,
+   "merge_fold_s": [
+    4.626310113817453,
+    4.729483217000961
+   ],
+   "merge_wait_s": [
+    0.26997641660273075,
+    0.2720301141962409
+   ],
+   "peak_gib": 6.543076515197754,
+   "host_maxrss_gib": 14.936187744140625,
+   "n_waves": 10,
+   "wave_sizes": [
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    1
+   ],
+   "fold_workers": 2,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  },
+  {
+   "arm": "wave_w1_2t",
+   "N": 1048576,
+   "c": 73,
+   "itr": 1,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    10.053788378834724,
+    10.08937536389567
+   ],
+   "mean_s": 10.071581871365197,
+   "min_s": 10.053788378834724,
+   "merge_fold_s": [
+    2.659052809467539,
+    2.6110850190743804
+   ],
+   "merge_wait_s": [
+    0.3224398826714605,
+    0.315520929871127
+   ],
+   "peak_gib": 6.543076515197754,
+   "host_maxrss_gib": 14.643924713134766,
+   "n_waves": 10,
+   "wave_sizes": [
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    1
+   ],
+   "fold_workers": 1,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  },
+  {
+   "arm": "classic",
+   "N": 1048576,
+   "c": 73,
+   "itr": 1,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    11.487136122072116,
+    11.305333171971142
+   ],
+   "mean_s": 11.396234647021629,
+   "min_s": 11.305333171971142,
+   "merge_fold_s": [
+    null,
+    null
+   ],
+   "merge_wait_s": [
+    null,
+    null
+   ],
+   "peak_gib": 2.0,
+   "host_maxrss_gib": 9.387813568115234,
+   "n_waves": null,
+   "wave_sizes": null,
+   "fold_workers": null,
+   "n_parallel": 2,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  },
+  {
+   "arm": "wave_sync",
+   "N": 1048576,
+   "c": 7,
+   "itr": 2,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    11.040960167068988,
+    11.038172916974872
+   ],
+   "mean_s": 11.03956654202193,
+   "min_s": 11.038172916974872,
+   "merge_fold_s": [
+    1.8250648016110063,
+    1.8521350889932364
+   ],
+   "merge_wait_s": [
+    5.641020834445953e-06,
+    5.812849849462509e-06
+   ],
+   "peak_gib": 6.211064338684082,
+   "host_maxrss_gib": 12.772911071777344,
+   "n_waves": 10,
+   "wave_sizes": [
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    4
+   ],
+   "fold_workers": 0,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  },
+  {
+   "arm": "wave_w1",
+   "N": 1048576,
+   "c": 7,
+   "itr": 2,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    9.411908069858328,
+    9.394482319941744
+   ],
+   "mean_s": 9.403195194900036,
+   "min_s": 9.394482319941744,
+   "merge_fold_s": [
+    1.9599297600798309,
+    1.9535786868073046
+   ],
+   "merge_wait_s": [
+    0.9443150362931192,
+    0.9280555087607354
+   ],
+   "peak_gib": 6.211064338684082,
+   "host_maxrss_gib": 14.961414337158203,
+   "n_waves": 10,
+   "wave_sizes": [
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    4
+   ],
+   "fold_workers": 1,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  },
+  {
+   "arm": "wave_w2",
+   "N": 1048576,
+   "c": 7,
+   "itr": 2,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    9.612483037868515,
+    9.573793682036921
+   ],
+   "mean_s": 9.593138359952718,
+   "min_s": 9.573793682036921,
+   "merge_fold_s": [
+    3.2481183712370694,
+    3.3629424734972417
+   ],
+   "merge_wait_s": [
+    0.9375288977753371,
+    0.9460048379842192
+   ],
+   "peak_gib": 6.211064338684082,
+   "host_maxrss_gib": 14.932849884033203,
+   "n_waves": 10,
+   "wave_sizes": [
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    4
+   ],
+   "fold_workers": 2,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  },
+  {
+   "arm": "wave_w1_2t",
+   "N": 1048576,
+   "c": 7,
+   "itr": 2,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    9.473915011854842,
+    9.446978832827881
+   ],
+   "mean_s": 9.460446922341362,
+   "min_s": 9.446978832827881,
+   "merge_fold_s": [
+    2.1145252238493413,
+    2.1170701214578003
+   ],
+   "merge_wait_s": [
+    0.9407334139104933,
+    0.9460055022500455
+   ],
+   "peak_gib": 6.211064338684082,
+   "host_maxrss_gib": 15.030590057373047,
+   "n_waves": 10,
+   "wave_sizes": [
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    4
+   ],
+   "fold_workers": 1,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  },
+  {
+   "arm": "classic",
+   "N": 1048576,
+   "c": 7,
+   "itr": 2,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    10.333591956179589,
+    10.30734713608399
+   ],
+   "mean_s": 10.32046954613179,
+   "min_s": 10.30734713608399,
+   "merge_fold_s": [
+    null,
+    null
+   ],
+   "merge_wait_s": [
+    null,
+    null
+   ],
+   "peak_gib": 2.0,
+   "host_maxrss_gib": 10.68624496459961,
+   "n_waves": null,
+   "wave_sizes": null,
+   "fold_workers": null,
+   "n_parallel": 2,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  },
+  {
+   "arm": "wave_sync",
+   "N": 2097152,
+   "c": 7,
+   "itr": 1,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    35.246736833127216,
+    35.22964551812038
+   ],
+   "mean_s": 35.2381911756238,
+   "min_s": 35.22964551812038,
+   "merge_fold_s": [
+    1.8367338068783283,
+    1.8206334970891476
+   ],
+   "merge_wait_s": [
+    3.2777898013591766e-06,
+    6.591901183128357e-06
+   ],
+   "peak_gib": 12.504093170166016,
+   "host_maxrss_gib": 25.071388244628906,
+   "n_waves": 4,
+   "wave_sizes": [
+    2,
+    2,
+    2,
+    1
+   ],
+   "fold_workers": 0,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  },
+  {
+   "arm": "wave_w1",
+   "N": 2097152,
+   "c": 7,
+   "itr": 1,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    33.74995292490348,
+    33.80465129390359
+   ],
+   "mean_s": 33.777302109403536,
+   "min_s": 33.74995292490348,
+   "merge_fold_s": [
+    2.034538775216788,
+    2.007973334752023
+   ],
+   "merge_wait_s": [
+    4.944839569739997,
+    4.947404273319989
+   ],
+   "peak_gib": 12.504093170166016,
+   "host_maxrss_gib": 29.174678802490234,
+   "n_waves": 4,
+   "wave_sizes": [
+    2,
+    2,
+    2,
+    1
+   ],
+   "fold_workers": 1,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  },
+  {
+   "arm": "wave_w2",
+   "N": 2097152,
+   "c": 7,
+   "itr": 1,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    33.95758759393357,
+    33.97701129387133
+   ],
+   "mean_s": 33.96729944390245,
+   "min_s": 33.95758759393357,
+   "merge_fold_s": [
+    3.2866617960389704,
+    3.196055530337617
+   ],
+   "merge_wait_s": [
+    4.949101170990616,
+    4.942873371299356
+   ],
+   "peak_gib": 12.504093170166016,
+   "host_maxrss_gib": 28.675228118896484,
+   "n_waves": 4,
+   "wave_sizes": [
+    2,
+    2,
+    2,
+    1
+   ],
+   "fold_workers": 2,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  },
+  {
+   "arm": "wave_w1_2t",
+   "N": 2097152,
+   "c": 7,
+   "itr": 1,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    33.89444054104388,
+    33.92312124813907
+   ],
+   "mean_s": 33.90878089459147,
+   "min_s": 33.89444054104388,
+   "merge_fold_s": [
+    2.076742583885789,
+    2.099197644274682
+   ],
+   "merge_wait_s": [
+    4.974739198805764,
+    4.981115488568321
+   ],
+   "peak_gib": 12.504093170166016,
+   "host_maxrss_gib": 29.171382904052734,
+   "n_waves": 4,
+   "wave_sizes": [
+    2,
+    2,
+    2,
+    1
+   ],
+   "fold_workers": 1,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  },
+  {
+   "arm": "classic",
+   "N": 2097152,
+   "c": 7,
+   "itr": 1,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    34.24580458807759,
+    34.21690780692734
+   ],
+   "mean_s": 34.231356197502464,
+   "min_s": 34.21690780692734,
+   "merge_fold_s": [
+    null,
+    null
+   ],
+   "merge_wait_s": [
+    null,
+    null
+   ],
+   "peak_gib": 7.757772445678711,
+   "host_maxrss_gib": 28.46926498413086,
+   "n_waves": null,
+   "wave_sizes": null,
+   "fold_workers": null,
+   "n_parallel": 2,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  },
+  {
+   "arm": "wave_sync",
+   "N": 2097152,
+   "c": 73,
+   "itr": 1,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    38.84509986708872,
+    38.947288897121325
+   ],
+   "mean_s": 38.89619438210502,
+   "min_s": 38.84509986708872,
+   "merge_fold_s": [
+    4.729950588895008,
+    4.806632487569004
+   ],
+   "merge_wait_s": [
+    7.012858986854553e-06,
+    6.774440407752991e-06
+   ],
+   "peak_gib": 13.05045223236084,
+   "host_maxrss_gib": 24.176559448242188,
+   "n_waves": 10,
+   "wave_sizes": [
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    1
+   ],
+   "fold_workers": 0,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  },
+  {
+   "arm": "wave_w1",
+   "N": 2097152,
+   "c": 73,
+   "itr": 1,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    34.46736498596147,
+    34.55953550781123
+   ],
+   "mean_s": 34.51345024688635,
+   "min_s": 34.46736498596147,
+   "merge_fold_s": [
+    5.20343775418587,
+    5.388961142860353
+   ],
+   "merge_wait_s": [
+    0.6056733387522399,
+    0.6229001341853291
+   ],
+   "peak_gib": 13.05045223236084,
+   "host_maxrss_gib": 28.39242935180664,
+   "n_waves": 10,
+   "wave_sizes": [
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    1
+   ],
+   "fold_workers": 1,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  },
+  {
+   "arm": "wave_w2",
+   "N": 2097152,
+   "c": 73,
+   "itr": 1,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    35.67387129296549,
+    35.6684399319347
+   ],
+   "mean_s": 35.67115561245009,
+   "min_s": 35.6684399319347,
+   "merge_fold_s": [
+    9.244420839939266,
+    9.155583671061322
+   ],
+   "merge_wait_s": [
+    0.5570464041084051,
+    0.5587095359805971
+   ],
+   "peak_gib": 13.05045223236084,
+   "host_maxrss_gib": 29.056804656982422,
+   "n_waves": 10,
+   "wave_sizes": [
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    1
+   ],
+   "fold_workers": 2,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  },
+  {
+   "arm": "wave_w1_2t",
+   "N": 2097152,
+   "c": 73,
+   "itr": 1,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    35.36363007500768,
+    35.32341577182524
+   ],
+   "mean_s": 35.34352292341646,
+   "min_s": 35.32341577182524,
+   "merge_fold_s": [
+    5.224324943264946,
+    5.231880207778886
+   ],
+   "merge_wait_s": [
+    0.6227733138948679,
+    0.634755983017385
+   ],
+   "peak_gib": 13.05045223236084,
+   "host_maxrss_gib": 28.308238983154297,
+   "n_waves": 10,
+   "wave_sizes": [
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    1
+   ],
+   "fold_workers": 1,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  },
+  {
+   "arm": "classic",
+   "N": 2097152,
+   "c": 73,
+   "itr": 1,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    38.734400850953534,
+    38.67232120898552
+   ],
+   "mean_s": 38.70336102996953,
+   "min_s": 38.67232120898552,
+   "merge_fold_s": [
+    null,
+    null
+   ],
+   "merge_wait_s": [
+    null,
+    null
+   ],
+   "peak_gib": 4.0,
+   "host_maxrss_gib": 17.93695068359375,
+   "n_waves": null,
+   "wave_sizes": null,
+   "fold_workers": null,
+   "n_parallel": 2,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  },
+  {
+   "arm": "wave_sync",
+   "N": 2097152,
+   "c": 7,
+   "itr": 2,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    37.8196650671307,
+    37.83602326293476
+   ],
+   "mean_s": 37.82784416503273,
+   "min_s": 37.8196650671307,
+   "merge_fold_s": [
+    3.580828555393964,
+    3.596660101786256
+   ],
+   "merge_wait_s": [
+    6.912974640727043e-06,
+    7.38631933927536e-06
+   ],
+   "peak_gib": 12.415907859802246,
+   "host_maxrss_gib": 24.74164581298828,
+   "n_waves": 10,
+   "wave_sizes": [
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    4
+   ],
+   "fold_workers": 0,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  },
+  {
+   "arm": "wave_w1",
+   "N": 2097152,
+   "c": 7,
+   "itr": 2,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    34.62130981404334,
+    34.60927904793061
+   ],
+   "mean_s": 34.61529443098698,
+   "min_s": 34.60927904793061,
+   "merge_fold_s": [
+    3.8764925349969417,
+    3.749360835412517
+   ],
+   "merge_wait_s": [
+    3.326959337806329,
+    3.2887570336461067
+   ],
+   "peak_gib": 12.415907859802246,
+   "host_maxrss_gib": 28.973651885986328,
+   "n_waves": 10,
+   "wave_sizes": [
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    4
+   ],
+   "fold_workers": 1,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  },
+  {
+   "arm": "wave_w2",
+   "N": 2097152,
+   "c": 7,
+   "itr": 2,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    34.972684249980375,
+    34.94255933002569
+   ],
+   "mean_s": 34.95762179000303,
+   "min_s": 34.94255933002569,
+   "merge_fold_s": [
+    6.374953121645376,
+    6.5064437235705554
+   ],
+   "merge_wait_s": [
+    3.313943764194846,
+    3.3215279136784375
+   ],
+   "peak_gib": 12.415907859802246,
+   "host_maxrss_gib": 29.358890533447266,
+   "n_waves": 10,
+   "wave_sizes": [
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    4
+   ],
+   "fold_workers": 2,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  },
+  {
+   "arm": "wave_w1_2t",
+   "N": 2097152,
+   "c": 7,
+   "itr": 2,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    34.7426195461303,
+    34.719413672806695
+   ],
+   "mean_s": 34.7310166094685,
+   "min_s": 34.719413672806695,
+   "merge_fold_s": [
+    4.074008422438055,
+    4.08154476294294
+   ],
+   "merge_wait_s": [
+    3.3351317644119263,
+    3.332959519000724
+   ],
+   "peak_gib": 12.415907859802246,
+   "host_maxrss_gib": 28.95623016357422,
+   "n_waves": 10,
+   "wave_sizes": [
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    4
+   ],
+   "fold_workers": 1,
+   "n_parallel": null,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  },
+  {
+   "arm": "classic",
+   "N": 2097152,
+   "c": 7,
+   "itr": 2,
+   "reps": 2,
+   "warmup": 1,
+   "times_s": [
+    35.92981179105118,
+    36.13562109693885
+   ],
+   "mean_s": 36.032716443995014,
+   "min_s": 35.92981179105118,
+   "merge_fold_s": [
+    null,
+    null
+   ],
+   "merge_wait_s": [
+    null,
+    null
+   ],
+   "peak_gib": 4.0,
+   "host_maxrss_gib": 20.656280517578125,
+   "n_waves": null,
+   "wave_sizes": null,
+   "fold_workers": null,
+   "n_parallel": 2,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g2",
+   "slurm_job": "14313570",
+   "cpu_threads": 8,
+   "cpus": 16,
+   "code_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-aeb401b",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "note": "host-fold A/B, no FA-2 arm; every wave arm is the same kernel work, only the host fold differs"
+  }
+ ]
+}

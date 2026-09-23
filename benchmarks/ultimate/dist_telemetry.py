@@ -219,8 +219,20 @@ def main(argv=None):
 
     import torch.distributed as dist
     from stream_cqsa import scheduler as S
-    from stream_cqsa.distributed import dist_stream_cqsa_forward, dist_stream_cqsa_backward
-    from stream_cqsa.stable_stream import stream_cqsa_forward, stream_cqsa_backward
+    from stream_cqsa.distributed import (dist_stream_cqsa_forward, dist_stream_cqsa_backward, _assign, _comm_device,
+                                         _FORWARD_ONLY_KW)
+    from stream_cqsa.stable_stream import (stream_cqsa_forward, stream_cqsa_backward, build_tasks_cached,
+                                           task_seg_align_for)
+
+    def warm_tasks(N, itr, seg_align, shared):
+        """Untimed, every rank: the engine's pinned task lists of this depth and (itr=1) of the next one,
+        which the split units run at -- built once per shape in a repeated workload."""
+        depths = [(itr, task_seg_align_for(seg_align, in_place=shared))]
+        if itr == 1:
+            depths.append((2, task_seg_align_for(seg_align, in_place=False)))
+        for d, sa in depths:
+            build_tasks_cached(N, d, B=B, H=H, D=D, itemsize=2, sorted_gather=True, pin=True, c=C,
+                               interest_set=INTEREST_SET, seg_align=sa)
 
     # Eager NCCL init (device_id) unless a rank is throttled: the eager init makes the primary context
     # current again, and the green context would stop applying to the streams created afterwards.
@@ -312,6 +324,11 @@ def main(argv=None):
         akw = dict(kw, seg_align=seg_align, shared_chunks=shared) if direction == "fwd" else \
             dict(causal=True, allow_escalation=False, max_parallel=args.npar, accumulate_on_gpu=True, seg_align=seg_align)
         rate = my_rates[arm["rates"]]
+        # untimed: the assignment (live-tile work model, children, the plan cache) -- a repeated call's state
+        _assign(inputs[0], itr=itr, causal=True, group=None, scheduler=arm["scheduler"], split=args.split, tol=0.05,
+                max_extra_depth=2, rate=rate, budget_bytes=None,
+                engine_kw=akw if direction == "fwd" else {k_: v_ for k_, v_ in akw.items() if k_ not in _FORWARD_ONLY_KW},
+                direction=direction, dev=_comm_device(None))
         release_caches()
         torch.cuda.synchronize()
         base_alloc = torch.cuda.memory_allocated()
@@ -405,6 +422,7 @@ def main(argv=None):
             for seg_align, shared in layouts:
                 layout = layout_name(seg_align, shared)
                 q, k, v = make_inputs(N, 0)
+                warm_tasks(N, itr, seg_align, shared)
                 ref = None
                 t_single = None
                 if rank == 0 and not args.no_ref:
@@ -440,6 +458,7 @@ def main(argv=None):
         for itr in args.bwd_itr:
             for N in [n for n in args.N if n <= args.bwd_max_n]:
                 q, k, v, do = (t.cuda() for t in make_inputs(N, 1, n=4))
+                warm_tasks(N, itr, 128, False)
                 # reference forward output and global lse on every rank (the backward's inputs), then
                 # rank 0's single-device backward
                 o1, i1 = stream_cqsa_forward(q, k, v, itr=itr, causal=True, allow_escalation=False,

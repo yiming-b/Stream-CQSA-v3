@@ -10,9 +10,11 @@
 #  part 1 (homogeneous): N in {1M, 2M} x itr in {1, 2}, production layouts (itr=1 aligned + shared chunk
 #    pool, itr=2 aligned gather), arms {rr, lpt} x {allreduce (replicated), reduce_scatter (sharded)},
 #    single-GPU reference on rank 0 in the same job; backward rows at 1M itr=1 (device-resident).
-#  part 2 (simulated heterogeneity): rank 3 confined to 54 of its 108 SMs by a CUDA green context (a
-#    sleep-free rate cap); arms rr, lpt with the seed rates (= equal ranks), lpt / lpt+reduce_scatter with
-#    the per-rank rates measured at startup; 1M, 2M at itr=1 and 1M at itr=2.
+#  part 2 (simulated heterogeneity): rank 1 confined to 54 of its 108 SMs by a CUDA green context (a
+#    sleep-free rate cap; rank 1 because round-robin gives it 2 of the 7 itr=1 tasks -- rank 3 gets one,
+#    which a half-speed rank absorbs by accident); arms rr, lpt with the seed rates (= equal ranks),
+#    lpt / lpt+reduce_scatter with the per-rank rates measured at startup (host-streamed calibration);
+#    1M, 2M at itr=1 and 1M at itr=2.
 # Host memory: each rank holds fp16 Q/K/V token-major (3 KiB/token: 6 GiB at 2M) plus pinned staging
 # (<= 3 GiB/slot at itr=1, one slot, x1.5 rounding) and ~1.5 GiB interpreter/CUDA context; outputs, the
 # reference and the backward's gradients stay on the devices. 4 ranks ~50 GiB at 2M -> 75G.
@@ -42,12 +44,12 @@ python -P -m torch.distributed.run --standalone --nproc_per_node=4 \
     --tag homog --out "$OUT/results/ultimate/dist_sched_homog.json"
 echo "part 1 exit $?  $(date +%T)"
 python -P -m torch.distributed.run --standalone --nproc_per_node=4 \
-    "$ROOT/benchmarks/ultimate/dist_telemetry.py" 1048576 2097152 --itr 1 --layouts prod --throttle 3:54 \
+    "$ROOT/benchmarks/ultimate/dist_telemetry.py" 1048576 2097152 --itr 1 --layouts prod --throttle 1:54 \
     --arms rr/allreduce/seed lpt/allreduce/seed lpt/allreduce/measured lpt/reduce_scatter/measured \
     --tag hetero_sm54 --out "$OUT/results/ultimate/dist_sched_hetero.json"
 echo "part 2a exit $?  $(date +%T)"
 python -P -m torch.distributed.run --standalone --nproc_per_node=4 \
-    "$ROOT/benchmarks/ultimate/dist_telemetry.py" 1048576 --itr 2 --layouts prod --throttle 3:54 \
+    "$ROOT/benchmarks/ultimate/dist_telemetry.py" 1048576 --itr 2 --layouts prod --throttle 1:54 \
     --arms rr/allreduce/seed lpt/allreduce/seed lpt/allreduce/measured \
     --tag hetero_sm54_itr2 --out "$OUT/results/ultimate/dist_sched_hetero_itr2.json"
 echo "part 2b exit $?  $(date +%T)"

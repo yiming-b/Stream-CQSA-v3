@@ -130,6 +130,7 @@ class WorkModel:
         self.causal, self.sorted_gather = bool(causal), bool(sorted_gather)
         self._align = seg_align_for_depth or (lambda d: None)
         self._rows: dict[tuple, np.ndarray] = {}
+        self._kids: dict[tuple, list] = {}
         self.base_units: list[Unit] | None = None      # the call's own task list (set by the driver)
 
     def _record(self, depth: int, path: tuple, path_idx: int, blk_and) -> np.ndarray:
@@ -172,8 +173,11 @@ class WorkModel:
         """The unit's ``c`` children at depth + 1 (non-empty ones), i.e. ``refine_task``'s."""
         if u.rows is not None:
             raise ValueError("a row span has no children")
-        kids = [self.unit_for_path(u.path + (j,)) for j in range(self.c)]
-        return [k for k in kids if k is not None]
+        kids = self._kids.get(u.path)
+        if kids is None:
+            kids = [k for k in (self.unit_for_path(u.path + (j,)) for j in range(self.c)) if k is not None]
+            self._kids[u.path] = kids
+        return list(kids)
 
     def refinable(self, u: Unit) -> bool:
         """Children are an exact partition of the parent only when the parent can be refined under the

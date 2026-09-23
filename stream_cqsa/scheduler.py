@@ -305,20 +305,29 @@ def save_device_rate(r: DeviceRate) -> str:
 
 
 def calibrate_rate(device=None, *, N: int = 262144, H: int = 8, D: int = 64, c: int = 7, reps: int = 2,
-                   save: bool = False, engine_kw: dict | None = None) -> DeviceRate:
-    """Measure this device's live-tile rate: the classic engine forward on device-resident inputs
-    (N=262144, c=7, itr=1, causal, fp16: seven aligned 112K-token subproblems, ~0.5 s on an A100),
-    best of ``reps`` after a warm-up. The per-subproblem overhead is subtracted with the seed's
-    ``task_s``. Runs under whatever limits the process has (a green context capping the SMs, a
-    shared GPU), which is the point for a per-rank measurement."""
+                   save: bool = False, engine_kw: dict | None = None, stream_from_host: bool = False) -> DeviceRate:
+    """Measure this device's live-tile rate: the classic engine forward (N=262144, c=7, itr=1, causal,
+    fp16: seven aligned 112K-token subproblems, ~0.5 s on an A100), best of ``reps`` after a warm-up.
+    Device-resident inputs by default (the kernel's rate); ``stream_from_host=True`` measures the
+    host-streamed production path (token-major host inputs, shared chunk pool, device accumulator),
+    whose effective rate also carries the host stages that do not scale with the SMs. The
+    per-subproblem overhead is subtracted with the seed's ``task_s``. Runs under whatever limits the
+    process has (a green context capping the SMs, a shared GPU), which is the point for a per-rank
+    measurement."""
     import torch
     from .stable_stream import build_tasks_cached, stream_cqsa_forward, task_seg_align_for
     dev = torch.device("cuda", torch.cuda.current_device()) if device is None else torch.device(device)
     name = torch.cuda.get_device_name(dev)
     seed = seed_rate(name)
     g = torch.Generator(device="cpu").manual_seed(0)
-    q, k, v = (torch.randn(1, H, N, D, generator=g, dtype=torch.float32).to(torch.float16).to(dev) for _ in range(3))
+    if stream_from_host:
+        q, k, v = (torch.randn(1, N, H, D, generator=g, dtype=torch.float32).to(torch.float16).transpose(1, 2)
+                   for _ in range(3))
+    else:
+        q, k, v = (torch.randn(1, H, N, D, generator=g, dtype=torch.float32).to(torch.float16).to(dev) for _ in range(3))
     kw = dict(itr=1, causal=True, c=c, allow_escalation=False, max_parallel=1)
+    if stream_from_host:
+        kw.update(stream_from_host=True, shared_chunks=True, out_device="acc")
     kw.update(engine_kw or {})
     tasks = build_tasks_cached(N, 1, B=1, H=H, D=D, itemsize=2, sorted_gather=True, pin=True, c=c,
                                interest_set=tuple(kw.get("interest_set", (0, 1, 3))),
@@ -335,7 +344,8 @@ def calibrate_rate(device=None, *, N: int = 262144, H: int = 8, D: int = 64, c: 
         best = min(best, time.perf_counter() - t0)
     compute = max(best - len(tasks) * seed.task_s, 0.5 * best)
     r = DeviceRate(model=name, tile_rate=tiles * (D / 64.0) / compute,
-                   source=f"calibrated {time.strftime('%Y-%m-%d %H:%M')}: N={N} c={c} itr=1 D={D}, {best * 1e3:.1f} ms",
+                   source=(f"calibrated {time.strftime('%Y-%m-%d %H:%M')}: N={N} c={c} itr=1 D={D} "
+                           f"{'host-streamed' if stream_from_host else 'device-resident'}, {best * 1e3:.1f} ms"),
                    task_s=seed.task_s, tok_s=seed.tok_s)
     del q, k, v
     if save:

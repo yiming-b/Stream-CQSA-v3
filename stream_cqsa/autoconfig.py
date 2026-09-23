@@ -47,6 +47,7 @@ from typing import Any, Sequence
 import torch
 
 from .stable_stream import (estimate_monolithic_bytes, estimate_peak_bytes, estimate_peak_bytes_bwd, per_el_floor, effective_free_bytes)
+from .scheduler import device_rate, equal_task_share
 
 GIB = float(1 << 30)
 
@@ -93,6 +94,11 @@ class DeviceSpec:
     total_bytes: int = 0
     n_sm: int = 108
     identical_group: int = 0  # devices with the same model share a group
+    # live 128x128-tile throughput of the forward kernel (tiles/s, one head, D=64, fp16): a cached
+    # calibration of this GPU model (scheduler.calibrate_rate) or the model's seed (scheduler.KNOWN_DEVICE_RATES);
+    # 0 = unknown (treated as equal to the other devices)
+    tile_rate: float = 0.0
+    rate_source: str = ""
 
 
 @dataclass
@@ -103,10 +109,18 @@ class HardwareSpec:
     interconnect_gbs: float = 25.0    # per-direction device<->device bandwidth used by the merge (NVLink ~200, PCIe ~25)
 
     def homogeneous(self) -> bool:
-        return len({d.model for d in self.devices}) <= 1
+        return len({(d.model, d.tile_rate) for d in self.devices}) <= 1
+
+    def rel_rates(self, devices: Sequence[DeviceSpec] | None = None) -> tuple:
+        """Rates of ``devices`` (default: all) relative to the first one (1.0 where unknown)."""
+        devs = list(devices if devices is not None else self.devices)
+        if not devs or not devs[0].tile_rate or any(not d.tile_rate for d in devs):
+            return tuple(1.0 for _ in devs)
+        return tuple(d.tile_rate / devs[0].tile_rate for d in devs)
 
     def summary(self) -> str:
-        devs = ", ".join(f"{d.name}={d.model} {d.budget_bytes / GIB:.1f}/{d.total_bytes / GIB:.1f} GiB" for d in self.devices)
+        devs = ", ".join(f"{d.name}={d.model} {d.budget_bytes / GIB:.1f}/{d.total_bytes / GIB:.1f} GiB"
+                         + (f" {d.tile_rate:.2e} tiles/s" if d.tile_rate else "") for d in self.devices)
         return f"devices[{devs}] host {self.host_budget_bytes / GIB:.0f} GiB, {self.n_cpu} cpus, link {self.interconnect_gbs:.0f} GB/s"
 
 
@@ -134,8 +148,10 @@ def detect_hardware(*, budget_fraction: float = 0.9, host_fraction: float = 0.8,
         p = torch.cuda.get_device_properties(i)
         free, total = effective_free_bytes(i), p.total_memory     # honours a set_per_process_memory_fraction cap
         grp = models.setdefault(p.name, len(models))
+        dr = device_rate(p.name)
         hw.devices.append(DeviceSpec(name=f"cuda:{i}", model=p.name, budget_bytes=int(free * budget_fraction),
-                                     total_bytes=int(total), n_sm=p.multi_processor_count, identical_group=grp))
+                                     total_bytes=int(total), n_sm=p.multi_processor_count, identical_group=grp,
+                                     tile_rate=dr.tile_rate, rate_source=dr.source))
     if len(hw.devices) > 1:
         nv = _nvlink_present()
         hw.interconnect_gbs = 200.0 if nv else 25.0
@@ -155,7 +171,10 @@ def hardware_from_dict(spec: dict[str, Any], *, interconnect_gbs: float | None =
     """
     {"cuda:0": "40GiB", "cuda:1": 40e9, "host": "256GiB", "cpus": 32, "link_gbs": 200}
     Values are memory *budgets* (what the call may use). Devices default to the
-    detected model/SM count when the process can see them.
+    detected model/SM count when the process can see them. A device value may be a dict
+    ``{"mem": "80GiB", "model": "NVIDIA A100-SXM4-80GB", "rate": 3.35e7}``: ``rate`` is the live-tile
+    rate (tiles/s, ``scheduler.calibrate_rate``); without it the model's cached calibration or seed is
+    used (a heterogeneous description is planned on every device with its own rate).
     """
     hw = HardwareSpec()
     models = {}
@@ -174,17 +193,26 @@ def hardware_from_dict(spec: dict[str, Any], *, interconnect_gbs: float | None =
             i = int(m.group(1))
             # value: a size, or {"mem": size, "model": "A100-SXM4-80GB"}; devices are
             # assumed identical unless a model string says otherwise.
-            model, n_sm = "same", 108
+            model, n_sm, rate = "same", 108, 0.0
             if isinstance(val, dict):
                 model = str(val.get("model", "same")); mem = _parse_bytes(val.get("mem", val.get("budget", 0)))
+                rate = float(val.get("rate", val.get("tile_rate", 0.0)) or 0.0)
             else:
                 mem = _parse_bytes(val)
             total = mem
             if torch.cuda.is_available() and i < torch.cuda.device_count():
                 p = torch.cuda.get_device_properties(i); n_sm, total = p.multi_processor_count, p.total_memory
             grp = models.setdefault(model, len(models))
+            src = "given"
+            if not rate:
+                # "same" devices are identical by assumption: all take the rate of the first visible GPU's model
+                # (or the default seed), never a mix of a visible device's rate and the default
+                same = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "unknown"
+                dr = device_rate(model if model != "same" else same)
+                rate, src = dr.tile_rate, dr.source
             hw.devices.append(DeviceSpec(name=f"cuda:{i}", model=model, budget_bytes=mem,
-                                         total_bytes=total, n_sm=n_sm, identical_group=grp))
+                                         total_bytes=total, n_sm=n_sm, identical_group=grp,
+                                         tile_rate=rate, rate_source=src))
     if not hw.host_budget_bytes:
         hw.host_budget_bytes = int(_host_free_bytes() * 0.8)
     if interconnect_gbs is not None:
@@ -228,6 +256,9 @@ class CostModel:
     dist_merge_bytes_per_tok: int = 16 * 8 * 64  # fp32 out + weights, per token (H*D*4 + ...), all_reduce volume
     dist_imbalance: float = 1.35     # per-rank straggling + host-stage contention (4 GPUs sharing one host; measured 62 s vs 40 s ideal at 4M)
     dist_fixed_s: float = 0.4        # per-call cost of the collective path (barriers, NCCL warm-up, task-list build)
+    # How the driver assigns subproblems (distributed.py): "children" = cost-aware LPT with child-refinement
+    # splits (the default scheduler), "none" = whole subproblems (round-robin's ceil(n/world)/n on equal ranks).
+    dist_split: str = "children"
 
     def mono_time(self, N: int, B: int, H: int, causal: bool, direction: str = "fwd") -> float:
         pairs = B * H * N * N * (0.5 if causal else 1.0)
@@ -236,9 +267,11 @@ class CostModel:
     def cqsa_time(self, N: int, B: int, H: int, D: int, itr: int, causal: bool, acc: str,
                   stream_from_host: bool, n_par: int, world: int = 1, hw: HardwareSpec | None = None,
                   c: int = 7, l: int = 3, direction: str = "fwd", engine: str = "classic",
-                  wave_tokens: int = 0, gather: bool = True) -> float:
+                  wave_tokens: int = 0, gather: bool = True, rates: Sequence[float] | None = None) -> float:
         """``engine="wave"``: waves of ``wave_tokens`` packed tokens (at least one subproblem each) replace the
-        per-subproblem launches; ``gather=False`` reads Q/K/V in place at ``inplace_ratio`` the kernel time."""
+        per-subproblem launches; ``gather=False`` reads Q/K/V in place at ``inplace_ratio`` the kernel time.
+        ``rates``: for ``world > 1``, the ranks' rates relative to the device this model describes (default
+        all 1.0); the share of the slowest rank comes from the driver's scheduler (``equal_task_share``)."""
         L = N * (l / c) ** itr
         n_tasks = c ** itr
         tokens = n_tasks * L                       # gathered tokens over all subproblems
@@ -261,7 +294,11 @@ class CostModel:
         ov = self.overlap_npar2 if (n_par >= 2 or (engine == "wave" and acc == "cpu")) else self.overlap
         t = compute + host * (1 - ov) + max(0.0, host * ov - compute)   # hidden part cannot exceed compute
         if world > 1:
-            per_rank = math.ceil(n_tasks / world) / n_tasks
+            # the slowest rank's share of the single-device time: n equal subproblems assigned by the driver's
+            # scheduler to ranks of relative rates `rates` (1.0 = the device this model describes)
+            rel = tuple(float(r) for r in (rates if rates is not None else (1.0,) * world))[:world]
+            rel = rel + (1.0,) * (world - len(rel))
+            per_rank = equal_task_share(n_tasks, rel, split=self.dist_split, c=c, l=l)
             comm = 2 * N * B * H * D * 4 / (max(1.0, (hw.interconnect_gbs if hw else 25.0)) * 1e9) * math.log2(world)
             t = t * per_rank * self.dist_imbalance + comm + self.dist_fixed_s
         return t
@@ -341,6 +378,7 @@ class Plan:
     engine: str = "classic"        # 'wave' (several subproblems per launch) or 'classic' (the pinned per-task pipeline)
     wave_tokens: int = 0           # wave engine: packed-token budget per wave (W)
     gather: bool = True            # wave engine: gathered copies of Q/K/V per wave (True) or read in place (False)
+    device_rates: list = field(default_factory=list)   # live-tile rates of `devices` (tiles/s; 0 = unknown)
 
     def name(self) -> str:
         if self.mode == "mono":
@@ -429,15 +467,16 @@ def plan(*, N: int, B: int = 1, H: int = 8, D: int = 64, dtype=torch.float16, ca
     if not engines or any(e not in ("wave", "classic") for e in engines):
         raise ValueError(f"engines must be a non-empty subset of ('wave', 'classic') (got {engines!r})")
     wave_ok = "wave" in engines
-    # Heterogeneous machines: plan on the largest identical group (the engine
-    # splits tasks evenly, so mixing device speeds would idle the fast ones).
-    groups = {}
-    for d in hw.devices:
-        groups.setdefault(d.identical_group, []).append(d)
-    devs = max(groups.values(), key=lambda g: (len(g), min(x.budget_bytes for x in g)))
-    dev_budget = min(d.budget_bytes for d in devs) * safety
+    # Devices fastest first (rate, then budget; stable, so equal devices keep their order). A world-w
+    # candidate runs on the w fastest devices: the driver's scheduler gives each rank work in proportion to
+    # its rate (so a slower device still helps), and every device must hold the candidate's peak (the
+    # budget of a world is the smallest of its devices').
+    devs = sorted(hw.devices, key=lambda d: (-(d.tile_rate or 0.0), -d.budget_bytes))
     R = int(resident_input_bytes)
-    dev_budget += R if budget_excludes_inputs else 0          # estimates below count Q/K/V; the measured budget did not
+    credit = R if budget_excludes_inputs else 0               # estimates below count Q/K/V; the measured budget did not
+    budgets = {w: min(d.budget_bytes for d in devs[:w]) * safety + credit for w in range(1, len(devs) + 1)}
+    rel_rates = {w: hw.rel_rates(devs[:w]) for w in budgets}
+    dev_budget = budgets[1]
     cands: list[dict] = []
 
     bwd = direction == "bwd"
@@ -465,6 +504,7 @@ def plan(*, N: int, B: int = 1, H: int = 8, D: int = 64, dtype=torch.float16, ca
                         stay = R if (host and R and not evict) else 0      # streaming next to the unevicted device copy
                         base = dict(mode="cqsa" if w == 1 else "cqsa_dist", itr=itr, c=c, interest_set=tuple(iset),
                                     acc=acc, stream_from_host=host, evict=evict, world=w, host=hostb / GIB)
+                        bud = budgets[w]
                         # the wave engine: single device; every (acc, host) forward, device-resident backward
                         # (the wave backward keeps its fp32 gradients on the device)
                         wave_here = wave_ok and w == 1 and (not bwd or (not host and acc == "gpu"))
@@ -494,7 +534,7 @@ def plan(*, N: int, B: int = 1, H: int = 8, D: int = 64, dtype=torch.float16, ca
                                     host_w = hostb + (2 * min(int(W), N) * (H * D * 4 + 8 * H + 8) if acc == "cpu" else 0)
                                     cands.append(dict(base, engine="wave", wave_tokens=int(W), gather=bool(gather), n_par=1,
                                                       time=t, peak=(peak + stay) / GIB, host=host_w / GIB,
-                                                      ok=(peak + stay <= dev_budget and host_w <= hw.host_budget_bytes)))
+                                                      ok=(peak + stay <= bud and host_w <= hw.host_budget_bytes)))
                         if wave_here and not host and acc == "gpu":
                             continue                                       # the wave covers this residency (W=1 == classic)
                         if "classic" not in engines:
@@ -506,10 +546,11 @@ def plan(*, N: int, B: int = 1, H: int = 8, D: int = 64, dtype=torch.float16, ca
                             extra = {} if bwd else {"out_bytes_per_el": int(out_bytes_per_el)}
                             peak = est(N, itr, B=B, H=H, D=D, itemsize=itemsize, n_par=n_par, c=c, l=l,
                                        stream_from_host=host, accumulate_on_gpu=(acc == "gpu"), **extra)
-                            t = cm.cqsa_time(N, B, H, D, itr, causal, acc, host, n_par, world=w, hw=hw, c=c, l=l, direction=direction)
+                            t = cm.cqsa_time(N, B, H, D, itr, causal, acc, host, n_par, world=w, hw=hw, c=c, l=l, direction=direction,
+                                             rates=rel_rates[w])
                             cands.append(dict(base, engine="classic", wave_tokens=0, gather=True, n_par=n_par, time=t,
                                               peak=(peak + stay) / GIB,
-                                              ok=(peak + stay <= dev_budget and hostb <= hw.host_budget_bytes)))
+                                              ok=(peak + stay <= bud and hostb <= hw.host_budget_bytes)))
     feas = [c for c in cands if c["ok"]]
     if not feas:
         floor = per_el_floor(itemsize, True, False) * N * B * H * D
@@ -541,6 +582,7 @@ def plan(*, N: int, B: int = 1, H: int = 8, D: int = 64, dtype=torch.float16, ca
     p = Plan(mode=pick["mode"], itr=pick["itr"], c=pick["c"], interest_set=tuple(pick["interest_set"]), direction=direction,
              acc=pick["acc"], stream_from_host=pick["stream_from_host"],
              n_par=pick["n_par"], world=pick["world"], devices=[d.name for d in devs[:pick["world"]]],
+             device_rates=[d.tile_rate for d in devs[:pick["world"]]],
              est_time_s=pick["time"], est_peak_gib=pick["peak"], est_host_gib=pick["host"], candidates=cands,
              evict_inputs=bool(pick.get("evict", False)), engine=pick.get("engine", "classic"),
              wave_tokens=int(pick.get("wave_tokens", 0)), gather=bool(pick.get("gather", True)))

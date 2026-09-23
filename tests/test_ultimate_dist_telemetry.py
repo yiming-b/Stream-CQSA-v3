@@ -48,3 +48,22 @@ def test_shard_is_the_drivers_partition(seg_align, shared):
 def test_imbalance():
     assert dt.imbalance([1.0, 1.0, 1.0, 1.0]) == 1.0
     assert dt.imbalance([2.0, 1.0, 1.0]) == pytest.approx(1.5)
+
+
+def test_arm_parsing():
+    arms = dt.parse_arms(None, ["rr", "lpt"], ["allreduce", "reduce_scatter"], "seed")
+    assert [a["name"] for a in arms] == ["rr/allreduce/seed", "rr/reduce_scatter/seed",
+                                         "lpt/allreduce/seed", "lpt/reduce_scatter/seed"]
+    assert [a["output"] for a in arms] == ["replicated", "sharded", "replicated", "sharded"]
+    arms = dt.parse_arms(["rr/allreduce", "lpt/allreduce/measured"], [], [], "seed")
+    assert [(a["scheduler"], a["rates"]) for a in arms] == [("rr", "seed"), ("lpt", "measured")]
+    with pytest.raises(ValueError):
+        dt.parse_arms(["fifo/allreduce"], [], [], "seed")
+    assert dt.parse_throttle("3:54") == (3, 54) and dt.parse_throttle(None) is None
+
+
+def test_prod_layout_and_measured_rates():
+    assert dt.prod_layout(1) == [(128, True)] and dt.prod_layout(2) == [(128, False)]
+    units = [[[1, 0, 100, 10.0]], [[1, 1, 100, 20.0], [2, 14, 50, 5.0]], []]
+    r = dt.measured_rates(units, [1.0, 2.0, 0.5])
+    assert r[0] == pytest.approx(10.0 * dt.B * dt.H) and r[1] == pytest.approx(25.0 * dt.B * dt.H / 2) and r[2] == 0.0

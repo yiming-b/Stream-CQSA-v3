@@ -407,3 +407,35 @@ def test_two_ranks_one_gpu_split_units(tmp_path):
             assert x["rel_single"] <= 2e-3, (key, x)                       # a different tile packing: fp16 P rounding
             assert x["err64"] <= 1.2 * x["err64_single"] + 1e-4, (key, x)
         assert r["bwd_allreduce"]["rel"] <= 2e-3 and r["bwd_reduce_scatter"]["rel"] <= 2e-3, r
+
+
+# ------------------------------------------------------------------ planner (autoconfig) -----
+
+def test_planner_device_rates_and_heterogeneous_worlds(monkeypatch, tmp_path):
+    monkeypatch.setenv("CQSA_CACHE_DIR", str(tmp_path))
+    from stream_cqsa.autoconfig import CostModel, hardware_from_dict, plan
+    hw = hardware_from_dict({"cuda:0": {"mem": "40GiB", "model": "NVIDIA A100-PCIE-40GB"},
+                             "cuda:1": {"mem": "80GiB", "model": "NVIDIA A100-SXM4-80GB"},
+                             "cuda:2": {"mem": "80GiB", "model": "NVIDIA A100-SXM4-80GB", "rate": 3.0e7},
+                             "host": "500GiB"})
+    assert not hw.homogeneous()
+    assert [d.tile_rate for d in hw.devices] == [S.seed_rate("NVIDIA A100-PCIE-40GB").tile_rate,
+                                                 S.seed_rate("NVIDIA A100-SXM4-80GB").tile_rate, 3.0e7]
+    assert hw.devices[2].rate_source == "given" and hw.devices[1].rate_source.startswith("measured")
+    p = plan(N=1 << 22, hardware=hw, engines=("classic",))
+    assert p.devices[0] == "cuda:1" and (p.world == 1 or p.devices[:2] == ["cuda:1", "cuda:2"])   # fastest first
+    assert len(p.device_rates) == p.world
+    # homogeneous "same" devices share one rate
+    hw4 = hardware_from_dict({f"cuda:{i}": "80GiB" for i in range(4)} | {"host": "500GiB"})
+    assert len({d.tile_rate for d in hw4.devices}) == 1 and hw4.homogeneous()
+    # the multi-device time follows the driver's scheduler: splitting beats whole tasks at 7 on 4, slower
+    # ranks cost time, and whole tasks on equal ranks are the previous ceil(n/world)/n model
+    args = (1 << 22, 1, 8, 64, 1, True, "gpu", False, 1)
+    whole, split = CostModel(dist_split="none"), CostModel()
+    t1 = split.cqsa_time(*args, world=1)
+    t_rr, t_lpt = whole.cqsa_time(*args, world=4), split.cqsa_time(*args, world=4)
+    assert t_lpt < t_rr
+    comm_fixed = t_rr - t1 * (2 / 7) * whole.dist_imbalance
+    assert t_lpt - comm_fixed == pytest.approx(t1 * S.equal_task_share(7, (1.0,) * 4) * split.dist_imbalance)
+    t_het = split.cqsa_time(*args, world=4, rates=(1.0, 1.0, 0.67, 0.67))
+    assert t_lpt < t_het < whole.cqsa_time(*args, world=4, rates=(1.0, 1.0, 0.67, 0.67))

@@ -357,6 +357,9 @@ def test_nonfinite_v_in_dead_tile_caveat():
     fin = torch.isfinite(o11) & torch.isfinite(o12)
     assert torch.equal(o12[fin], o11[fin]), "finite elements must agree with v11"
     rows = torch.arange(0, 384, device=DEV)
-    ref64, dead = _ref64_rows(q, k, v, tabs[0], True, (-1, -1), rows)
+    # masked math reference: none of rows 0-383 attends key 200 (p == 0 there exactly), so its V row is dropped
+    # (0 * inf would be NaN in the reference too)
+    v_ref = torch.where(torch.isfinite(v), v, torch.zeros_like(v))
+    ref64, dead = _ref64_rows(q, k, v_ref, tabs[0], True, (-1, -1), rows)
     rel = ((o12[rows][~dead].double() - ref64[~dead]).norm() / ref64[~dead].norm()).item()
     assert rel < 2e-3, f"v12f vs masked float64 reference on rows 0-383: {rel:.2e}"

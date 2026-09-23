@@ -153,18 +153,59 @@ def detect_hardware(*, budget_fraction: float = 0.9, host_fraction: float = 0.8,
                                      total_bytes=int(total), n_sm=p.multi_processor_count, identical_group=grp,
                                      tile_rate=dr.tile_rate, rate_source=dr.source))
     if len(hw.devices) > 1:
-        nv = _nvlink_present()
-        hw.interconnect_gbs = 200.0 if nv else 25.0
+        # the slowest link of the ring over the planned devices (per-pair classes from `nvidia-smi topo -m`)
+        topo = _topo_text()
+        mat = parse_topo(topo) if topo else []
+        hw.interconnect_gbs = ring_link_gbs(mat, [int(d.name.split(":")[1]) for d in hw.devices]) if mat else 25.0
     return hw
 
 
-def _nvlink_present() -> bool:
+def _topo_text() -> str:
     try:
         import subprocess
-        out = subprocess.run(["nvidia-smi", "topo", "-m"], capture_output=True, text=True, timeout=10).stdout
-        return bool(re.search(r"\bNV\d+\b", out))
+        return subprocess.run(["nvidia-smi", "topo", "-m"], capture_output=True, text=True, timeout=10).stdout
     except Exception:
-        return False
+        return ""
+
+
+def _nvlink_present() -> bool:
+    return bool(re.search(r"\bNV\d+\b", _topo_text()))
+
+
+# Per-direction bandwidth seeds (GB/s) of the `nvidia-smi topo -m` link classes between two GPUs, for the merge's
+# collectives. NV#: # bonded NVLinks (A100 NVLink3: 25 GB/s per link per direction). PCIe 4.0 x16 through one
+# switch (PIX) ~24, several switches (PXB) ~22, the host bridge (PHB) ~20, across PCIe host bridges within a NUMA
+# node (NODE) ~18, across the SMP interconnect (SYS) ~12. Seeds, not measurements: the D1 job records the merge
+# time and bytes per row, from which the effective bandwidth of a node follows.
+LINK_CLASS_GBS = {"PIX": 24.0, "PXB": 22.0, "PHB": 20.0, "NODE": 18.0, "SYS": 12.0}
+
+
+def parse_topo(text: str) -> list[list[str]]:
+    """The GPU x GPU link-class matrix of ``nvidia-smi topo -m`` output (``[]`` if none)."""
+    rows = []
+    for line in text.splitlines():
+        line = re.sub(r"\x1b\[[0-9;]*m", "", line)          # the header carries terminal escapes
+        if re.match(r"GPU\d+\s", line):                      # a row (the header line starts with whitespace)
+            rows.append(line.split()[1:])
+    n = len(rows)
+    return [r[:n] for r in rows] if n and all(len(r) >= n for r in rows) else []
+
+
+def link_gbs(cls: str) -> float:
+    m = re.fullmatch(r"NV(\d+)", cls)
+    if m:
+        return 25.0 * int(m.group(1))
+    return LINK_CLASS_GBS.get(cls, 12.0 if cls != "X" else float("inf"))
+
+
+def ring_link_gbs(matrix: list[list[str]], devices: Sequence[int] | None = None) -> float:
+    """Bandwidth of the slowest link on the ring devices[0] -> devices[1] -> ... -> devices[0] (NCCL's ring
+    runs at its slowest hop)."""
+    idx = list(devices) if devices is not None else list(range(len(matrix)))
+    idx = [i for i in idx if i < len(matrix)]
+    if len(idx) < 2:
+        return float("inf")
+    return min(link_gbs(matrix[a][b]) for a, b in zip(idx, idx[1:] + idx[:1]))
 
 
 def hardware_from_dict(spec: dict[str, Any], *, interconnect_gbs: float | None = None) -> HardwareSpec:

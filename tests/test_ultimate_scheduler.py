@@ -439,3 +439,27 @@ def test_planner_device_rates_and_heterogeneous_worlds(monkeypatch, tmp_path):
     assert t_lpt - comm_fixed == pytest.approx(t1 * S.equal_task_share(7, (1.0,) * 4) * split.dist_imbalance)
     t_het = split.cqsa_time(*args, world=4, rates=(1.0, 1.0, 0.67, 0.67))
     assert t_lpt < t_het < whole.cqsa_time(*args, world=4, rates=(1.0, 1.0, 0.67, 0.67))
+
+
+_TOPO_PCIE4 = """\x1b[4m\tGPU0\tGPU1\tGPU2\tGPU3\tNIC0\tCPU Affinity\tNUMA Affinity\tGPU NUMA ID\x1b[0m
+GPU0\t X \tPXB\tSYS\tSYS\tSYS\t0-15\t0\t\tN/A
+GPU1\tPXB\t X \tSYS\tSYS\tSYS\t0-15\t0\t\tN/A
+GPU2\tSYS\tSYS\t X \tPXB\tPXB\t16-31\t1\t\tN/A
+GPU3\tSYS\tSYS\tPXB\t X \tPXB\t16-31\t1\t\tN/A
+NIC0\tSYS\tSYS\tPXB\tPXB\t X
+
+Legend:
+  X    = Self
+"""
+_TOPO_NV = """\tGPU0\tGPU1\tCPU Affinity
+GPU0\t X \tNV12\t0-63
+GPU1\tNV12\t X \t0-63
+"""
+
+
+def test_topology_link_classes():
+    from stream_cqsa.autoconfig import parse_topo, ring_link_gbs, link_gbs
+    m = parse_topo(_TOPO_PCIE4)
+    assert m == [["X", "PXB", "SYS", "SYS"], ["PXB", "X", "SYS", "SYS"], ["SYS", "SYS", "X", "PXB"], ["SYS", "SYS", "PXB", "X"]]
+    assert ring_link_gbs(m) == link_gbs("SYS") and ring_link_gbs(m, [0, 1]) == link_gbs("PXB")
+    assert ring_link_gbs(parse_topo(_TOPO_NV)) == 300.0 and parse_topo("no gpus here") == []

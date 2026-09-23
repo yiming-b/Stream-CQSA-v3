@@ -10,20 +10,59 @@ exact everywhere. Variant tree: `/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/
 | step | status | notes |
 |---|---|---|
 | read design 1/3/4/7, exp_build_ab.md, cuobjdump_v11x.md, v11 kernel | done 2026-09-23 | |
-| clone v11 -> v12f, design refined | in progress | |
-| build 1 (detached, vis1) | - | |
-| correctness on vis1 (tests/test_ultimate_v12f.py) | - | |
-| SXM job fwd_ab (benchmarks/ultimate/fwd_ab.py) | - | |
+| clone v11 -> v12f, code written | done 2026-09-23 10:38 | files listed below |
+| build b1 (clean, detached, vis1) | running since 10:38 | log `next/logs/05_build_v12f_b1.log`, csv `next/logs/build_v12f_b1_nvcc_time.csv` |
+| harness / test / slurm written | done | `benchmarks/ultimate/fwd_ab.py`, `tests/test_ultimate_v12f.py`, `slurm/ultimate/fwd_ab.slurm` |
+| correctness on vis1 (tests/test_ultimate_v12f.py) | - | CPU census-reference test passes |
+| SXM job fwd_ab | - | |
 | results fwd_ab.json/md, diff, commit | - | |
 
 ## Design as built (refinements of the task's sketch)
 
-(filled in below as the code lands)
+- **Census kernel** (`src/cqs_census.{h,cu}`, own TU): one warp per row block of the ALIGNED tile shape
+  (hdim64 128x128, hdim128 128x64 = v11's A100 tiles, `CqsAlignedTile`). A visited tile ([0, n_block_max) with the
+  causal limit) is live iff row OR & col OR == 0, dead iff row AND & col AND != 0, else mixed; the ragged last
+  64-token summary block is recomputed from the group bits so a ragged tile gets an exact verdict. Writes
+  `route` (0 ALIGNED; bit 1 mixed, bit 2 run overflow) and the run table.
+- **Run table instead of a per-tile CSR list**: per row block up to 15 runs `{hi, lo}` in descending n plus a
+  `{-1,-1}` sentinel (`kCqsRunSlots = 16`). Memory O(row blocks), not O(live tiles) (a CSR list is ~L^2/8192 B:
+  0.5 GB at L=2M). In the loop `n_next = n > run_lo ? n - 1 : next run's hi`; the table is read only at a run
+  boundary, the load issued before the QK GEMM. Aligned tasks have 1 run per causal row block at itr=1.
+- **Routing without a host sync**: flash_api allocates the census (int32 buffer) only for eligible calls
+  (group bits + summaries, no dropout/local/alibi/softcap/return_softmax, head 64/128, not forced LEGACY).
+  `run_mha_fwd` then launches census -> ALIGNED -> LEGACY on the stream; ALIGNED CTAs return if route != 0,
+  LEGACY CTAs return if route == 0 (`compute_attn` gate, the only change to v11's kernel code). Ineligible calls:
+  LEGACY alone, no census. The Python API is unchanged (drop-in `CQSA_CUDA_MODULE=cqsa_cuda_next_v12f`); new
+  trailing `cqs_fwd_flags` (1 = force LEGACY, 2 = reversed row-block order in ALIGNED) and `fwd_cqs_census`
+  (test entry: route, run table, tile shape).
+- **ALIGNED kernel** (`src/flash_fwd_aligned.h`): v11's compute_attn_1rowblock minus dropout/local/alibi/softcap/
+  return_softmax, Is_even_K forced; softmax state initialised to (-inf, 0, 0) and ONE rescale instantiation
+  (Is_first=false, Check_inf=true) for every tile (softmax.h checked: max(-inf,x)=x via fmaxf, Check_inf maps
+  -inf row max to 0 so the scale is exp2(-inf)=+0, row_sum 0*0+s, acc_o 0*0; = Is_first bit for bit). Masking
+  steps = v11's (the top n_masking_steps tiles of the row; live ones take the masked body, predicated V load only
+  for the first visited tile, which is the only one that can be ragged); steady loop = upstream body without a
+  mask call. No-live-tile row blocks skip the prologue (no Q load) and write out 0 / lse +inf like v11. In-place
+  segmented reads (cqs_block_base) and the fp32 out contract copied from v11. `cqs_reverse_m` selects
+  m_block = gridDim.x-1-blockIdx.x. No sCqsBits smem (kSmemSize only).
+- **TU split**: `flash_fwd_hdim*_sm80.cu` = CQS-off (mode 0) + ALIGNED (2 instantiations: Is_even_MN);
+  `flash_fwd_hdim*_legacy_sm80.cu` = v11's CQS-on (modes 1/2, full switch). `run_flash_fwd<.., Cqs_on>` replaces
+  the runtime CQS_MODE_SWITCH. ALIGNED/census live in headers only the main TUs include, so an ALIGNED-only
+  change rebuilds only the main TUs (the build script is incremental unless CLEAN=1).
+- setup.py: only `a100_fp16_hdim64_128` and `common` kernel sets; `-lineinfo -Xptxas -v -time` via
+  `CQSA_NVCC_TIME_CSV`; build with `CQSA_BWD_NO_CQS=1` (backward irrelevant here, NOT correct for CQS bwd).
+
+Files changed in v12f vs v11: `setup.py`, `csrc/flash_attn/flash_api.cpp`, `src/flash.h`,
+`src/flash_fwd_kernel.h` (gate), `src/flash_fwd_launch_template.h`, `src/flash_fwd_hdim{64,128}_{fp16,bf16}{,_causal}_sm80.cu`;
+new: `src/cqs_census.{h,cu}`, `src/flash_fwd_aligned.h`, `src/flash_fwd_hdim*_legacy_sm80.cu` (8), `build.sh`.
 
 ## Job ids / builds
 
-(none yet)
+- b1: clean build started 2026-09-23 10:38:39 on vis1 (`TAG=b1 CLEAN=1 nohup setsid bash next/kernel/v12f/build.sh`).
 
 ## Next step for a resumed agent
 
-Read this file, then `ls next/kernel/v12f` and the build log `next/logs/05_build_v12f*.log`.
+Check `next/logs/05_build_v12f_b1.log` ("finished rc="). Then on vis1:
+`python -P -m pytest -q tests/test_ultimate_v12f.py` with PYTHONPATH = worktree:next/kernel/stable:$PYTHONPATH:next/native:next/kernel/v12f
+(v12f LAST: it carries a stub stream_cqsa). Then commit, `SNAP=$(bash slurm/ultimate/snapshot.sh) && sbatch
+--export=ALL,CQSA_SRC=$SNAP slurm/ultimate/fwd_ab.slurm`; `python -P benchmarks/ultimate/fwd_ab.py --report
+results/ultimate/fwd_ab.json` writes fwd_ab.md.

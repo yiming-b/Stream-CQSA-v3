@@ -27,6 +27,13 @@ from stream_cqsa.stable_stream import (
 from stream_cqsa.native_autograd import StreamCQSAAttention, stream_cqsa_attn
 
 CUDA = torch.cuda.is_available()
+# The recovery's control flow is exercised at tiny N (343, 169, 2401), where
+# the default block-aligned layout does not refine at all: a subproblem below
+# c*128 tokens is never what ran out of memory (docs/ultimate/01_design_a100.md,
+# 5.1). These tests therefore run on the legacy even split, still reachable for
+# A/B, whose task sizes (147 -> 63 at N=343) they quote. The aligned recovery
+# is tested in test_ultimate_align.py.
+LEGACY = 0
 
 
 def _retained_pairs(task):
@@ -67,11 +74,11 @@ def test_refinement_partitions_the_parent(N, c, iset, depth):
     double count. Both are silent in the output, so they are checked directly.
     """
     tasks = build_tasks(N, depth, B=1, H=1, D=64, itemsize=2,
-                        c=c, interest_set=iset, pin=False)
+                        c=c, interest_set=iset, pin=False, seg_align=LEGACY)
     for parent in tasks[:3]:
         want = _retained_pairs(parent)
         kids = refine_task(parent, N, B=1, H=1, D=64, itemsize=2,
-                           c=c, interest_set=iset, pin=False)
+                           c=c, interest_set=iset, pin=False, seg_align=LEGACY)
         assert len(kids) == c
         assert all(int(kd.itr) == int(parent.itr) + 1 for kd in kids)
         assert all(tuple(kd.path)[:-1] == tuple(parent.path) for kd in kids)
@@ -86,9 +93,9 @@ def test_refinement_partitions_the_parent(N, c, iset, depth):
 
 def test_refined_tasks_are_smaller_than_their_parent():
     """The point of refining is residency, so the children must actually shrink."""
-    tasks = build_tasks(343, 1, B=1, H=1, D=64, itemsize=2, pin=False)
+    tasks = build_tasks(343, 1, B=1, H=1, D=64, itemsize=2, pin=False, seg_align=LEGACY)
     parent = tasks[0]
-    for kd in refine_task(parent, 343, B=1, H=1, D=64, itemsize=2, pin=False):
+    for kd in refine_task(parent, 343, B=1, H=1, D=64, itemsize=2, pin=False, seg_align=LEGACY):
         assert int(kd.local_size) < int(parent.local_size)
 
 
@@ -259,7 +266,7 @@ def test_forward_escalates_and_stays_exact():
     # At N=343 a depth-1 subsequence is 147 tokens and a depth-2 one is 63, so a
     # limit of 100 refuses every depth-1 task and accepts all of its children.
     inner, calls = _refuse_over(100, local_stats_torch)
-    out, info = stream_cqsa_forward(q, k, v, itr=1, inner=inner, max_parallel=1)
+    out, info = stream_cqsa_forward(q, k, v, itr=1, seg_align=LEGACY, inner=inner, max_parallel=1)
 
     assert calls["refused"] > 0, "the injected limit never fired"
     assert info["depth_escalations"] > 0, "the call did not escalate"
@@ -282,7 +289,7 @@ def test_refined_children_are_smaller_than_the_parent_at_runtime():
     torch.manual_seed(0)
     q, k, v = (torch.randn(1, 2, 343, 32) for _ in range(3))
     inner, calls = _refuse_over(100, local_stats_torch)
-    stream_cqsa_forward(q, k, v, itr=1, inner=inner, max_parallel=1)
+    stream_cqsa_forward(q, k, v, itr=1, seg_align=LEGACY, inner=inner, max_parallel=1)
     assert set(calls["lengths"]) == {63}, calls["lengths"][:8]
 
 
@@ -299,7 +306,7 @@ def test_escalation_terminates_at_the_structural_bound():
     inner, calls = _refuse_over(0, local_stats_torch)      # refuse everything
 
     with pytest.raises((torch.cuda.OutOfMemoryError, RuntimeError)):
-        stream_cqsa_forward(q, k, v, itr=1, inner=inner, max_parallel=1)
+        stream_cqsa_forward(q, k, v, itr=1, seg_align=LEGACY, inner=inner, max_parallel=1)
     assert calls["refused"] > 0
 
 
@@ -318,7 +325,7 @@ def test_hybrid_schedule_of_mixed_depths_is_exact(causal):
     want = sdpa_reference(q, k, v, causal=causal)
 
     inner, calls = _refuse_over(100, local_stats_torch, first_n=3)
-    out, info = stream_cqsa_forward(q, k, v, itr=1, causal=causal,
+    out, info = stream_cqsa_forward(q, k, v, itr=1, seg_align=LEGACY, causal=causal,
                                     inner=inner, max_parallel=1)
 
     assert calls["refused"] == 3
@@ -451,11 +458,11 @@ def test_escalation_can_be_pinned_off_for_a_fixed_depth_measurement():
     inner, calls = _refuse_over(100, local_stats_torch)
 
     # escalation on: refines and completes
-    _, info = stream_cqsa_forward(q, k, v, itr=1, inner=inner, max_parallel=1)
+    _, info = stream_cqsa_forward(q, k, v, itr=1, seg_align=LEGACY, inner=inner, max_parallel=1)
     assert info["depth_escalations"] > 0
 
     # escalation off: the same call must report the out-of-memory instead
     inner2, _ = _refuse_over(100, local_stats_torch)
     with pytest.raises((torch.cuda.OutOfMemoryError, RuntimeError)):
-        stream_cqsa_forward(q, k, v, itr=1, inner=inner2, max_parallel=1,
+        stream_cqsa_forward(q, k, v, itr=1, seg_align=LEGACY, inner=inner2, max_parallel=1,
                             allow_escalation=False)

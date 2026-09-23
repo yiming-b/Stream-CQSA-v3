@@ -173,9 +173,11 @@ def test_escalation_never_grows_a_child(N, c, depths):
 @pytest.mark.parametrize("c", [7, 31, 73, 133])
 def test_max_depth_under_alignment(c):
     """
-    ``max_depth_for(align=128)`` is the deepest level at which a task still
-    holds c*128 tokens (mean L = N*(l/c)**d), i.e. depth <= log_{c/l}(N/(c*128)),
-    never deeper than the token bound, and 0 below c*128 tokens.
+    ``max_depth_for(align=128)`` is the deepest level the escalation guard
+    admits: depth d is reachable while its PARENT holds c*128 tokens (mean
+    L = N*(l/c)**(d-1)), i.e. depth <= log_{c/l}(N/(c*128)) + 1, never deeper
+    than the token bound, and 0 below c*128 tokens. The engines refuse to
+    refine a task AT the cap, so a cap one level short loses recoveries.
     """
     l = len(QUORUM_SETS[c])
     for N in (2 ** 15, 2 ** 17, 2 ** 20, 100003):
@@ -184,12 +186,46 @@ def test_max_depth_under_alignment(c):
         if N < c * A:
             assert d == 0
             continue
-        assert N * (l / c) ** d >= c * A
-        assert N * (l / c) ** (d + 1) < c * A or d == max_depth_for(N, c)
-    assert max_depth_for(131072, 7, align=A, l=3) == 5
+        assert N * (l / c) ** (d - 1) >= c * A
+        assert N * (l / c) ** d < c * A or d == max_depth_for(N, c)
+    assert max_depth_for(131072, 7, align=A, l=3) == 6
     assert max_depth_for(c * A - 1, c, align=A, l=l) == 0
     # The token bound is untouched: the recovery of the unaligned layout.
     assert max_depth_for(1 << 24, 7) == 8 and max_depth_for(343, 7) == 3
+
+
+@pytest.mark.parametrize("N,c,cap", [(131072, 73, 2), (4096, 7, 2), (1 << 20, 133, 2)])
+def test_depth_cap_admits_every_refinement_the_guard_admits(N, c, cap):
+    """Regression (I0, P0.1 review): the cap was one level stricter than
+    ``refine_task``'s own guard, so the OOM recovery refused an itr=1 task that
+    refines cleanly (N=131072 c=73: 16K-token task -> 2K-token children)."""
+    iset = QUORUM_SETS[c]
+    assert max_depth_for(N, c, align=A, l=len(iset)) == cap
+    parent = max(build_tasks(N, cap - 1, B=1, H=1, D=64, itemsize=2, c=c, interest_set=iset, pin=False),
+                 key=lambda t: t.local_size)
+    kids = refine_task(parent, N, B=1, H=1, D=64, itemsize=2, pin=False, c=c, interest_set=iset)
+    assert kids and all(0 < k.local_size < parent.local_size for k in kids)
+
+
+def test_forward_recovers_an_oom_one_level_below_the_old_cap():
+    """Regression (I0, P0.1 review): one injected OOM on the 1.9K-token itr=1
+    tasks of N=4096, c=7 is recovered by refining them (the old aligned cap of
+    1 raised "itr=1 is the deepest decomposition"); the result stays exact."""
+    from stream_cqsa.reference import sdpa_reference
+    from stream_cqsa.stable_stream import local_stats_torch, stream_cqsa_forward
+    g = torch.Generator().manual_seed(0)
+    q, k, v = (torch.randn(1, 1, 4096, 32, generator=g) for _ in range(3))
+    seen = []
+
+    def inner(q_i, k_i, v_i, bits, **kw):
+        seen.append(q_i.shape[1])
+        if q_i.shape[1] > 1024:
+            raise torch.cuda.OutOfMemoryError("injected")
+        return local_stats_torch(q_i, k_i, v_i, bits, **kw)
+
+    out, info = stream_cqsa_forward(q, k, v, itr=1, inner=inner, max_parallel=1, causal=True)
+    assert info["depth_escalations"] > 0 and info["itr_max_reached"] == 2 and max(seen) > 1024
+    torch.testing.assert_close(out.float(), sdpa_reference(q, k, v, causal=True), rtol=1e-4, atol=1e-4)
 
 
 def test_strict_refine_refuses_a_degenerate_parent():
@@ -324,7 +360,8 @@ def _fp64_reference(q, k, v, rows, causal, scale):
 def test_engine_forward_aligned_matches_legacy_and_fp64(N, itr, causal):
     """
     Device-resident classic-engine forward on the aligned task layout versus
-    the same call on the legacy layout (norm-relative <= 1e-4, the engine
+    the same call on the legacy layout (norm-relative <= 1e-4 at these N >= 64K;
+    small N / deep itr are judged against fp64 instead, see below; the engine
     invariant as tests/test_api.py states it: a different partition of the
     same pairs changes the per-subproblem max shift and the fp16 rounding of P
     inside the kernel, which is an ulp-level per-element difference) and
@@ -356,6 +393,33 @@ def test_engine_forward_aligned_matches_legacy_and_fp64(N, itr, causal):
     assert err_new <= 1.2 * err_fa2, f"engine fp64 error {err_new:.3e} vs FA-2 {err_fa2:.3e}"
     del q, k, v, out_new, out_old, fa2, ref
     torch.cuda.empty_cache()
+
+
+@pytest.mark.skipif(not CUDA, reason="needs CUDA")
+@pytest.mark.parametrize("N,itr", [(2693, 3), (500, 2)])
+def test_engine_forward_small_n_deep_itr_is_judged_against_fp64(N, itr):
+    """
+    The engine-vs-engine bound (rel 1e-4) is stated for N >= 64K: at tiny N and
+    deep itr a subproblem is a few tiles and the partition change moves more of
+    the fp16 rounding (measured aligned vs legacy 1.15e-4 at N=2693 itr=3,
+    1.22e-4 at N=500 itr=2; P0.1 review). The invariant that holds everywhere is
+    the fp64 one: the aligned layout within 1.2x FA-2's error and 1.2x the
+    legacy layout's, on every row.
+    """
+    import torch.nn.functional as F
+    from torch.nn.attention import sdpa_kernel, SDPBackend
+
+    H, D = 4, 64
+    g = torch.Generator(device="cuda").manual_seed(N)
+    q, k, v = (torch.randn(1, H, N, D, device="cuda", dtype=torch.float16, generator=g) for _ in range(3))
+    out_new, info = stream_cqsa_forward(q, k, v, itr=itr, causal=True)
+    out_old, _ = stream_cqsa_forward(q, k, v, itr=itr, causal=True, seg_align=0)
+    assert info["untouched_tokens"] == 0
+    ref = F.scaled_dot_product_attention(q.double(), k.double(), v.double(), is_causal=True)
+    with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+        fa2 = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+    err_new, err_old, err_fa2 = (_rel(o, ref) for o in (out_new, out_old, fa2))
+    assert err_new <= 1.2 * err_fa2 and err_new <= 1.2 * err_old, (err_new, err_old, err_fa2)
 
 
 @pytest.mark.skipif(not CUDA, reason="needs CUDA")
@@ -391,3 +455,29 @@ def test_engine_backward_aligned_matches_legacy(causal):
         assert err_new <= 1.2 * err_fa2, f"{name}: aligned fp64 error {err_new:.3e} vs FA-2 {err_fa2:.3e}"
         assert err_new <= 1.2 * err_old, f"{name}: aligned fp64 error {err_new:.3e} vs legacy {err_old:.3e}"
         assert _rel(a, b) <= 1e-3, f"{name}: aligned vs legacy rel={_rel(a, b):.3e}"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_distributed_pair_takes_one_kwargs_dict(tmp_path):
+    """Regression (I0, P0.1 review): a world=1 forward/backward pair driven with the same
+    kwargs (segmented=True, seg_align=None) matches the single-device engine; the backward
+    used to raise TypeError on the forward-only key and ``_task_seg_align`` on None."""
+    import torch.distributed as dist
+    from stream_cqsa.distributed import dist_stream_cqsa_backward, dist_stream_cqsa_forward
+    from stream_cqsa.stable_stream import stream_cqsa_backward, stream_cqsa_forward
+    if dist.is_initialized():
+        pytest.skip("a process group is already initialised")
+    dist.init_process_group("nccl", store=dist.FileStore(str(tmp_path / "store"), 1), rank=0, world_size=1)
+    try:
+        g = torch.Generator(device="cuda").manual_seed(0)
+        q, k, v, do = (torch.randn(1, 2, 4096, 64, device="cuda", dtype=torch.float16, generator=g) for _ in range(4))
+        for kw in (dict(segmented=True), dict(seg_align=None)):
+            out, info = dist_stream_cqsa_forward(q, k, v, itr=1, causal=True, **kw)
+            ref, rinfo = stream_cqsa_forward(q, k, v, itr=1, causal=True, **kw)
+            assert torch.equal(out, ref) and rinfo["task_seg_align"] > 1
+            grads, _ = dist_stream_cqsa_backward(q, k, v, do, out, info["lse"], itr=1, causal=True, **kw)
+            rgrads = stream_cqsa_backward(q, k, v, do, ref, rinfo["lse"], itr=1, causal=True,
+                                          seg_align=kw.get("seg_align", 128))
+            assert all(torch.equal(a, b) for a, b in zip(grads, rgrads))
+    finally:
+        dist.destroy_process_group()

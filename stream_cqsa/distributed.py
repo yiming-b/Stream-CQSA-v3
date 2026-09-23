@@ -45,6 +45,9 @@ from .stable_stream import (stream_cqsa_forward, stream_cqsa_backward, build_tas
                             task_seg_align_for)
 
 
+_FORWARD_ONLY_KW = ("segmented", "shared_chunks", "chunk_pool_slots")
+
+
 def _shard(tasks, rank: int, world: int) -> list[int]:
     """path_idx of this rank's round-robin share of the task list."""
     return [int(t.path_idx) for t in tasks[rank::world]]
@@ -53,7 +56,7 @@ def _shard(tasks, rank: int, world: int) -> list[int]:
 def _task_seg_align(engine_kw: dict[str, Any], *, in_place: bool) -> int | None:
     """The engine builds its task list from these same kwargs; the layout must
     match it exactly for the shard (by path_idx) to be a partition."""
-    return task_seg_align_for(int(engine_kw.get("seg_align", 128)), in_place=in_place)
+    return task_seg_align_for(engine_kw.get("seg_align", 128), in_place=in_place)
 
 
 def dist_stream_cqsa_forward(
@@ -171,8 +174,11 @@ def dist_stream_cqsa_backward(
     mine = _shard(tasks, rank, world)
 
     t0 = time.perf_counter()
+    # A forward/backward pair is driven with one kwargs dict; the forward's in-place read modes
+    # have no backward counterpart (the backward always gathers), so they are not passed on.
+    bwd_kw = {k_: v_ for k_, v_ in engine_kw.items() if k_ not in _FORWARD_ONLY_KW}
     grads = stream_cqsa_backward(
-        q, k, v, dout, out, lse, itr=itr, causal=causal, task_subset=mine, **engine_kw)
+        q, k, v, dout, out, lse, itr=itr, causal=causal, task_subset=mine, **bwd_kw)
     torch.cuda.synchronize(dev)
     t_local = time.perf_counter() - t0
 

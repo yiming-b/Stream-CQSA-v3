@@ -402,15 +402,19 @@ def task_layout(seg_align: int | None) -> tuple[int, bool]:
     return (a, True) if a > 1 else (1, True)
 
 
-def task_seg_align_for(seg_align: int, *, in_place: bool) -> int | None:
+def task_seg_align_for(seg_align: int | None, *, in_place: bool) -> int | None:
     """
     The ``seg_align`` an engine call hands ``build_tasks``.
 
     The engine's own ``seg_align`` is the block unit of its in-place readers
-    (0 = legacy unaligned tasks, A/B only). Modes that read Q/K/V in place need
-    the strict layout; every other call takes the default, which aligns
-    wherever alignment is well defined.
+    (0 = legacy unaligned tasks, A/B only; None = the default, as in
+    ``build_tasks``, so a kwargs dict that passes None through gets the aligned
+    layout rather than the legacy one). Modes that read Q/K/V in place need the
+    strict layout; every other call takes the default, which aligns wherever
+    alignment is well defined.
     """
+    if seg_align is None:
+        return TASK_SEG_ALIGN if in_place else None
     if not seg_align:
         return 0
     return int(seg_align) if in_place else None
@@ -443,10 +447,18 @@ def max_depth_for(N: int, c: int = 7, *, align: int = 1, l: int = 3) -> int:
     depth: everything shallower is a policy choice, and nothing deeper is
     meaningful.
 
-    Under a strict block alignment the bound is tighter: a level needs
-    ``c * align`` local tokens to give every chunk a whole block, and a task at
-    depth d holds about ``N * (l/c)**d`` tokens (``l`` = interest-set size), so
-    every level is well formed only while ``d <= log_{c/l}(N / (c * align))``.
+    Under a strict block alignment the bound is tighter: refining a task to the
+    next level needs ``c * align`` local tokens in the PARENT (the guard
+    ``min_refinable_tokens`` applies in ``refine_task``), and a task at depth d
+    holds about ``N * (l/c)**d`` tokens (``l`` = interest-set size), so depth
+    d + 1 is reachable while ``N * (l/c)**d >= c * align``, i.e. the deepest
+    depth is ``floor(log_{c/l}(N / (c * align))) + 1``. It is an estimate from
+    the mean task length: aligned tasks round up to whole blocks, so a real task
+    can still be refinable one level past it (N=2048, c=7: 1024-token itr=1
+    tasks against a mean of 877). The engines' OOM recovery therefore refuses
+    an aligned task by the exact per-task guard and uses this depth only to
+    size its retry backstop -- and as the cap itself on the legacy layout,
+    where it is exact.
     """
     n, ci = int(N), int(c)
     if n <= 0 or ci <= 1:
@@ -458,7 +470,7 @@ def max_depth_for(N: int, c: int = 7, *, align: int = 1, l: int = 3) -> int:
     if a <= 1:
         return k
     d = 0
-    while d < k and n * li ** (d + 1) >= ci * a * ci ** (d + 1):
+    while d < k and n * li ** d >= ci * a * ci ** d:
         d += 1
     return d
 
@@ -1237,7 +1249,7 @@ def stream_cqsa_forward(
     c: int = 7,
     interest_set: Sequence[int] = (0, 1, 3),
     segmented: bool = False,
-    seg_align: int = 128,
+    seg_align: int | None = 128,
     stream_from_host: bool = False,
     cpu_threads: int | None = _CPU_MERGE_THREADS_DEFAULT,
     shared_chunks: bool = False,
@@ -1267,6 +1279,7 @@ def stream_cqsa_forward(
     device = q.device
     if scale is None:
         scale = float(D) ** -0.5
+    seg_align = TASK_SEG_ALIGN if seg_align is None else int(seg_align)   # None = the default, as in build_tasks
 
     # Host-resident Q/K/V: the inputs live on the CPU and only the in-flight
     # subsequences are ever on the device. This is the framework's actual OOM
@@ -1456,6 +1469,8 @@ def stream_cqsa_forward(
         "sorted_gather": bool(sorted_gather),
         "segmented": bool(use_seg),
         "shared_chunks": bool(shared_chunks),
+        # the chunk layout the tasks were built with (0 = legacy even split), so A/B rows can tell the arms apart
+        "task_seg_align": task_align,
         "causal": bool(causal),
         "c": int(c),
         "interest_set": tuple(int(x) for x in interest_set),
@@ -1885,7 +1900,8 @@ def stream_cqsa_forward(
                           f"tokens). The O(N*H*D) resident terms dominate; offload them, "
                           f"or reduce N, H or D."
                       ) from exc
-                  if int(task.itr) >= depth_cap:
+                  if task_align <= 1 and int(task.itr) >= depth_cap:
+                      # an aligned task is judged by the exact token guard above
                       info["depth_capped"] = True
                       raise torch.cuda.OutOfMemoryError(
                           f"Stream-CQSA: a subproblem at itr={task.itr} does not fit "
@@ -2406,7 +2422,7 @@ def stream_cqsa_backward(
     # Chunk layout of the subproblems, as in the forward: block-aligned chunk
     # boundaries (the default) or the legacy even split (0, for A/B only). The
     # backward always gathers, so alignment only decides where its tiles fall.
-    seg_align: int = 128,
+    seg_align: int | None = 128,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Stream-CQSA exact attention backward. All of q/k/v/dout/out are
@@ -2543,9 +2559,12 @@ def stream_cqsa_backward(
                         f"and escalation is disabled (allow_escalation=False), so "
                         f"this depth genuinely does not fit."
                     ) from exc
-                if depth >= depth_cap:
+                # aligned: another level exists while the largest task can still be split into
+                # whole blocks (the exact guard); legacy: the structural token bound
+                if (depth >= depth_cap if task_align <= 1 else
+                        max(int(t.local_size) for t in tasks_at_depth) < min_refinable_tokens(c, task_seg_align)):
                     raise torch.cuda.OutOfMemoryError(
-                        f"Stream-CQSA streamed backward: itr={depth_cap} is the "
+                        f"Stream-CQSA streamed backward: itr={depth} is the "
                         f"deepest decomposition N={N} admits at c={c}, and the "
                         f"call still does not fit. The O(N*H*D) resident terms "
                         f"dominate and no depth reduces them; reduce N, H or D."
@@ -2657,7 +2676,7 @@ def stream_cqsa_backward(
             if torch.cuda.is_available():
                 torch.cuda.synchronize(device)
                 torch.cuda.empty_cache()
-            if not allow_escalation or int(task.itr) >= depth_cap \
+            if not allow_escalation or (task_align <= 1 and int(task.itr) >= depth_cap) \
                     or int(task.local_size) < min_refinable_tokens(c, task_seg_align) \
                     or retries > retry_budget:
                 raise torch.cuda.OutOfMemoryError(

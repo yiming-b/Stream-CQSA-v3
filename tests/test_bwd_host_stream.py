@@ -40,14 +40,19 @@ def test_host_matches_device(dtype, itr, causal):
 
 
 def test_host_uses_less_device_memory():
-    """The point of the path: device peak must not scale with N."""
+    """The point of the path: device peak must not scale with N. Peaks are counted above what was allocated
+    before the test: in a full suite run earlier tests can leave device tensors alive (a failed test's
+    traceback holds its frames), and an absolute max_memory_allocated() would charge them to both paths
+    (job 14327651: ~21 MB left by the environmental bf16 failures turned 5.5 vs 28.7 MB into 26.4 vs 49.6)."""
+    torch.cuda.synchronize()
+    baseline = torch.cuda.memory_allocated()
     q, k, v, dout, out, lse = _setup(n=8192)
     kw = dict(itr=2, causal=True)
 
     torch.cuda.synchronize(); torch.cuda.reset_peak_memory_stats()
     stream_cqsa_backward(q, k, v, dout, out, lse, **kw)
     torch.cuda.synchronize()
-    dev_peak = torch.cuda.max_memory_allocated()
+    dev_peak = torch.cuda.max_memory_allocated() - baseline      # includes the device-resident inputs
 
     hosted = tuple(t.cpu() for t in (q, k, v, dout, out, lse))
     del q, k, v, dout, out, lse
@@ -55,7 +60,7 @@ def test_host_uses_less_device_memory():
     torch.cuda.synchronize(); torch.cuda.reset_peak_memory_stats()
     stream_cqsa_backward(*hosted, stream_from_host=True, **kw)
     torch.cuda.synchronize()
-    host_peak = torch.cuda.max_memory_allocated()
+    host_peak = torch.cuda.max_memory_allocated() - baseline
 
     assert host_peak < dev_peak / 2, f"host {host_peak} vs device {dev_peak}"
 

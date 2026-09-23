@@ -1,0 +1,72 @@
+code: /scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-25dfb5e
+della-l08g7
+/scratch/gpfs/AKEY/yb2807/VENVs/CQSA311/bin/python
+NVIDIA A100-SXM4-80GB
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-25dfb5e/stream_cqsa/__init__.py 2.10.0+cu130
+{'cuda_extension': True, 'cuda_extension_noncausal': True, 'native_wave': True, 'triton': True, 'flash_attn': True}
+............F.F.F.F.F.F.F.F.F.F.F.FF.................................... [ 13%]
+........................................................................ [ 26%]
+........................................................................ [ 39%]
+........................................................................ [ 52%]
+........................................................................ [ 65%]
+.................................................ssssssssssss.ssssssssss [ 78%]
+sssssssssssssssssssssssssssssssssssss.ssssssssssssssssssssssssssssssssss [ 91%]
+ssss............................ss..ss...........                        [100%]
+=================================== FAILURES ===================================
+E   RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-25dfb5e/stream_cqsa/interface.py:270: RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+E   RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-25dfb5e/stream_cqsa/interface.py:270: RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+E   RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-25dfb5e/stream_cqsa/interface.py:270: RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+E   RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-25dfb5e/stream_cqsa/interface.py:270: RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+E   RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-25dfb5e/stream_cqsa/interface.py:270: RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+E   RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-25dfb5e/stream_cqsa/interface.py:270: RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+E   RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-25dfb5e/stream_cqsa/interface.py:270: RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+E   RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-25dfb5e/stream_cqsa/interface.py:270: RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+E   RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-25dfb5e/stream_cqsa/interface.py:270: RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+E   RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-25dfb5e/stream_cqsa/interface.py:270: RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+E   RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-25dfb5e/stream_cqsa/interface.py:270: RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+E   RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-25dfb5e/stream_cqsa/interface.py:270: RuntimeError: this CQSA build only supports fp16; rebuild with CQSA_KERNEL_SET=common (fp16+bf16) or =full.
+E   AssertionError: host 26412032 vs device 49558528
+    assert 26412032 < (49558528 / 2)
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-25dfb5e/tests/test_bwd_host_stream.py:60: AssertionError: host 26412032 vs device 49558528
+=============================== warnings summary ===============================
+tests/test_api.py::test_attention_host_inputs_and_memory_cap
+  /scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-25dfb5e/stream_cqsa/api.py:536: RuntimeWarning: Stream-CQSA: host-resident Q/K/V are stored head-major ([B,H,N,D] contiguous); streaming needs them token-major, so a 0.4 GiB copy is made per call. Keep host tensors token-major (x.transpose(1
+    out, info = stream_cqsa_forward(q, k, v, causal=bool(is_causal), scale=scale, verbose=verbose, out_device="acc", **kw)
+tests/test_devkit_autoconfig.py: 14 warnings
+    warnings.warn(
+tests/test_devkit_autoconfig.py::test_flex_adapter_positions
+    _warn_once(
+tests/test_ultimate_kernel_rows.py::test_recomposed_layouts_agree_and_match_fp64[1]
+    _warn_once(
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_backward_default.py::test_default_backward_matches_sdpa[True-64-dtype1]
+FAILED tests/test_backward_default.py::test_default_backward_matches_sdpa[True-128-dtype1]
+FAILED tests/test_backward_default.py::test_default_backward_matches_sdpa[False-64-dtype1]
+FAILED tests/test_backward_default.py::test_default_backward_matches_sdpa[False-128-dtype1]
+FAILED tests/test_bf16.py::test_dtype_fwd_bwd[False-64-dtype1] - RuntimeError...
+FAILED tests/test_bf16.py::test_dtype_fwd_bwd[False-128-dtype1] - RuntimeErro...
+FAILED tests/test_bf16.py::test_dtype_fwd_bwd[True-64-dtype1] - RuntimeError:...
+FAILED tests/test_bf16.py::test_dtype_fwd_bwd[True-128-dtype1] - RuntimeError...
+FAILED tests/test_bwd_host_stream.py::test_host_matches_device[False-1-dtype1]
+FAILED tests/test_bwd_host_stream.py::test_host_matches_device[False-2-dtype1]
+FAILED tests/test_bwd_host_stream.py::test_host_matches_device[True-1-dtype1]
+FAILED tests/test_bwd_host_stream.py::test_host_matches_device[True-2-dtype1]
+FAILED tests/test_bwd_host_stream.py::test_host_uses_less_device_memory - Ass...
+13 failed, 439 passed, 101 skipped, 17 warnings in 222.23s (0:03:42)
+exit 1  15:51:38
+14327651||00:07:05
+14327651.batch||00:07:05
+14327651.extern||00:07:05

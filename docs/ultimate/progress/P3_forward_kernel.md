@@ -11,7 +11,7 @@ exact everywhere. Variant tree: `/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/
 |---|---|---|
 | read design 1/3/4/7, exp_build_ab.md, cuobjdump_v11x.md, v11 kernel | done 2026-09-23 | |
 | clone v11 -> v12f, code written | done 2026-09-23 10:38 | files listed below |
-| build b1 (clean, detached, vis1) | running since 10:38 | log `next/logs/05_build_v12f_b1.log`, csv `next/logs/build_v12f_b1_nvcc_time.csv` |
+| build b1 (clean, detached, vis1) | done rc=0 in 1926 s (11:10) | log `next/logs/05_build_v12f_b1.log`, csv `next/logs/build_v12f_b1_nvcc_time.csv` |
 | harness / test / slurm written | done | `benchmarks/ultimate/fwd_ab.py`, `tests/test_ultimate_v12f.py`, `slurm/ultimate/fwd_ab.slurm` |
 | correctness on vis1 (tests/test_ultimate_v12f.py) | - | CPU census-reference test passes |
 | SXM job fwd_ab | - | |
@@ -66,3 +66,12 @@ Check `next/logs/05_build_v12f_b1.log` ("finished rc="). Then on vis1:
 (v12f LAST: it carries a stub stream_cqsa). Then commit, `SNAP=$(bash slurm/ultimate/snapshot.sh) && sbatch
 --export=ALL,CQSA_SRC=$SNAP slurm/ultimate/fwd_ab.slurm`; `python -P benchmarks/ultimate/fwd_ab.py --report
 results/ultimate/fwd_ab.json` writes fwd_ab.md.
+
+## Status snapshot (relayed user status question, 2026-09-23 13:15)
+
+Slurm (sacct since 09-21): the v2.2.3 work (main's unreleased 24a4ff7/5ba4c90/c4bc39b; not tagged, `__version__`
+still 2.2.2) has all 12 released jobs finished: paper supplements 13908223/13908224/13915115/13915470 COMPLETED
+(1.6-4.2 h), OOC forward grid 13952419/21/23/25 COMPLETED, OOC backward grid 13952418/20/22/24 OUT_OF_MEMORY
+(the known 4M-bwd host OOM at 96G, owed by the OOC-harness package). Ultimate program: dist4 telemetry 14312486
+still PENDING (Priority, gpu-short), fold-workers A/B 14313570 COMPLETED (I0), no gpu-test job of this package
+queued. P3 itself: v12f build b1 finished rc=0 in 1926 s; next = vis1 correctness, then the SXM fwd_ab job.

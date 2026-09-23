@@ -70,11 +70,19 @@ new: `src/cqs_census.{h,cu}`, `src/flash_fwd_aligned.h`, `src/flash_fwd_hdim*_le
 
 ## Next step for a resumed agent
 
-Check `next/logs/05_build_v12f_b1.log` ("finished rc="). Then on vis1:
-`python -P -m pytest -q tests/test_ultimate_v12f.py` with PYTHONPATH = worktree:next/kernel/stable:$PYTHONPATH:next/native:next/kernel/v12f
-(v12f LAST: it carries a stub stream_cqsa). Then commit, `SNAP=$(bash slurm/ultimate/snapshot.sh) && sbatch
---export=ALL,CQSA_SRC=$SNAP slurm/ultimate/fwd_ab.slurm`; `python -P benchmarks/ultimate/fwd_ab.py --report
-results/ultimate/fwd_ab.json` writes fwd_ab.md.
+**P3 package complete (2026-09-23 15:00).** Production build = `next/kernel/v12f/frozen/b2` (md5 f55c4091...; the
+variant tree's own .so is the same build). Results: `results/ultimate/fwd_ab.md` (b1, job 14319938) and
+`fwd_ab_b2.md` (b2, job 14324080), static `v12f_static.md`, diff `docs/ultimate/kernel_diffs/v12f.diff`.
+Open items for the next package (not done here):
+1. Port the census + ALIGNED loop into `native/` (uniform wave layout + `lens[W]`, W >= 1, in-place deltas per
+   run step) and make the classic call a W=1 wave (design 4.5); v12f is the classic single-subproblem entry only.
+2. One build with P2's v12b backward: v12f is built with `CQSA_BWD_NO_CQS=1` (its backward is WRONG for CQS masks).
+3. Retire v9 (`CQSA_CUDA_MODULE_NONCAUSAL`): measured v12f <= v9 on every non-causal D=64 pattern (aligned zero/real,
+   unaligned, random); D=128 mixed non-causal not yet measured.
+4. Per-call overhead ~20 us (census + LEGACY no-op + memset; 0.73% of c=73's per-task sum): fold the memset into
+   the census if a small-L wave needs it.
+5. Not built: row-range launch `[m_lo, m_hi)` (design 4.2), smem-staged lse in the wave merge, 128x64 (K3).
+6. build.sh now uses one csv path for `-time`; the first build after that change rebuilds every unit once.
 
 ## Status snapshot (relayed user status question, 2026-09-23 13:15)
 

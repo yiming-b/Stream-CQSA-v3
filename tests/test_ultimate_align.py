@@ -478,6 +478,10 @@ def test_distributed_pair_takes_one_kwargs_dict(tmp_path):
             grads, _ = dist_stream_cqsa_backward(q, k, v, do, out, info["lse"], itr=1, causal=True, **kw)
             rgrads = stream_cqsa_backward(q, k, v, do, ref, rinfo["lse"], itr=1, causal=True,
                                           seg_align=kw.get("seg_align", 128))
-            assert all(torch.equal(a, b) for a, b in zip(grads, rgrads))
+            # dk / dv are deterministic; dq comes from fp32 atomics in the CUDA backward (the default
+            # with the v13 module), whose order differs run to run by ~1e-5 of max |dq| (measured 6e-5
+            # at max |dq| 3): the pair is checked within that band, not bit for bit
+            assert torch.equal(grads[1], rgrads[1]) and torch.equal(grads[2], rgrads[2])
+            assert (grads[0] - rgrads[0]).abs().max() <= 1e-4 * rgrads[0].abs().max()
     finally:
         dist.destroy_process_group()

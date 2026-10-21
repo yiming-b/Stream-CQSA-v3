@@ -69,6 +69,18 @@ def timed(fn, iters):
     return FA.timed(fn, iters, warm=1)
 
 
+def arm(r, name, fn, iters):
+    """Time one arm into r[name_ms] / r[name_min_ms]; a failing arm records r[name_error] (NaN times) and the
+    later arms of the part still run (the combined job must not lose a part to one arm)."""
+    try:
+        r[f"{name}_ms"], r[f"{name}_min_ms"] = timed(fn, iters)
+    except Exception as e:  # noqa
+        r[f"{name}_ms"], r[f"{name}_min_ms"], r[f"{name}_error"] = float("nan"), float("nan"), f"{type(e).__name__}: {e}"
+        print(f"!! arm {name} failed: {r[name + '_error']}", flush=True)
+        torch.cuda.empty_cache()
+    return r[f"{name}_ms"]
+
+
 def tasks_for(N, c):
     return sorted(FA.c_tasks(N, c, 1), key=lambda t: (int(t.local_size), t.path))
 
@@ -204,8 +216,11 @@ def part_fwd(res, N, c, iters):
         del out, lse, out_i, lse_i, out_o, lse_o
         routes |= {int(x) for x in v2.fwd_cqs_census(p.tb.bits, p.tb.blk_or, p.tb.blk_and, True, D, p.tb.lens, int(p.tb.S))[0].tolist()}
         for name, fn in wave_arms:
-            ms, mn = timed(lambda: fn(p), iters)
-            r[f"{name}_ms"] += ms; r[f"{name}_min_ms"] += mn
+            acc = dict(ms=0.0, min_ms=0.0)
+            arm(acc, "", lambda: fn(p), iters)
+            r[f"{name}_ms"] += acc["_ms"]; r[f"{name}_min_ms"] += acc["_min_ms"]
+            if "_error" in acc:
+                r[f"{name}_error"] = acc["_error"]
         for kk, vv in FA.kernel_times(lambda: fwd_v2(v2, p, False)).items():
             if isinstance(vv, float):
                 ktot[kk] = ktot.get(kk, 0.0) + vv
@@ -214,27 +229,30 @@ def part_fwd(res, N, c, iters):
     r["v2_equal_v12f_all_tasks"], r["v2_maxdiff_vs_v12f"], r["v2_equal_old_wave"] = eq_v12f, maxd, eq_old
     r["census_routes"], r["v2_wave_kernel_us"] = sorted(routes), ktot
     del refs
-    for name, fn in (("v12f_loop", lambda: fwd_loop(v12f, items)), ("v11_loop", lambda: fwd_loop(FA.MODS["v11"], items))):
-        r[f"{name}_ms"], r[f"{name}_min_ms"] = timed(fn, iters)
-    for name, _ in wave_arms + [("v12f_loop", None), ("v11_loop", None)]:
+    loops = [("v12f_loop", lambda: fwd_loop(v12f, items))]
+    if N <= 131072:      # v11 is the superseded kernel (v12f is measured against it in fwd_ab); its 1M loop costs minutes
+        loops.append(("v11_loop", lambda: fwd_loop(FA.MODS["v11"], items)))
+    for name, fn in loops:
+        arm(r, name, fn, iters)
+    for name, _ in wave_arms + loops:
         print(f"[{key}] {name:18s} {r[name + '_ms']:9.2f} ms", flush=True)
     # W=1: the smallest task alone, as a wave and as the classic call
     t0 = tasks[0]
     p1 = Prepared([t0], qt, kt, vt)
     i1 = [it for it in items if it[0] is t0]
     r["w1_L"] = int(t0.local_size)
-    r["v2_w1_ms"], r["v2_w1_min_ms"] = timed(lambda: fwd_v2(v2, p1, False), iters)
-    r["v2_w1_inplace_ms"], _ = timed(lambda: fwd_v2(v2, p1, True), iters)
-    r["old_w1_ms"], _ = timed(lambda: fwd_old(old, p1, False), iters)
-    r["v12f_w1_ms"], r["v12f_w1_min_ms"] = timed(lambda: fwd_loop(v12f, i1), iters)
+    arm(r, "v2_w1", lambda: fwd_v2(v2, p1, False), iters)
+    arm(r, "v2_w1_inplace", lambda: fwd_v2(v2, p1, True), iters)
+    arm(r, "old_w1", lambda: fwd_old(old, p1, False), iters)
+    arm(r, "v12f_w1", lambda: fwd_loop(v12f, i1), iters)
     r["v2_w1_over_v12f_w1"] = r["v2_w1_ms"] / r["v12f_w1_ms"]
     del p1, items
     torch.cuda.empty_cache()
     fa = FA.fa2_arms(N, D, True, iters)
     r.update({f"monolithic_{kk}": vv for kk, vv in fa.items()})
     for name in ("v2_wave", "v2_wave_inplace", "old_wave", "old_wave_inplace", "v12f_loop", "v11_loop"):
-        r[f"{name}_over_flash_attn"] = r[f"{name}_ms"] / fa["flash_attn_ms"]
-        r[f"{name}_over_sdpa"] = r[f"{name}_ms"] / fa["sdpa_flash_ms"]
+        r[f"{name}_over_flash_attn"] = r.get(f"{name}_ms", float("nan")) / fa["flash_attn_ms"]
+        r[f"{name}_over_sdpa"] = r.get(f"{name}_ms", float("nan")) / fa["sdpa_flash_ms"]
     r["v2_wave_over_v12f_loop"] = r["v2_wave_ms"] / r["v12f_loop_ms"]
     r["v2_wave_over_old_wave"] = r["v2_wave_ms"] / r["old_wave_ms"]
     res["rows"].append(r)
@@ -344,33 +362,39 @@ def part_bwd(res, N, c, iters):
         del dq, dk, dv, dqo, dko, dvo
         routes |= {int(x) for x in v2.bwd_cqs_census(p.tb.bits, p.tb.blk_or, p.tb.blk_and, True, D, p.tb.lens, int(p.tb.S))[0].tolist()}
         for name, fn in wave_arms:
-            ms, mn = timed(lambda: fn(p), iters)
-            r[f"{name}_ms"] += ms; r[f"{name}_min_ms"] += mn
+            acc = dict(ms=0.0, min_ms=0.0)
+            arm(acc, "", lambda: fn(p), iters)
+            r[f"{name}_ms"] += acc["_ms"]; r[f"{name}_min_ms"] += acc["_min_ms"]
+            if "_error" in acc:
+                r[f"{name}_error"] = acc["_error"]
         del p
         torch.cuda.empty_cache()
     r["v2_dkdv_equal_v12b_all_tasks"], r["v2_maxdiff_dq_vs_v12b"] = eq, dq_max
     r["v2_dkdv_equal_old_wave"], r["v2_maxdiff_dq_vs_old_wave"] = eq_old, old_max
     r["census_routes"] = sorted(routes)
     del refs
-    for name, fn in (("v12b_loop", lambda: bwd_loop(v12b, items)), ("v11_loop", lambda: bwd_loop(BA.MODS["v11"], items))):
-        r[f"{name}_ms"], r[f"{name}_min_ms"] = timed(fn, iters)
-    for name, _ in wave_arms + [("v12b_loop", None), ("v11_loop", None)]:
+    loops = [("v12b_loop", lambda: bwd_loop(v12b, items))]
+    if N <= 131072:
+        loops.append(("v11_loop", lambda: bwd_loop(BA.MODS["v11"], items)))
+    for name, fn in loops:
+        arm(r, name, fn, iters)
+    for name, _ in wave_arms + loops:
         print(f"[{key}] {name:18s} {r[name + '_ms']:9.2f} ms", flush=True)
     t0 = tasks[0]
     p1 = PreparedBwd([t0], qt, kt, vt, dot, lse, dpsum)
     i1 = [it for it in items if it[0] is t0]
     r["w1_L"] = int(t0.local_size)
-    r["v2_bwd_w1_ms"], r["v2_bwd_w1_min_ms"] = timed(lambda: bwd_v2(v2, p1), iters)
-    r["old_bwd_w1_ms"], _ = timed(lambda: bwd_old(old, p1), iters)
-    r["v12b_w1_ms"], r["v12b_w1_min_ms"] = timed(lambda: bwd_loop(v12b, i1), iters)
+    arm(r, "v2_bwd_w1", lambda: bwd_v2(v2, p1), iters)
+    arm(r, "old_bwd_w1", lambda: bwd_old(old, p1), iters)
+    arm(r, "v12b_w1", lambda: bwd_loop(v12b, i1), iters)
     r["v2_bwd_w1_over_v12b_w1"] = r["v2_bwd_w1_ms"] / r["v12b_w1_ms"]
     del p1, items
     torch.cuda.empty_cache()
     fa = BA.fa2_arms(N, D, True, iters)
     r.update({f"monolithic_{kk}": vv for kk, vv in fa.items()})
     for name in ("v2_bwd_wave", "old_bwd_wave", "v12b_loop", "v11_loop"):
-        r[f"{name}_over_flash_attn"] = r[f"{name}_ms"] / fa["flash_attn_bwd_ms"]
-        r[f"{name}_over_sdpa"] = r[f"{name}_ms"] / fa["sdpa_flash_bwd_ms"]
+        r[f"{name}_over_flash_attn"] = r.get(f"{name}_ms", float("nan")) / fa["flash_attn_bwd_ms"]
+        r[f"{name}_over_sdpa"] = r.get(f"{name}_ms", float("nan")) / fa["sdpa_flash_bwd_ms"]
     r["v2_bwd_wave_over_v12b_loop"] = r["v2_bwd_wave_ms"] / r["v12b_loop_ms"]
     r["old_over_v2_bwd_wave"] = r["old_bwd_wave_ms"] / r["v2_bwd_wave_ms"]
     res["rows"].append(r)
@@ -396,7 +420,7 @@ def part_engine(res, N, c, iters, backward=True):
             fn = lambda: NW.wave_forward(q, k, v, causal=True, itr=1, c=c, interest_set=iset, kernel="cuda", gather=gather)
             out, info = fn()
             outs[name] = out
-            r[f"{name}_ms"], r[f"{name}_min_ms"] = timed(fn, iters)
+            arm(r, name, fn, iters)
             r[f"{name}_waves"] = info["wave_sizes"]
             print(f"[{key}] {name:22s} {r[name + '_ms']:9.2f} ms  waves {info['wave_sizes']} gather={info['gather']}", flush=True)
     r["engine_v2_equal_old_fwd"] = bool(torch.equal(outs["v2_fwd_gathered"], outs["old_fwd_gathered"]))
@@ -411,7 +435,7 @@ def part_engine(res, N, c, iters, backward=True):
             use_native(key_m)
             fn = lambda: NW.wave_backward(q, k, v, out, dout, info["lse"], causal=True, itr=1, c=c, interest_set=iset)
             grads[key_m] = fn()[0]
-            r[f"{key_m}_bwd_ms"], r[f"{key_m}_bwd_min_ms"] = timed(fn, iters)
+            arm(r, f"{key_m}_bwd", fn, iters)
             print(f"[{key}] {key_m + '_bwd':22s} {r[key_m + '_bwd_ms']:9.2f} ms", flush=True)
         r["engine_bwd_v2_vs_old_rel"] = max(((a.float() - b.float()).norm() / b.float().norm()).item() for a, b in zip(grads["v2"], grads["old"]))
         r["engine_old_over_v2_bwd"] = r["old_bwd_ms"] / r["v2_bwd_ms"]
@@ -440,7 +464,7 @@ def report(res):
               "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
         for r in fr:
             L.append(f"| {r['N']} | {r['c']} | {r['W']} | {r['wave_sizes']} | {r['L_min']}-{r['L_max']} | {r['v2_wave_ms']:.2f} | {r['v2_wave_inplace_ms']:.2f} | "
-                     f"{r['old_wave_ms']:.2f} | {r['old_wave_inplace_ms']:.2f} | {r['v12f_loop_ms']:.2f} | {r['v11_loop_ms']:.2f} | {r['monolithic_flash_attn_ms']:.2f} | "
+                     f"{r['old_wave_ms']:.2f} | {r['old_wave_inplace_ms']:.2f} | {r['v12f_loop_ms']:.2f} | {r.get('v11_loop_ms', float('nan')):.2f} | {r['monolithic_flash_attn_ms']:.2f} | "
                      f"{r['monolithic_sdpa_flash_ms']:.2f} | **{r['v2_wave_over_flash_attn']:.3f}** | {r['v2_wave_over_v12f_loop']:.3f} | {r['v2_wave_over_old_wave']:.3f} | "
                      f"**{r['v2_w1_over_v12f_w1']:.3f}** ({r['v2_w1_ms']:.2f} / {r['v12f_w1_ms']:.2f} ms at L={r['w1_L']}) | {r['v2_equal_v12f_all_tasks']} | {r['v2_equal_old_wave']} | {r['census_routes']} |")
         L += ["", "Device us per kernel kind of one v2 wave call (census / aligned / legacy no-op / memset): "
@@ -452,7 +476,7 @@ def report(res):
               "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
         for r in br:
             L.append(f"| {r['N']} | {r['c']} | {r['W']} | {r['wave_sizes']} | {r['v2_bwd_wave_ms']:.2f} | {r['old_bwd_wave_ms']:.2f} | {r['v12b_loop_ms']:.2f} | "
-                     f"{r['v11_loop_ms']:.2f} | {r['monolithic_flash_attn_bwd_ms']:.2f} | {r['monolithic_sdpa_flash_bwd_ms']:.2f} | **{r['v2_bwd_wave_over_flash_attn']:.3f}** | "
+                     f"{r.get('v11_loop_ms', float('nan')):.2f} | {r['monolithic_flash_attn_bwd_ms']:.2f} | {r['monolithic_sdpa_flash_bwd_ms']:.2f} | **{r['v2_bwd_wave_over_flash_attn']:.3f}** | "
                      f"{r['v2_bwd_wave_over_v12b_loop']:.3f} | **{r['old_over_v2_bwd_wave']:.2f}x** | **{r['v2_bwd_w1_over_v12b_w1']:.3f}** ({r['v2_bwd_w1_ms']:.2f} / {r['v12b_w1_ms']:.2f} ms at L={r['w1_L']}) | "
                      f"{r['v2_dkdv_equal_v12b_all_tasks']} | {r['v2_maxdiff_dq_vs_v12b']:.1e} | {r['v2_dkdv_equal_old_wave']} | {r['census_routes']} |")
         L.append("")
@@ -475,6 +499,9 @@ def report(res):
         L.append(f"- backward N={r['N']} c={r['c']}: W=1 v2 / v12b = {r['v2_bwd_w1_over_v12b_w1']:.3f} (target within 1%: "
                  f"{'met' if abs(r['v2_bwd_w1_over_v12b_w1'] - 1) <= 0.01 else 'NOT met'}); old bwd_wave / v2 = {r['old_over_v2_bwd_wave']:.2f}x "
                  f"(target >= 2x: {'met' if r['old_over_v2_bwd_wave'] >= 2 else 'NOT met'}); v2 / monolithic flash_attn bwd = {r['v2_bwd_wave_over_flash_attn']:.3f}")
+    arm_errors = [(r["part"], r["N"], r["c"], k, v) for r in res["rows"] for k, v in r.items() if k.endswith("_error")]
+    if arm_errors:
+        L += ["", "## Failed arms", ""] + [f"- {p} N={N} c={c} {k[:-6]}: {v}" for p, N, c, k, v in arm_errors]
     if res.get("errors"):
         L += ["", "## Errors", ""] + [f"```\n{e}\n```" for e in res["errors"]]
     return "\n".join(L) + "\n"

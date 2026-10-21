@@ -39,6 +39,17 @@
   `tol=`. The planner's world>1 time is the scheduler's on the refit (`scheduler.dist_local_time`,
   `CostModel.dist_merge_s` per reduction; the 1.35 imbalance factor retired); `calibrate_rate` subtracts the same
   overheads. `results/ultimate/dist_sched_dryrun.md`: predicted vs measured for every arm of the job.
+* Native wave kernel v2 (`kernels/native_v2`, module `cqsa_native_v2`; ultimate program package U2): the census +
+  ALIGNED run-table forward and backward of v12f / v12b on the uniform wave layout, W >= 1 subproblems per
+  launch with their real lengths (`lens[W]`), per-subproblem routing to v11's LEGACY loop when a subproblem has
+  mixed tiles, the in-place block-map delta looked up with the run-table step. One layout now serves causal and
+  non-causal, gathered and in-place reads for any N (the varlen wave layout and the `N % 128 == 0` gather rule
+  are retired), head dims 64 and 128 (the hdim128 wave kernels compile in the split translation units), fp16 and
+  bf16; a classic single-subproblem call is a W=1 wave with no extra work. `stream_cqsa.native_wave` uses it when
+  importable (fallback `cqsa_native`; the uniform layout for the backward too). Verified on vis1
+  (`tests/test_wave_v2.py`): the wave equals the per-task v12f forward bit for bit (W 1/7/49/73, in place and
+  gathered, ragged N, both causal modes, D 64/128) and v12b's dk/dv; the A/B (`benchmarks/ultimate/wave_ab.py`,
+  `slurm/ultimate/parts/u2.sh`) runs in the combined ultimate job (`results/ultimate/wave_ab.md`).
 * New classic CUDA module (`csrc/` = `kernels/v13`, built as `cqsa_cuda`; the development build is
   `cqsa_cuda_v13`): forward and backward each run a census kernel that classifies every tile of a call on
   the device, then an ALIGNED run-table kernel for calls without mixed tiles (upstream FA-2's loop over the

@@ -59,15 +59,33 @@ from .progress import Progress, verbose_enabled, describe_call, expected_seconds
 
 SEG_ALIGN = 128
 _ext = None
+# The wave extension, in order of preference: cqsa_native_v2 (ultimate program U2: census + ALIGNED
+# run-table kernels on the uniform layout for every call, WAVE_API 2) and the first wave module
+# cqsa_native (v11's loop; uniform layout for causal, varlen for non-causal; WAVE_API 1).
+NATIVE_MODULES = ("cqsa_native_v2", "cqsa_native")
 
 
 def native_ext():
-    """The ``cqsa_native`` extension (name overridable with CQSA_NATIVE_MODULE)."""
+    """The wave extension: CQSA_NATIVE_MODULE when set, else the first importable of NATIVE_MODULES."""
     global _ext
     if _ext is None:
         import importlib
-        _ext = importlib.import_module(os.environ.get("CQSA_NATIVE_MODULE", "cqsa_native"))
+        names = (os.environ["CQSA_NATIVE_MODULE"],) if "CQSA_NATIVE_MODULE" in os.environ else NATIVE_MODULES
+        errors = []
+        for name in names:
+            try:
+                _ext = importlib.import_module(name)
+                break
+            except ImportError as exc:
+                errors.append(f"{name}: {exc}")
+        if _ext is None:
+            raise ImportError("no native wave extension importable (" + "; ".join(errors) + ")")
     return _ext
+
+
+def wave_api(ext=None) -> int:
+    """The wave entry points' API generation of the loaded extension (1 = cqsa_native, 2 = cqsa_native_v2)."""
+    return int(getattr(native_ext() if ext is None else ext, "WAVE_API", 1))
 
 
 def native_available() -> bool:
@@ -97,9 +115,13 @@ def native_supports(dtype, D: int, device="cuda") -> bool:
         q = torch.zeros((128, 1, int(D)), device=dev, dtype=dtype)
         bits = torch.zeros(128, dtype=torch.int64, device=dev)
         summ = torch.zeros(2, dtype=torch.int64, device=dev)
-        cu = torch.tensor([0, 128], dtype=torch.int32, device=dev)
-        ext.fwd_wave(q, q, q, cu, 128, 128, bits, summ, summ, cu, None, None, 0, float(D) ** -0.5, True,
-                     uniform_S=128, uniform_W=1)
+        if wave_api(ext) >= 2:
+            ext.fwd_wave(q, q, q, torch.tensor([128], dtype=torch.int32), 128, bits, summ, summ, None, 0,
+                         float(D) ** -0.5, True)
+        else:
+            cu = torch.tensor([0, 128], dtype=torch.int32, device=dev)
+            ext.fwd_wave(q, q, q, cu, 128, 128, bits, summ, summ, cu, None, None, 0, float(D) ** -0.5, True,
+                         uniform_S=128, uniform_W=1)
         ok = True
     except Exception:
         ok = False
@@ -180,16 +202,18 @@ class WaveTables:
     seg_base: torch.Tensor      # [sum blocks] int32 GLOBAL row of every 128-block (CPU; uniform: padded)
     bb_cu: torch.Tensor         # [W+1] int32 (device, varlen)
     bb_cu_cpu: np.ndarray = field(default=None)
+    lens: torch.Tensor = field(default=None)   # [W] int32 (CPU) real rows per subproblem (uniform)
 
 
 def build_wave_tables(tasks: Sequence[SubproblemTask], device, uniform: bool = False) -> WaveTables:
     """Pack the CQS tables of a wave.
 
-    ``uniform=True`` (causal forward): every subproblem padded to S = ceil(max_L/128)*128
-    rows; the kernel then runs as an ordinary batch of W sequences whose tables sit at
-    ``w * stride`` (see Flash_fwd_params::cqs_wave_tok_stride). Padding tokens carry zero
-    bits and token id -1 (excluded from the merge); padding blocks of the block map alias
-    the subproblem's last real block. ``uniform=False``: FlashAttention's varlen layout."""
+    ``uniform=True`` (every cqsa_native_v2 launch; the causal forward of cqsa_native): every
+    subproblem padded to S = ceil(max_L/128)*128 rows; the kernel then runs as an ordinary batch
+    of W sequences whose tables sit at ``w * stride`` (see Flash_fwd_params::cqs_wave_tok_stride)
+    and whose real lengths are ``lens``. Padding tokens carry zero bits and token id -1
+    (excluded from the merge); padding blocks of the block map alias the subproblem's last real
+    block. ``uniform=False``: FlashAttention's varlen layout (cqsa_native, non-causal)."""
     # numpy for the host-side concatenations: torch CPU ops fork 80 OpenMP threads per call here,
     # which cost ~200 ms per cat on 56K-element tensors (1.1 s per wave, measured; kernel 158 ms).
     npcat = lambda xs: torch.from_numpy(np.ascontiguousarray(np.concatenate([x.numpy() for x in xs])))
@@ -239,7 +263,8 @@ def build_wave_tables(tasks: Sequence[SubproblemTask], device, uniform: bool = F
         tasks=list(tasks), S=S, W=W, cu=torch.from_numpy(cu_np.astype(np.int32)).to(device), max_L=max_L, total=int(total),
         bits=bits, blk_or=blk_or, blk_and=blk_and, blk_cu=torch.from_numpy(blk_cu_np).to(device),
         tok=tok, order=order.contiguous(), seg=seg, uniq=uniq, seg_base=seg_base,
-        bb_cu=torch.from_numpy(bb_cu_np).to(device), bb_cu_cpu=bb_cu_np)
+        bb_cu=torch.from_numpy(bb_cu_np).to(device), bb_cu_cpu=bb_cu_np,
+        lens=torch.tensor(sizes, dtype=torch.int32))
 
 
 def block_base_for(tables: WaveTables, row_of_global) -> torch.Tensor:
@@ -310,9 +335,13 @@ def wave_token_floor(N: int, itr: int, c: int, interest_set: Sequence[int], *, H
 
 
 def in_place_possible(N: int, causal: bool) -> bool:
-    """Whether the CUDA wave kernel may read device-resident Q/K/V in place. The causal (uniform) layout loads
-    full 128-row tiles without predication, so the ragged last block of the sequence would run past the
-    tensor unless N is 128-aligned; the non-causal (varlen) layout predicates and is always safe."""
+    """Whether the CUDA wave kernel may read device-resident Q/K/V in place. cqsa_native_v2 always may: its
+    uniform layout carries every subproblem's real length, so the ragged last tile is predicated. The first
+    wave module's causal (uniform) layout loads full 128-row tiles without predication, so the ragged last
+    block of the sequence would run past the tensor unless N is 128-aligned; its non-causal (varlen) layout
+    predicates and is always safe."""
+    if native_available() and wave_api() >= 2:
+        return True
     return int(N) % SEG_ALIGN == 0 or not causal
 
 
@@ -557,6 +586,7 @@ def wave_forward(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *, causal: b
     B, H, N, D = q.shape
     kern = resolve_wave_kernel(kernel, q.dtype, D)
     ext = native_ext() if kern == "cuda" else None
+    api = wave_api(ext) if ext is not None else 0
     if kern == "triton":
         from .triton_kernel import cqs_attention_forward_wave
     dev = torch.device(device) if device is not None else (q.device if q.is_cuda else torch.device("cuda"))
@@ -670,8 +700,9 @@ def wave_forward(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *, causal: b
                 progress.update(sum(int(t.local_size) for t in wave))
                 del out_pack, lse_pack, tb
                 continue
-            # causal: uniform layout (batch of W padded sequences); non-causal: varlen layout
-            tb = build_wave_tables(wave, dev, uniform=bool(causal))
+            # cqsa_native_v2: the uniform layout (batch of W padded sequences with their real lengths) for
+            # every call; cqsa_native: uniform for causal, varlen for non-causal
+            tb = build_wave_tables(wave, dev, uniform=api >= 2 or bool(causal))
             if on_device and not gather:
                 # in place: the block map addresses the original tensor (see in_place_possible)
                 bb = block_base_for(tb, lambda g: g).to(dev, non_blocking=True)
@@ -690,9 +721,13 @@ def wave_forward(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *, causal: b
                     pool.load(wave, interest_set, b, q_tm, k_tm, v_tm)
                 bb = block_base_for(tb, pool.rows_of_global).to(dev, non_blocking=True)
                 qs, ks, vs = pool.q, pool.k, pool.v
-            out_pack, lse_pack = ext.fwd_wave(qs, ks, vs, tb.cu, int(tb.max_L), int(tb.total), tb.bits, tb.blk_or, tb.blk_and,
-                                              tb.blk_cu, bb, tb.bb_cu, SEG_ALIGN, scale, bool(causal),
-                                              uniform_S=int(tb.S), uniform_W=int(tb.W))
+            if api >= 2:
+                out_pack, lse_pack = ext.fwd_wave(qs, ks, vs, tb.lens, int(tb.S), tb.bits, tb.blk_or, tb.blk_and, bb, SEG_ALIGN,
+                                                  scale, bool(causal))
+            else:
+                out_pack, lse_pack = ext.fwd_wave(qs, ks, vs, tb.cu, int(tb.max_L), int(tb.total), tb.bits, tb.blk_or, tb.blk_and,
+                                                  tb.blk_cu, bb, tb.bb_cu, SEG_ALIGN, scale, bool(causal),
+                                                  uniform_S=int(tb.S), uniform_W=int(tb.W))
             if acc_gpu:
                 ext.wave_merge(acc, acc_l, acc_m, out_pack, lse_pack, tb.order, tb.seg, tb.uniq, int(tb.S))
             else:
@@ -743,6 +778,7 @@ def wave_backward(q, k, v, out, dout, lse, *, causal: bool = True, scale: Option
     on the host and streamed. Returns ``(dq, dk, dv)`` in the input dtype.
     """
     ext = native_ext()
+    api = wave_api(ext)
     B, H, N, D = q.shape
     dev = torch.device(device) if device is not None else (q.device if q.is_cuda else torch.device("cuda"))
     scale = float(D ** -0.5 if scale is None else scale)
@@ -778,25 +814,54 @@ def wave_backward(q, k, v, out, dout, lse, *, causal: bool = True, scale: Option
         if on_device:
             qt, kt, vt, dot = (t[b].transpose(0, 1) for t in (q, k, v, dout))     # [N, H, D] views
         for wave in waves:
-            tb = build_wave_tables(wave, dev)
             W = len(wave)
-            if on_device:
-                qp, kp, vp, dop = (torch.index_select(t, 0, tb.tok) for t in (qt, kt, vt, dot))
+            if api >= 2:
+                # the uniform layout: packed rows w*S + r, padding rows (token -1) zero in every input,
+                # lse / dpsum in the kernel's [W, H, S] layout (finite on padding: never read)
+                tb = build_wave_tables(wave, dev, uniform=True)
+                valid = tb.tok >= 0
+                pos = torch.nonzero(valid).squeeze(1); src = tb.tok[valid]
+                if on_device:
+                    def gather_rows(t):
+                        g = torch.zeros((tb.total, H, D), device=dev, dtype=t.dtype)
+                        g[pos] = t[src]
+                        return g
+                    qp, kp, vp, dop = (gather_rows(t) for t in (qt, kt, vt, dot))
+                else:
+                    pos_cpu, src_cpu = pos.cpu(), src.cpu()
+                    def gather_rows(t):
+                        g = torch.zeros((tb.total, H, D), dtype=t.dtype).pin_memory()
+                        with _cpu_threads(CPU_THREADS):
+                            g[pos_cpu] = t[b][src_cpu]
+                        return g.to(dev, non_blocking=True)
+                    qp, kp, vp, dop = (gather_rows(t) for t in (q_tm, k_tm, v_tm, do_tm))
+                def pack_rows(x):                                   # [H, N] -> [W, H, S]
+                    p = torch.zeros((H, tb.total), device=dev, dtype=torch.float32)
+                    p[:, pos] = x[:, src]
+                    return p.view(H, W, tb.S).transpose(0, 1).contiguous()
+                lse_p, dps_p = pack_rows(lse_d[b]), pack_rows(dpsum[b])
+                dq_p, dk_p, dv_p = ext.bwd_wave(dop, qp, kp, vp, lse_p, dps_p, tb.lens, int(tb.S),
+                                                tb.bits, tb.blk_or, tb.blk_and, scale, bool(causal))
+                del qp, kp, vp, dop, lse_p, dps_p, pos, src, valid
             else:
-                tok_cpu = torch.from_numpy(np.concatenate([t.token_ids.numpy() for t in wave]))
-                with _cpu_threads(CPU_THREADS):
-                    qp, kp, vp, dop = (torch.index_select(t[b], 0, tok_cpu).pin_memory().to(dev, non_blocking=True)
-                                       for t in (q_tm, k_tm, v_tm, do_tm))
-            lse_p = torch.index_select(lse_d[b], 1, tb.tok).contiguous()                 # [H, T]
-            # dpsum in the kernel's padded varlen layout: subproblem w at cu[w] + 128*w
-            cu_cpu = np.concatenate([[0], np.cumsum([int(t.local_size) for t in wave])])
-            pos = torch.from_numpy(np.concatenate([np.arange(cu_cpu[w] + 128 * w, cu_cpu[w] + 128 * w + int(t.local_size), dtype=np.int64)
-                                                   for w, t in enumerate(wave)])).to(dev, non_blocking=True)
-            dps_p = torch.zeros((H, int(tb.total) + 128 * W), device=dev, dtype=torch.float32)
-            dps_p.index_copy_(1, pos, torch.index_select(dpsum[b], 1, tb.tok))
-            dq_p, dk_p, dv_p = ext.bwd_wave(dop, qp, kp, vp, lse_p, dps_p, tb.cu, int(tb.max_L), int(tb.total),
-                                            tb.bits, tb.blk_or, tb.blk_and, tb.blk_cu, scale, bool(causal))
-            del qp, kp, vp, dop, lse_p, dps_p, pos
+                tb = build_wave_tables(wave, dev)
+                if on_device:
+                    qp, kp, vp, dop = (torch.index_select(t, 0, tb.tok) for t in (qt, kt, vt, dot))
+                else:
+                    tok_cpu = torch.from_numpy(np.concatenate([t.token_ids.numpy() for t in wave]))
+                    with _cpu_threads(CPU_THREADS):
+                        qp, kp, vp, dop = (torch.index_select(t[b], 0, tok_cpu).pin_memory().to(dev, non_blocking=True)
+                                           for t in (q_tm, k_tm, v_tm, do_tm))
+                lse_p = torch.index_select(lse_d[b], 1, tb.tok).contiguous()                 # [H, T]
+                # dpsum in the kernel's padded varlen layout: subproblem w at cu[w] + 128*w
+                cu_cpu = np.concatenate([[0], np.cumsum([int(t.local_size) for t in wave])])
+                pos = torch.from_numpy(np.concatenate([np.arange(cu_cpu[w] + 128 * w, cu_cpu[w] + 128 * w + int(t.local_size), dtype=np.int64)
+                                                       for w, t in enumerate(wave)])).to(dev, non_blocking=True)
+                dps_p = torch.zeros((H, int(tb.total) + 128 * W), device=dev, dtype=torch.float32)
+                dps_p.index_copy_(1, pos, torch.index_select(dpsum[b], 1, tb.tok))
+                dq_p, dk_p, dv_p = ext.bwd_wave(dop, qp, kp, vp, lse_p, dps_p, tb.cu, int(tb.max_L), int(tb.total),
+                                                tb.bits, tb.blk_or, tb.blk_and, tb.blk_cu, scale, bool(causal))
+                del qp, kp, vp, dop, lse_p, dps_p, pos
             ext.wave_scatter_add(dq[b], dq_p, tb.order, tb.seg, tb.uniq)
             ext.wave_scatter_add(dk[b], dk_p, tb.order, tb.seg, tb.uniq)
             ext.wave_scatter_add(dv[b], dv_p, tb.order, tb.seg, tb.uniq)

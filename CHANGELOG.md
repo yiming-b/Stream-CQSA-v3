@@ -29,12 +29,23 @@
   budgets, deterministic across ranks; `dist_stream_cqsa_forward/backward(scheduler=, split=, reduce=
   "allreduce"|"reduce_scatter", output="replicated"|"sharded")`; per-pair topology link classes in
   `detect_hardware` (`results/ultimate/dist_sched.md`, 4x A100 PCIe job 14330294).
-* New A100 kernels (sources under `kernels/`, not yet wired into the package): forward v12f and backward v12b
-  = a census kernel that classifies every 128x128 tile on the device, an ALIGNED run-table kernel for tasks
-  without mixed tiles (upstream FA-2's loop, no per-tile verdicts) and v11's code as the LEGACY fallback,
-  launched on one stream without a host sync. A100-SXM4-80GB, 56K-token causal task, head dim 64: forward
-  0.77x flash_attn (2.5x below the v11 all-live tax), backward 0.78x flash_attn (2.48x faster than v11);
-  non-causal 1.46-1.75x faster than the separate v9 kernel; bit-identical to v11 (`docs/ultimate/03_kernels_report.md`).
+* New classic CUDA module (`csrc/` = `kernels/v13`, built as `cqsa_cuda`; the development build is
+  `cqsa_cuda_v13`): forward and backward each run a census kernel that classifies every tile of a call on
+  the device, then an ALIGNED run-table kernel for calls without mixed tiles (upstream FA-2's loop over the
+  live tiles: no per-tile verdicts, no all-live tax) or v11's code as the LEGACY fallback (the per-element
+  mask path, for mixed tiles), launched on one stream without a host sync; one module serves causal and
+  non-causal calls, fp16 and bf16 (`CQSA_KERNEL_SET=common`). Per-call kernel figures, A100-SXM4-80GB,
+  56K-token causal task, head dim 64: forward 0.77x flash_attn (2.5x below v11's all-live tax), backward
+  0.78x flash_attn (2.48x faster than v11); non-causal 1.46-1.75x faster than the separate v9 kernel;
+  bit-identical to v11 in both directions on every pattern (`docs/ultimate/03_kernels_report.md`,
+  `tests/test_v13.py`). The second extension of v2 (`cqsa_cuda_nc`, v9's non-causal forward) is retired:
+  `setup.py` no longer builds `csrc_nc/`, `CQSA_CUDA_MODULE_NONCAUSAL` is unnecessary (it still works as an
+  override), and the interface loads `cqsa_cuda_v13` or `cqsa_cuda`, whichever imports first, unless
+  `CQSA_CUDA_MODULE` names a module. The default backward is the module's CUDA backward when it is a
+  v13-class module (`interface.backward_kernel()`; `CQSA_BACKWARD=triton|cuda` still forces one), Triton
+  otherwise; `kernels_available()["cuda_extension_unified"]`, `doctor` prints the default backward.
+  Engine-level A/B against the released v2.2.3 package: `results/ultimate/engine_ab.md` (U1 job; the
+  wave engine, `kernel="auto"`, still runs the old `cqsa_native` module until package U2 ports the design).
 
 ## v2.2.3 (2026-09-23)
 

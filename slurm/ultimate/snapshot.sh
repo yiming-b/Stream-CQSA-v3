@@ -4,9 +4,9 @@
 # A queued job that imports the live worktree runs whatever is checked out when it starts; the
 # snapshot (a `git archive` of one commit, so uncommitted edits are NOT included) cannot change.
 set -euo pipefail
-WT=/scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate
+WT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)        # the repo this script lives in
 SHA=$(git -C "$WT" rev-parse --short HEAD)
-SNAP=/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-$SHA
+SNAP=/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/$(basename "$WT")-$SHA
 if [ ! -f "$SNAP/.complete" ]; then
   mkdir -p "$SNAP"
   git -C "$WT" archive HEAD | tar -x -C "$SNAP"

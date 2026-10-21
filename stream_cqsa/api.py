@@ -34,7 +34,9 @@ __all__ = ["attention", "estimate", "patch_sdpa", "unpatch_sdpa", "patched_sdpa"
 def kernels_available() -> dict[str, bool]:
     """Which attention kernels this environment can run."""
     from . import interface as I
-    out = {"cuda_extension": I.cqsa_cuda is not None, "cuda_extension_noncausal": I.cqsa_cuda_noncausal is not None}
+    out = {"cuda_extension": I.cqsa_cuda is not None, "cuda_extension_noncausal": I.cqsa_cuda_noncausal is not None,
+           # a v13-class module (census + ALIGNED forward and backward in one extension; its CUDA backward is the default)
+           "cuda_extension_unified": I.CQSA_CUDA_UNIFIED}
     try:
         from .native_wave import native_available
         out["native_wave"] = native_available()

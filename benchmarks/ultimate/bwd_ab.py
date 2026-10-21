@@ -50,7 +50,8 @@ from stream_cqsa.autoconfig import QUORUM_SETS
 from stream_cqsa.interface import cqs_block_summaries, CQS_BLK_SIZE
 from stream_cqsa.stable_stream import build_tasks
 
-MODULES = {"v11": "cqsa_cuda_next_v11", "v11x": "cqsa_cuda_next_v11x", "v12b": "cqsa_cuda_next_v12b"}
+MODULES = {"v11": "cqsa_cuda_next_v11", "v11x": "cqsa_cuda_next_v11x", "v12b": "cqsa_cuda_next_v12b",
+           "v13": "cqsa_cuda_v13"}   # v13 (U1): v12b's backward in the unified module
 MODS = {}
 FORCE_LEGACY = 1                      # cqs_bwd_flags of v12b's bwd (kCqsBwdForceLegacy)
 RUN_SLOTS = 16                        # kCqsBwdRunSlots (cqs_census_bwd.h)

@@ -44,7 +44,7 @@ from stream_cqsa.interface import cqs_block_summaries, CQS_BLK_SIZE
 from stream_cqsa.stable_stream import build_tasks
 
 MODULES = {"v11": "cqsa_cuda_next_v11", "v11x": "cqsa_cuda_next_v11x", "v9": "cqsa_cuda_next_v9",
-           "v12f": "cqsa_cuda_next_v12f"}
+           "v12f": "cqsa_cuda_next_v12f", "v13": "cqsa_cuda_v13"}   # v13 (U1): v12f's forward in the unified module
 MODS = {}
 # cqs_fwd_flags of v12f's fwd_cqs_group_bits. Default (0) row-block order since build b2: descending for causal,
 # ascending for non-causal (job 14319938); b1's default was ascending everywhere.

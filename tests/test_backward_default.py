@@ -1,4 +1,5 @@
-"""The default backward is the Triton kernel; it must match SDPA's gradients for fp16/bf16, hdim 64/128."""
+"""The default backward (the v13 CUDA backward when that module is loaded, Triton otherwise; see
+interface.backward_kernel) must match SDPA's gradients for fp16/bf16, hdim 64/128."""
 import pytest, torch, torch.nn.functional as F
 cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
 dev = torch.device("cuda")

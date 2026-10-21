@@ -80,6 +80,9 @@ def doctor(*, check: bool = True, B: int = 1, H: int = 8, D: int = 64, dtype=tor
     lines.append(f"    CUDA extension (causal / non-causal): {'yes' if ks['cuda_extension'] else 'no'} {_where(I.cqsa_cuda)} / "
                  f"{'yes' if ks['cuda_extension_noncausal'] else 'no'} {_where(I.cqsa_cuda_noncausal)}")
     lines.append(f"    native wave kernel (cqsa_native):     {'yes' if ks['native_wave'] else 'no (build native/ to enable; optional)'}")
+    rep["backward_kernel"] = I.backward_kernel()
+    lines.append(f"    default backward:                     {rep['backward_kernel']}"
+                 + (" (v13 census + ALIGNED)" if ks["cuda_extension_unified"] and rep["backward_kernel"] == "cuda" else ""))
     triton_hint = "pip install triton-windows" if sys.platform == "win32" else "pip install triton"
     lines.append(f"    Triton kernels (no build):            {'yes' if ks['triton'] else f'no ({triton_hint})'}")
     if not (ks["cuda_extension"] or ks["triton"]):

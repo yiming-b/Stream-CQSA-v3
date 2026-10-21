@@ -23,3 +23,6 @@ slurm-*.out
 
 # OOC-rivals fp64 gradient references (24 GB, regenerable by experiments/ooc_rivals/bench.py)
 results/ooc_rivals/grad_ref/
+
+# U1: build logs and the nvcc -time csv of the v13 kernel builds (kernels/v13/build/ and *.so are ignored above)
+kernels/v13/logs/

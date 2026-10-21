@@ -7,28 +7,47 @@ import torch
 import importlib as _importlib
 import os as _os
 
-# next/: which compiled extension to use. Kernel variants build as
-# cqsa_cuda_next_<name> (see next/kernel/mk_variant.sh) and coexist on
-# PYTHONPATH, so one process can be pointed at any of them for A/B runs.
-CQSA_CUDA_MODULE = _os.environ.get("CQSA_CUDA_MODULE", "cqsa_cuda")
-try:
-    cqsa_cuda = _importlib.import_module(CQSA_CUDA_MODULE)
-except Exception as exc:  # pragma: no cover - depends on local CUDA build ABI
-    cqsa_cuda = None
-    _CQSA_CUDA_IMPORT_ERROR = exc
+# The compiled extension. CQSA_CUDA_MODULE names it explicitly (kernel variants build as
+# cqsa_cuda_next_<name> and coexist on PYTHONPATH, so one process can be pointed at any of
+# them for A/B runs). Without it, the first importable of: cqsa_cuda_v13 (the v13 classic
+# module, kernels/v13: a census kernel routes every call to an ALIGNED run-table kernel or
+# to v11's code as LEGACY, forward and backward; docs/ultimate/03_kernels_report.md), then
+# cqsa_cuda (the release build, compiled from the same sources since v3, or an older build).
+_CQSA_CUDA_IMPORT_ERROR = None
+cqsa_cuda = None
+for CQSA_CUDA_MODULE in ((_os.environ["CQSA_CUDA_MODULE"],) if "CQSA_CUDA_MODULE" in _os.environ
+                         else ("cqsa_cuda_v13", "cqsa_cuda")):
+    try:
+        cqsa_cuda = _importlib.import_module(CQSA_CUDA_MODULE)
+        break
+    except Exception as exc:  # pragma: no cover - depends on local CUDA build ABI
+        _CQSA_CUDA_IMPORT_ERROR = _CQSA_CUDA_IMPORT_ERROR or exc
+
+
+def _unified(mod) -> bool:
+    """A v13-class module: the census-routed forward AND backward (their test entries
+    fwd_cqs_census / bwd_cqs_census are the signature), so it serves non-causal calls itself
+    and its CUDA backward is the fast one."""
+    return mod is not None and hasattr(mod, "fwd_cqs_census") and hasattr(mod, "bwd_cqs_census")
+
+
+CQSA_CUDA_UNIFIED = _unified(cqsa_cuda)
+
+
+# Optional second extension for NON-causal forward calls. v11's non-causal CQS-on
+# instantiation is mis-compiled by ptxas into a 3x slower kernel (next/LOG.md) while v9's
+# is fine; both are bit-exact, so the interface picks per call, and the v2 release built
+# v9 as cqsa_cuda_nc next to cqsa_cuda. A unified (v13) module serves both modes itself:
+# its ALIGNED non-causal kernel is 1.46-1.75x faster than v9 and its LEGACY non-causal
+# unit compiles cleanly in its own translation unit (03_kernels_report.md 4.1), so no
+# second module is loaded unless CQSA_CUDA_MODULE_NONCAUSAL names one explicitly. An
+# absent second module falls back to the causal one (correct, just slower non-causal).
+if "CQSA_CUDA_MODULE_NONCAUSAL" in _os.environ:
+    CQSA_CUDA_MODULE_NONCAUSAL = _os.environ["CQSA_CUDA_MODULE_NONCAUSAL"]
+elif CQSA_CUDA_UNIFIED or CQSA_CUDA_MODULE != "cqsa_cuda":
+    CQSA_CUDA_MODULE_NONCAUSAL = CQSA_CUDA_MODULE
 else:
-    _CQSA_CUDA_IMPORT_ERROR = None
-
-
-# next/: optional second extension for NON-causal forward calls. The best
-# causal kernel (v11) carries a non-causal CQS-on instantiation that ptxas
-# compiles into a 3x slower kernel (see next/LOG.md), while v9's non-causal
-# path is fine; both are bit-exact, so the interface can pick per call.
-# Default: the same module for both.
-# v2 default: the second extension built by setup.py (cqsa_cuda_nc); falls back
-# to the causal module when it is absent (correct, just slower non-causal).
-CQSA_CUDA_MODULE_NONCAUSAL = _os.environ.get("CQSA_CUDA_MODULE_NONCAUSAL",
-                                             "cqsa_cuda_nc" if CQSA_CUDA_MODULE == "cqsa_cuda" else CQSA_CUDA_MODULE)
+    CQSA_CUDA_MODULE_NONCAUSAL = "cqsa_cuda_nc"
 if CQSA_CUDA_MODULE_NONCAUSAL == CQSA_CUDA_MODULE:
     cqsa_cuda_noncausal = cqsa_cuda
 else:
@@ -353,6 +372,26 @@ def _triton_backward_available() -> bool:
     return _TRITON_BWD_OK
 
 
+def backward_kernel() -> str:
+    """
+    Which backward ``flash_attn_bwd_cqs_global_lse`` runs: ``"cuda"`` or ``"triton"``.
+
+    ``CQSA_BACKWARD=cuda|triton`` forces one. ``auto`` (the default) takes the CUDA
+    backward of a unified (v13) module -- its census + ALIGNED kernel runs at 0.78x
+    flash_attn's backward on an aligned 56K task (03_kernels_report.md 5.1) -- and
+    Triton otherwise: Triton was measured faster than v11's CUDA backward at every
+    subproblem size (0.77x at L=56K; paper re-run at 8.4M: 2917 s vs 4113 s, at
+    16.8M: 11522 s vs 14420 s). Without Triton the CUDA backward is used; without
+    the extension, Triton.
+    """
+    want = _os.environ.get("CQSA_BACKWARD", "auto").lower()
+    if cqsa_cuda is None or want == "triton":
+        return "triton"
+    if want == "cuda" or CQSA_CUDA_UNIFIED or not _triton_backward_available():
+        return "cuda"
+    return "triton"
+
+
 def flash_attn_bwd_cqs_global_lse(
     dout: torch.Tensor,
     q: torch.Tensor,
@@ -385,13 +424,7 @@ def flash_attn_bwd_cqs_global_lse(
     path), which consumes dNum/dDen and therefore needs ``Den = exp(lse)`` --
     infinite above ``lse ~= 88.7`` in fp32, silently zeroing the gradients.
     """
-    # Default backward: the Triton kernel when Triton is present. Measured faster than
-    # the CUDA backward at every subproblem size (0.77x at L=56K; paper re-run at 8.4M:
-    # 2917 s vs 4113 s, at 16.8M: 11522 s vs 14420 s). CQSA_BACKWARD=cuda restores the
-    # CUDA backward; without Triton the CUDA backward is used.
-    want = _os.environ.get("CQSA_BACKWARD", "auto").lower()
-    use_triton = (want == "triton") or (cqsa_cuda is None) or (want == "auto" and _triton_backward_available())
-    if use_triton:
+    if backward_kernel() == "triton":
         # Zero-build path: the Triton backward (same global-lse contract).
         from .triton_kernel import cqs_attention_backward
         return cqs_attention_backward(dout, q, k, v, softmax_lse, cqs_group_bits, causal=causal,

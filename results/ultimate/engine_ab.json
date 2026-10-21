@@ -1,0 +1,1515 @@
+{
+ "info": {
+  "gpu": "NVIDIA A100-SXM4-80GB",
+  "torch": "2.10.0+cu130",
+  "node": "della-l09g3",
+  "slurm_job": "15958597",
+  "nvidia_smi": "NVIDIA A100-SXM4-80GB, 210 MHz, 1410 MHz, 81920 MiB"
+ },
+ "config": {
+  "B": 1,
+  "H": 8,
+  "D": 64,
+  "causal": true,
+  "acc": "gpu",
+  "residency": "device",
+  "reps": 2,
+  "warmup": 1,
+  "v3_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-a927d7c",
+  "v223_root": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/v2-v2.2.3",
+  "v13_dir": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2"
+ },
+ "rows": [
+  {
+   "arm": "v3_cuda",
+   "N": 1048576,
+   "c": 7,
+   "itr": 1,
+   "dtype": "fp16",
+   "reps": 2,
+   "warmup": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g3",
+   "slurm_job": "15958597",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1275 MHz, 1410 MHz, 81920 MiB",
+   "package": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-a927d7c/stream_cqsa",
+   "version": "3.0.0.dev0",
+   "cuda_module": "cqsa_cuda_v13",
+   "cuda_module_file": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2/cqsa_cuda_v13.cpython-311-x86_64-linux-gnu.so",
+   "backward_kernel": "cuda",
+   "fwd": {
+    "times_s": [
+     5.835573966998709,
+     5.851808856001298
+    ],
+    "median_s": 5.843691411500004,
+    "min_s": 5.835573966998709,
+    "peak_gib": 17.482534408569336
+   },
+   "info": {
+    "engine": "classic",
+    "kernel": "cuda",
+    "itr": 1,
+    "c": 7,
+    "stream_from_host": false,
+    "accumulate_on_gpu": true,
+    "inputs_evicted": false,
+    "n_subproblems": 7
+   },
+   "rel_out_vs_flash_attn": 0.00026590662518906507,
+   "bwd": {
+    "times_s": [
+     15.208434355999998,
+     15.20634304000123
+    ],
+    "median_s": 15.207388698000614,
+    "min_s": 15.20634304000123,
+    "peak_gib": 26.056228637695312
+   },
+   "rel_grads_vs_flash_attn": [
+    0.00015358563088820358,
+    0.00042584735293562406,
+    0.00042245029619934527
+   ],
+   "inputs_gib": 3.0,
+   "wall_s": 96.90812706947327
+  },
+  {
+   "arm": "flash_attn",
+   "N": 1048576,
+   "c": 7,
+   "itr": 1,
+   "dtype": "fp16",
+   "reps": 2,
+   "warmup": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g3",
+   "slurm_job": "15958597",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "fwd": {
+    "times_s": [
+     5.991893347998484,
+     5.990063083998393
+    ],
+    "median_s": 5.990978215998439,
+    "min_s": 5.990063083998393,
+    "peak_gib": 12.031250476837158
+   },
+   "rel_out_vs_flash_attn": 0.0,
+   "bwd": {
+    "times_s": [
+     15.106692651999765,
+     15.10793379399911
+    ],
+    "median_s": 15.107313222999437,
+    "min_s": 15.106692651999765,
+    "peak_gib": 17.062500476837158
+   },
+   "rel_grads_vs_flash_attn": [
+    9.871069183441273e-06,
+    0.0,
+    0.0
+   ],
+   "inputs_gib": 3.0,
+   "wall_s": 87.98415613174438
+  },
+  {
+   "arm": "v223_cuda",
+   "N": 1048576,
+   "c": 7,
+   "itr": 1,
+   "dtype": "fp16",
+   "reps": 2,
+   "warmup": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g3",
+   "slurm_job": "15958597",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "package": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/v2-v2.2.3/stream_cqsa",
+   "version": "2.2.3",
+   "cuda_module": "cqsa_cuda_next_v11",
+   "cuda_module_file": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/stable/cqsa_cuda_next_v11.cpython-311-x86_64-linux-gnu.so",
+   "backward_kernel": "cuda",
+   "fwd": {
+    "times_s": [
+     7.790736658998867,
+     7.788160326999787
+    ],
+    "median_s": 7.789448492999327,
+    "min_s": 7.788160326999787,
+    "peak_gib": 17.482527256011963
+   },
+   "info": {
+    "engine": "classic",
+    "kernel": "cuda",
+    "itr": 1,
+    "c": 7,
+    "stream_from_host": false,
+    "accumulate_on_gpu": true,
+    "inputs_evicted": false,
+    "n_subproblems": 7
+   },
+   "rel_out_vs_flash_attn": 0.0002659250253113757,
+   "bwd": {
+    "times_s": [
+     39.174291949999315,
+     39.167279105999114
+    ],
+    "median_s": 39.170785527999215,
+    "min_s": 39.167279105999114,
+    "peak_gib": 26.052735805511475
+   },
+   "rel_grads_vs_flash_attn": [
+    0.00015360732343042737,
+    0.00042575369929444696,
+    0.0004235222709579982
+   ],
+   "inputs_gib": 3.0,
+   "wall_s": 165.9842677116394
+  },
+  {
+   "arm": "v223_triton",
+   "N": 1048576,
+   "c": 7,
+   "itr": 1,
+   "dtype": "fp16",
+   "reps": 2,
+   "warmup": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g3",
+   "slurm_job": "15958597",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "package": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/v2-v2.2.3/stream_cqsa",
+   "version": "2.2.3",
+   "cuda_module": "cqsa_cuda_next_v11",
+   "cuda_module_file": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/stable/cqsa_cuda_next_v11.cpython-311-x86_64-linux-gnu.so",
+   "backward_kernel": "triton",
+   "fwd": {
+    "times_s": [
+     7.782483732000401,
+     7.787195273000179
+    ],
+    "median_s": 7.78483950250029,
+    "min_s": 7.782483732000401,
+    "peak_gib": 17.482527256011963
+   },
+   "info": {
+    "engine": "classic",
+    "kernel": "cuda",
+    "itr": 1,
+    "c": 7,
+    "stream_from_host": false,
+    "accumulate_on_gpu": true,
+    "inputs_evicted": false,
+    "n_subproblems": 7
+   },
+   "rel_out_vs_flash_attn": 0.0002659250253113757,
+   "bwd": {
+    "times_s": [
+     28.99375687599968,
+     28.995890872000018
+    ],
+    "median_s": 28.99482387399985,
+    "min_s": 28.99375687599968,
+    "peak_gib": 26.052735805511475
+   },
+   "rel_grads_vs_flash_attn": [
+    0.00024183339122045601,
+    0.0011575316170458689,
+    0.0011775345984377228
+   ],
+   "inputs_gib": 3.0,
+   "wall_s": 136.67295908927917
+  },
+  {
+   "arm": "v3_wave",
+   "N": 1048576,
+   "c": 7,
+   "itr": 1,
+   "dtype": "fp16",
+   "reps": 2,
+   "warmup": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g3",
+   "slurm_job": "15958597",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "package": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-a927d7c/stream_cqsa",
+   "version": "3.0.0.dev0",
+   "cuda_module": "cqsa_cuda_v13",
+   "cuda_module_file": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2/cqsa_cuda_v13.cpython-311-x86_64-linux-gnu.so",
+   "backward_kernel": "cuda",
+   "fwd": {
+    "times_s": [
+     7.854887507999592,
+     7.856986775999758
+    ],
+    "median_s": 7.855937141999675,
+    "min_s": 7.854887507999592,
+    "peak_gib": 18.417881965637207
+   },
+   "info": {
+    "engine": "wave",
+    "kernel": "auto",
+    "max_wave_tokens": 449664,
+    "gather": true,
+    "itr": 1,
+    "c": 7,
+    "interest_set": [
+     0,
+     1,
+     3
+    ],
+    "wave_oom_retries": 0,
+    "inputs_evicted": false,
+    "n_subproblems": 7
+   },
+   "rel_out_vs_flash_attn": 0.0002659045656516935,
+   "bwd": {
+    "times_s": [
+     39.29281206300038,
+     39.30860473300163
+    ],
+    "median_s": 39.30070839800101,
+    "min_s": 39.29281206300038,
+    "peak_gib": 26.973575592041016
+   },
+   "rel_grads_vs_flash_attn": [
+    0.00022790950893397785,
+    0.0004372874358741769,
+    0.00042243476302067097
+   ],
+   "inputs_gib": 3.0,
+   "wall_s": 166.76657223701477
+  },
+  {
+   "arm": "v3_auto",
+   "N": 1048576,
+   "c": 7,
+   "itr": 1,
+   "dtype": "fp16",
+   "reps": 2,
+   "warmup": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g3",
+   "slurm_job": "15958597",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "package": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-a927d7c/stream_cqsa",
+   "version": "3.0.0.dev0",
+   "cuda_module": "cqsa_cuda_v13",
+   "cuda_module_file": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2/cqsa_cuda_v13.cpython-311-x86_64-linux-gnu.so",
+   "backward_kernel": "sdpa",
+   "fwd": {
+    "times_s": [
+     6.346866283998679,
+     6.346817371000725
+    ],
+    "median_s": 6.346841827499702,
+    "min_s": 6.346817371000725,
+    "peak_gib": 12.031250953674316
+   },
+   "info": {
+    "engine": "monolithic",
+    "kernel": "sdpa",
+    "itr": 0,
+    "n_subproblems": 1,
+    "inputs_evicted": false
+   },
+   "rel_out_vs_flash_attn": 2.581755931939558e-05,
+   "bwd": {
+    "times_s": [
+     16.321250699000302,
+     16.321128759998828
+    ],
+    "median_s": 16.321189729499565,
+    "min_s": 16.321128759998828,
+    "peak_gib": 19.062500953674316
+   },
+   "rel_grads_vs_flash_attn": [
+    4.4849807386503185e-05,
+    5.338935263297152e-05,
+    5.5959177036312514e-05
+   ],
+   "inputs_gib": 3.0,
+   "wall_s": 92.8090648651123
+  },
+  {
+   "arm": "sdpa_flash",
+   "N": 1048576,
+   "c": 7,
+   "itr": 1,
+   "dtype": "fp16",
+   "reps": 2,
+   "warmup": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g3",
+   "slurm_job": "15958597",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "fwd": {
+    "times_s": [
+     6.339512958000341,
+     6.340374282999619
+    ],
+    "median_s": 6.33994362049998,
+    "min_s": 6.339512958000341,
+    "peak_gib": 12.031250953674316
+   },
+   "rel_out_vs_flash_attn": 2.581755931939558e-05,
+   "bwd": {
+    "times_s": [
+     16.3495164929991,
+     16.349811994999982
+    ],
+    "median_s": 16.34966424399954,
+    "min_s": 16.3495164929991,
+    "peak_gib": 19.062500953674316
+   },
+   "rel_grads_vs_flash_attn": [
+    4.485878664569072e-05,
+    5.338935263297152e-05,
+    5.5959177036312514e-05
+   ],
+   "inputs_gib": 3.0,
+   "wall_s": 92.72293901443481
+  },
+  {
+   "arm": "v3_cuda",
+   "N": 131072,
+   "c": 7,
+   "itr": 1,
+   "dtype": "fp16",
+   "reps": 2,
+   "warmup": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g3",
+   "slurm_job": "15958597",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "package": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-a927d7c/stream_cqsa",
+   "version": "3.0.0.dev0",
+   "cuda_module": "cqsa_cuda_v13",
+   "cuda_module_file": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2/cqsa_cuda_v13.cpython-311-x86_64-linux-gnu.so",
+   "backward_kernel": "cuda",
+   "fwd": {
+    "times_s": [
+     0.11013808700045047,
+     0.10980447700057994
+    ],
+    "median_s": 0.1099712820005152,
+    "min_s": 0.10980447700057994,
+    "peak_gib": 2.186300277709961
+   },
+   "info": {
+    "engine": "classic",
+    "kernel": "cuda",
+    "itr": 1,
+    "c": 7,
+    "stream_from_host": false,
+    "accumulate_on_gpu": true,
+    "inputs_evicted": false,
+    "n_subproblems": 7
+   },
+   "rel_out_vs_flash_attn": 0.00013456214805498983,
+   "bwd": {
+    "times_s": [
+     0.2677477369998087,
+     0.2681639529982931
+    ],
+    "median_s": 0.2679558449990509,
+    "min_s": 0.2677477369998087,
+    "peak_gib": 3.2613067626953125
+   },
+   "rel_grads_vs_flash_attn": [
+    0.00016484613825178257,
+    0.00035467401013932,
+    0.00035582113712471976
+   ],
+   "inputs_gib": 0.375,
+   "wall_s": 4.995916128158569
+  },
+  {
+   "arm": "flash_attn",
+   "N": 131072,
+   "c": 7,
+   "itr": 1,
+   "dtype": "fp16",
+   "reps": 2,
+   "warmup": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g3",
+   "slurm_job": "15958597",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "fwd": {
+    "times_s": [
+     0.08995573600077478,
+     0.0897219850012334
+    ],
+    "median_s": 0.08983886050100409,
+    "min_s": 0.0897219850012334,
+    "peak_gib": 1.5039067268371582
+   },
+   "rel_out_vs_flash_attn": 0.0,
+   "bwd": {
+    "times_s": [
+     0.23829552400093235,
+     0.23821467199923063
+    ],
+    "median_s": 0.2382550980000815,
+    "min_s": 0.23821467199923063,
+    "peak_gib": 2.132812976837158
+   },
+   "rel_grads_vs_flash_attn": [
+    7.0544798456620295e-06,
+    0.0,
+    0.0
+   ],
+   "inputs_gib": 0.375,
+   "wall_s": 4.557080984115601
+  },
+  {
+   "arm": "v223_cuda",
+   "N": 131072,
+   "c": 7,
+   "itr": 1,
+   "dtype": "fp16",
+   "reps": 2,
+   "warmup": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g3",
+   "slurm_job": "15958597",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "package": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/v2-v2.2.3/stream_cqsa",
+   "version": "2.2.3",
+   "cuda_module": "cqsa_cuda_next_v11",
+   "cuda_module_file": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/stable/cqsa_cuda_next_v11.cpython-311-x86_64-linux-gnu.so",
+   "backward_kernel": "cuda",
+   "fwd": {
+    "times_s": [
+     0.1517660839999735,
+     0.1516195879994484
+    ],
+    "median_s": 0.15169283599971095,
+    "min_s": 0.1516195879994484,
+    "peak_gib": 2.1862587928771973
+   },
+   "info": {
+    "engine": "classic",
+    "kernel": "cuda",
+    "itr": 1,
+    "c": 7,
+    "stream_from_host": false,
+    "accumulate_on_gpu": true,
+    "inputs_evicted": false,
+    "n_subproblems": 7
+   },
+   "rel_out_vs_flash_attn": 0.00013522896270569404,
+   "bwd": {
+    "times_s": [
+     0.6425635590003367,
+     0.6426576260000729
+    ],
+    "median_s": 0.6426105925002048,
+    "min_s": 0.6425635590003367,
+    "peak_gib": 3.2575411796569824
+   },
+   "rel_grads_vs_flash_attn": [
+    0.00016512384167685556,
+    0.0003560805744430674,
+    0.0003567313831263045
+   ],
+   "inputs_gib": 0.375,
+   "wall_s": 6.186391830444336
+  },
+  {
+   "arm": "v223_triton",
+   "N": 131072,
+   "c": 7,
+   "itr": 1,
+   "dtype": "fp16",
+   "reps": 2,
+   "warmup": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g3",
+   "slurm_job": "15958597",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "package": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/v2-v2.2.3/stream_cqsa",
+   "version": "2.2.3",
+   "cuda_module": "cqsa_cuda_next_v11",
+   "cuda_module_file": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/stable/cqsa_cuda_next_v11.cpython-311-x86_64-linux-gnu.so",
+   "backward_kernel": "triton",
+   "fwd": {
+    "times_s": [
+     0.1516677579984389,
+     0.15144656099982967
+    ],
+    "median_s": 0.1515571594991343,
+    "min_s": 0.15144656099982967,
+    "peak_gib": 2.1862587928771973
+   },
+   "info": {
+    "engine": "classic",
+    "kernel": "cuda",
+    "itr": 1,
+    "c": 7,
+    "stream_from_host": false,
+    "accumulate_on_gpu": true,
+    "inputs_evicted": false,
+    "n_subproblems": 7
+   },
+   "rel_out_vs_flash_attn": 0.00013522896270569404,
+   "bwd": {
+    "times_s": [
+     0.5030551039999409,
+     0.5025317559993709
+    ],
+    "median_s": 0.5027934299996559,
+    "min_s": 0.5025317559993709,
+    "peak_gib": 3.2575411796569824
+   },
+   "rel_grads_vs_flash_attn": [
+    0.00017303006016539113,
+    0.00038023528777605275,
+    0.0003816929772386117
+   ],
+   "inputs_gib": 0.375,
+   "wall_s": 6.273719549179077
+  },
+  {
+   "arm": "v3_wave",
+   "N": 131072,
+   "c": 7,
+   "itr": 1,
+   "dtype": "fp16",
+   "reps": 2,
+   "warmup": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g3",
+   "slurm_job": "15958597",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "package": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-a927d7c/stream_cqsa",
+   "version": "3.0.0.dev0",
+   "cuda_module": "cqsa_cuda_v13",
+   "cuda_module_file": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2/cqsa_cuda_v13.cpython-311-x86_64-linux-gnu.so",
+   "backward_kernel": "cuda",
+   "fwd": {
+    "times_s": [
+     0.1514092809993599,
+     0.1513072090001515
+    ],
+    "median_s": 0.1513582449997557,
+    "min_s": 0.1513072090001515,
+    "peak_gib": 2.6441783905029297
+   },
+   "info": {
+    "engine": "wave",
+    "kernel": "auto",
+    "max_wave_tokens": 131072,
+    "gather": true,
+    "itr": 1,
+    "c": 7,
+    "interest_set": [
+     0,
+     1,
+     3
+    ],
+    "wave_oom_retries": 0,
+    "inputs_evicted": false,
+    "n_subproblems": 7
+   },
+   "rel_out_vs_flash_attn": 0.00013456074818280362,
+   "bwd": {
+    "times_s": [
+     0.6314996029996109,
+     0.6313648679988546
+    ],
+    "median_s": 0.6314322354992328,
+    "min_s": 0.6313648679988546,
+    "peak_gib": 3.8611364364624023
+   },
+   "rel_grads_vs_flash_attn": [
+    0.00023395390985249195,
+    0.0003686771412482336,
+    0.000355813619657459
+   ],
+   "inputs_gib": 0.375,
+   "wall_s": 6.228599309921265
+  },
+  {
+   "arm": "v3_auto",
+   "N": 131072,
+   "c": 7,
+   "itr": 1,
+   "dtype": "fp16",
+   "reps": 2,
+   "warmup": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g3",
+   "slurm_job": "15958597",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "package": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-a927d7c/stream_cqsa",
+   "version": "3.0.0.dev0",
+   "cuda_module": "cqsa_cuda_v13",
+   "cuda_module_file": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2/cqsa_cuda_v13.cpython-311-x86_64-linux-gnu.so",
+   "backward_kernel": "sdpa",
+   "fwd": {
+    "times_s": [
+     0.09727090799970028,
+     0.09749739600010798
+    ],
+    "median_s": 0.09738415199990413,
+    "min_s": 0.09727090799970028,
+    "peak_gib": 1.5039072036743164
+   },
+   "info": {
+    "engine": "monolithic",
+    "kernel": "sdpa",
+    "itr": 0,
+    "n_subproblems": 1,
+    "inputs_evicted": false
+   },
+   "rel_out_vs_flash_attn": 1.9987519074377238e-05,
+   "bwd": {
+    "times_s": [
+     0.2578224589997262,
+     0.25760861600065255
+    ],
+    "median_s": 0.2577155375001894,
+    "min_s": 0.25760861600065255,
+    "peak_gib": 2.3828134536743164
+   },
+   "rel_grads_vs_flash_attn": [
+    3.685462113909702e-05,
+    4.8254991206963746e-05,
+    3.981690300759457e-05
+   ],
+   "inputs_gib": 0.375,
+   "wall_s": 4.70438027381897
+  },
+  {
+   "arm": "sdpa_flash",
+   "N": 131072,
+   "c": 7,
+   "itr": 1,
+   "dtype": "fp16",
+   "reps": 2,
+   "warmup": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g3",
+   "slurm_job": "15958597",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "fwd": {
+    "times_s": [
+     0.09521651199975167,
+     0.09567563800010248
+    ],
+    "median_s": 0.09544607499992708,
+    "min_s": 0.09521651199975167,
+    "peak_gib": 1.5039072036743164
+   },
+   "rel_out_vs_flash_attn": 1.9987519074377238e-05,
+   "bwd": {
+    "times_s": [
+     0.2579387090008822,
+     0.2578065389989206
+    ],
+    "median_s": 0.2578726239999014,
+    "min_s": 0.2578065389989206,
+    "peak_gib": 2.3828134536743164
+   },
+   "rel_grads_vs_flash_attn": [
+    3.682664779980597e-05,
+    4.8254991206963746e-05,
+    3.981690300759457e-05
+   ],
+   "inputs_gib": 0.375,
+   "wall_s": 4.691782236099243
+  },
+  {
+   "arm": "v3_cuda",
+   "N": 131072,
+   "c": 73,
+   "itr": 1,
+   "dtype": "fp16",
+   "reps": 2,
+   "warmup": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g3",
+   "slurm_job": "15958597",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1275 MHz, 1410 MHz, 81920 MiB",
+   "package": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-a927d7c/stream_cqsa",
+   "version": "3.0.0.dev0",
+   "cuda_module": "cqsa_cuda_v13",
+   "cuda_module_file": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2/cqsa_cuda_v13.cpython-311-x86_64-linux-gnu.so",
+   "backward_kernel": "cuda",
+   "fwd": {
+    "times_s": [
+     0.1678028059995995,
+     0.16778819799947087
+    ],
+    "median_s": 0.1677955019995352,
+    "min_s": 0.16778819799947087,
+    "peak_gib": 1.8955078125
+   },
+   "info": {
+    "engine": "classic",
+    "kernel": "cuda",
+    "itr": 1,
+    "c": 73,
+    "stream_from_host": false,
+    "accumulate_on_gpu": true,
+    "inputs_evicted": false,
+    "n_subproblems": 73
+   },
+   "rel_out_vs_flash_attn": 0.00021283387010265364,
+   "bwd": {
+    "times_s": [
+     0.33993764400111104,
+     0.3411461750001763
+    ],
+    "median_s": 0.34054190950064367,
+    "min_s": 0.33993764400111104,
+    "peak_gib": 2.87890625
+   },
+   "rel_grads_vs_flash_attn": [
+    0.00023768516694082703,
+    0.0003498398664161244,
+    0.00035092366884829137
+   ],
+   "inputs_gib": 0.375,
+   "wall_s": 5.402435302734375
+  },
+  {
+   "arm": "v223_cuda",
+   "N": 131072,
+   "c": 73,
+   "itr": 1,
+   "dtype": "fp16",
+   "reps": 2,
+   "warmup": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g3",
+   "slurm_job": "15958597",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "package": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/v2-v2.2.3/stream_cqsa",
+   "version": "2.2.3",
+   "cuda_module": "cqsa_cuda_next_v11",
+   "cuda_module_file": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/stable/cqsa_cuda_next_v11.cpython-311-x86_64-linux-gnu.so",
+   "backward_kernel": "cuda",
+   "fwd": {
+    "times_s": [
+     0.06573858000047039,
+     0.06679344999975001
+    ],
+    "median_s": 0.0662660150001102,
+    "min_s": 0.06573858000047039,
+    "peak_gib": 1.8955078125
+   },
+   "info": {
+    "engine": "classic",
+    "kernel": "cuda",
+    "itr": 1,
+    "c": 73,
+    "stream_from_host": false,
+    "accumulate_on_gpu": true,
+    "inputs_evicted": false,
+    "n_subproblems": 73
+   },
+   "rel_out_vs_flash_attn": 1.2653007518671686,
+   "bwd": {
+    "times_s": [
+     0.1334960090007371,
+     0.1335629950008297
+    ],
+    "median_s": 0.1335295020007834,
+    "min_s": 0.1334960090007371,
+    "peak_gib": 2.87890625
+   },
+   "rel_grads_vs_flash_attn": [
+    1.3692423780969365,
+    1.3778379419446478,
+    1.2716635434440946
+   ],
+   "inputs_gib": 0.375,
+   "wall_s": 4.438850402832031
+  },
+  {
+   "arm": "v223_triton",
+   "N": 131072,
+   "c": 73,
+   "itr": 1,
+   "dtype": "fp16",
+   "reps": 2,
+   "warmup": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g3",
+   "slurm_job": "15958597",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1275 MHz, 1410 MHz, 81920 MiB",
+   "package": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/v2-v2.2.3/stream_cqsa",
+   "version": "2.2.3",
+   "cuda_module": "cqsa_cuda_next_v11",
+   "cuda_module_file": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/stable/cqsa_cuda_next_v11.cpython-311-x86_64-linux-gnu.so",
+   "backward_kernel": "triton",
+   "fwd": {
+    "times_s": [
+     0.06591541300076642,
+     0.06959682900014741
+    ],
+    "median_s": 0.06775612100045691,
+    "min_s": 0.06591541300076642,
+    "peak_gib": 1.8955078125
+   },
+   "info": {
+    "engine": "classic",
+    "kernel": "cuda",
+    "itr": 1,
+    "c": 73,
+    "stream_from_host": false,
+    "accumulate_on_gpu": true,
+    "inputs_evicted": false,
+    "n_subproblems": 73
+   },
+   "rel_out_vs_flash_attn": 1.2653007518671686,
+   "bwd": {
+    "times_s": [
+     0.2623924290001014,
+     0.26073379999979807
+    ],
+    "median_s": 0.26156311449994973,
+    "min_s": 0.26073379999979807,
+    "peak_gib": 2.87890625
+   },
+   "rel_grads_vs_flash_attn": [
+    1.3692373903867419,
+    1.3778375456399994,
+    1.2716632055832493
+   ],
+   "inputs_gib": 0.375,
+   "wall_s": 5.343865633010864
+  },
+  {
+   "arm": "v3_wave",
+   "N": 131072,
+   "c": 73,
+   "itr": 1,
+   "dtype": "fp16",
+   "reps": 2,
+   "warmup": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g3",
+   "slurm_job": "15958597",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "package": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-a927d7c/stream_cqsa",
+   "version": "3.0.0.dev0",
+   "cuda_module": "cqsa_cuda_v13",
+   "cuda_module_file": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2/cqsa_cuda_v13.cpython-311-x86_64-linux-gnu.so",
+   "backward_kernel": "cuda",
+   "fwd": {
+    "times_s": [
+     0.19599660899984883,
+     0.19390196700078377
+    ],
+    "median_s": 0.1949492880003163,
+    "min_s": 0.19390196700078377,
+    "peak_gib": 3.6396236419677734
+   },
+   "info": {
+    "engine": "wave",
+    "kernel": "auto",
+    "max_wave_tokens": 262144,
+    "gather": true,
+    "itr": 1,
+    "c": 73,
+    "interest_set": [
+     0,
+     1,
+     3,
+     7,
+     15,
+     31,
+     36,
+     54,
+     63
+    ],
+    "wave_oom_retries": 0,
+    "inputs_evicted": false,
+    "n_subproblems": 73
+   },
+   "rel_out_vs_flash_attn": 0.0002128346512265515,
+   "bwd": {
+    "times_s": [
+     0.6288872599998285,
+     0.6288198630008992
+    ],
+    "median_s": 0.6288535615003639,
+    "min_s": 0.6288198630008992,
+    "peak_gib": 5.1334428787231445
+   },
+   "rel_grads_vs_flash_attn": [
+    0.00028109063607093844,
+    0.00036298566520529164,
+    0.00035092897000870685
+   ],
+   "inputs_gib": 0.375,
+   "wall_s": 6.3102147579193115
+  },
+  {
+   "arm": "v3_auto",
+   "N": 131072,
+   "c": 73,
+   "itr": 1,
+   "dtype": "fp16",
+   "reps": 2,
+   "warmup": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g3",
+   "slurm_job": "15958597",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "package": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-a927d7c/stream_cqsa",
+   "version": "3.0.0.dev0",
+   "cuda_module": "cqsa_cuda_v13",
+   "cuda_module_file": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2/cqsa_cuda_v13.cpython-311-x86_64-linux-gnu.so",
+   "backward_kernel": "sdpa",
+   "fwd": {
+    "times_s": [
+     0.09683293600028264,
+     0.09730556700014859
+    ],
+    "median_s": 0.09706925150021561,
+    "min_s": 0.09683293600028264,
+    "peak_gib": 1.5039072036743164
+   },
+   "info": {
+    "engine": "monolithic",
+    "kernel": "sdpa",
+    "itr": 0,
+    "n_subproblems": 1,
+    "inputs_evicted": false
+   },
+   "rel_out_vs_flash_attn": 1.9987519074377238e-05,
+   "bwd": {
+    "times_s": [
+     0.2576499820006575,
+     0.25793418800094514
+    ],
+    "median_s": 0.2577920850008013,
+    "min_s": 0.2576499820006575,
+    "peak_gib": 2.3828134536743164
+   },
+   "rel_grads_vs_flash_attn": [
+    3.686079570787672e-05,
+    4.8254991206963746e-05,
+    3.981690300759457e-05
+   ],
+   "inputs_gib": 0.375,
+   "wall_s": 4.730957984924316
+  },
+  {
+   "arm": "v3_cuda",
+   "N": 131072,
+   "c": 7,
+   "itr": 1,
+   "dtype": "bf16",
+   "reps": 2,
+   "warmup": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g3",
+   "slurm_job": "15958597",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "package": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-a927d7c/stream_cqsa",
+   "version": "3.0.0.dev0",
+   "cuda_module": "cqsa_cuda_v13",
+   "cuda_module_file": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2/cqsa_cuda_v13.cpython-311-x86_64-linux-gnu.so",
+   "backward_kernel": "cuda",
+   "fwd": {
+    "times_s": [
+     0.11103848800121341,
+     0.10775346000082209
+    ],
+    "median_s": 0.10939597400101775,
+    "min_s": 0.10775346000082209,
+    "peak_gib": 2.186300277709961
+   },
+   "info": {
+    "engine": "classic",
+    "kernel": "cuda",
+    "itr": 1,
+    "c": 7,
+    "stream_from_host": false,
+    "accumulate_on_gpu": true,
+    "inputs_evicted": false,
+    "n_subproblems": 7
+   },
+   "rel_out_vs_flash_attn": 0.0010221902357006088,
+   "bwd": {
+    "times_s": [
+     0.2678373519993329,
+     0.2680504949985334
+    ],
+    "median_s": 0.26794392349893315,
+    "min_s": 0.2678373519993329,
+    "peak_gib": 3.2613067626953125
+   },
+   "rel_grads_vs_flash_attn": [
+    0.0013157888358754008,
+    0.002820937510552145,
+    0.0028195617863598812
+   ],
+   "inputs_gib": 0.375,
+   "wall_s": 5.033859014511108
+  },
+  {
+   "arm": "flash_attn",
+   "N": 131072,
+   "c": 7,
+   "itr": 1,
+   "dtype": "bf16",
+   "reps": 2,
+   "warmup": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g3",
+   "slurm_job": "15958597",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "fwd": {
+    "times_s": [
+     0.08812132900129654,
+     0.08826439899894467
+    ],
+    "median_s": 0.08819286400012061,
+    "min_s": 0.08812132900129654,
+    "peak_gib": 1.5039067268371582
+   },
+   "rel_out_vs_flash_attn": 0.0,
+   "bwd": {
+    "times_s": [
+     0.23854668899912213,
+     0.23842513999989023
+    ],
+    "median_s": 0.23848591449950618,
+    "min_s": 0.23842513999989023,
+    "peak_gib": 2.132812976837158
+   },
+   "rel_grads_vs_flash_attn": [
+    1.945904410196407e-05,
+    0.0,
+    0.0
+   ],
+   "inputs_gib": 0.375,
+   "wall_s": 4.539653778076172
+  },
+  {
+   "arm": "v223_cuda",
+   "N": 131072,
+   "c": 7,
+   "itr": 1,
+   "dtype": "bf16",
+   "reps": 2,
+   "warmup": 1,
+   "status": "skipped",
+   "reason": "v2.2.3's stable v11 module is fp16-only"
+  },
+  {
+   "arm": "v223_triton",
+   "N": 131072,
+   "c": 7,
+   "itr": 1,
+   "dtype": "bf16",
+   "reps": 2,
+   "warmup": 1,
+   "status": "skipped",
+   "reason": "v2.2.3's stable v11 module is fp16-only"
+  },
+  {
+   "arm": "v3_wave",
+   "N": 131072,
+   "c": 7,
+   "itr": 1,
+   "dtype": "bf16",
+   "reps": 2,
+   "warmup": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g3",
+   "slurm_job": "15958597",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "package": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-a927d7c/stream_cqsa",
+   "version": "3.0.0.dev0",
+   "cuda_module": "cqsa_cuda_v13",
+   "cuda_module_file": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2/cqsa_cuda_v13.cpython-311-x86_64-linux-gnu.so",
+   "backward_kernel": "cuda",
+   "fwd": {
+    "times_s": [
+     0.15160549599931983,
+     0.15136411099956604
+    ],
+    "median_s": 0.15148480349944293,
+    "min_s": 0.15136411099956604,
+    "peak_gib": 2.6441783905029297
+   },
+   "info": {
+    "engine": "wave",
+    "kernel": "auto",
+    "max_wave_tokens": 131072,
+    "gather": true,
+    "itr": 1,
+    "c": 7,
+    "interest_set": [
+     0,
+     1,
+     3
+    ],
+    "wave_oom_retries": 0,
+    "inputs_evicted": false,
+    "n_subproblems": 7
+   },
+   "rel_out_vs_flash_attn": 0.0010221880843697758,
+   "bwd": {
+    "times_s": [
+     0.6297314519997599,
+     0.6295907269995951
+    ],
+    "median_s": 0.6296610894996775,
+    "min_s": 0.6295907269995951,
+    "peak_gib": 3.8611364364624023
+   },
+   "rel_grads_vs_flash_attn": [
+    0.0019116283720724118,
+    0.0029582868297408547,
+    0.0028195433573896373
+   ],
+   "inputs_gib": 0.375,
+   "wall_s": 6.264482021331787
+  },
+  {
+   "arm": "v3_auto",
+   "N": 131072,
+   "c": 7,
+   "itr": 1,
+   "dtype": "bf16",
+   "reps": 2,
+   "warmup": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g3",
+   "slurm_job": "15958597",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "package": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-a927d7c/stream_cqsa",
+   "version": "3.0.0.dev0",
+   "cuda_module": "cqsa_cuda_v13",
+   "cuda_module_file": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2/cqsa_cuda_v13.cpython-311-x86_64-linux-gnu.so",
+   "backward_kernel": "sdpa",
+   "fwd": {
+    "times_s": [
+     0.09688426300090214,
+     0.09685204299967154
+    ],
+    "median_s": 0.09686815300028684,
+    "min_s": 0.09685204299967154,
+    "peak_gib": 1.5039072036743164
+   },
+   "info": {
+    "engine": "monolithic",
+    "kernel": "sdpa",
+    "itr": 0,
+    "n_subproblems": 1,
+    "inputs_evicted": false
+   },
+   "rel_out_vs_flash_attn": 6.327932142972653e-05,
+   "bwd": {
+    "times_s": [
+     0.25756048199946235,
+     0.25764338999942993
+    ],
+    "median_s": 0.25760193599944614,
+    "min_s": 0.25756048199946235,
+    "peak_gib": 2.3828134536743164
+   },
+   "rel_grads_vs_flash_attn": [
+    0.0001155010378625916,
+    0.00018319448503125495,
+    0.00012363369988020704
+   ],
+   "inputs_gib": 0.375,
+   "wall_s": 4.850950002670288
+  },
+  {
+   "arm": "sdpa_flash",
+   "N": 131072,
+   "c": 7,
+   "itr": 1,
+   "dtype": "bf16",
+   "reps": 2,
+   "warmup": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g3",
+   "slurm_job": "15958597",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "fwd": {
+    "times_s": [
+     0.09484364200034179,
+     0.09495495299961476
+    ],
+    "median_s": 0.09489929749997827,
+    "min_s": 0.09484364200034179,
+    "peak_gib": 1.5039072036743164
+   },
+   "rel_out_vs_flash_attn": 6.327932142972653e-05,
+   "bwd": {
+    "times_s": [
+     0.25795724100134976,
+     0.25743185999999696
+    ],
+    "median_s": 0.25769455050067336,
+    "min_s": 0.25743185999999696,
+    "peak_gib": 2.3828134536743164
+   },
+   "rel_grads_vs_flash_attn": [
+    0.00011549912582655326,
+    0.00018319448503125495,
+    0.00012363369988020704
+   ],
+   "inputs_gib": 0.375,
+   "wall_s": 4.6246178150177
+  },
+  {
+   "arm": "v3_cuda",
+   "N": 1048576,
+   "c": 7,
+   "itr": 2,
+   "dtype": "fp16",
+   "reps": 2,
+   "warmup": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g3",
+   "slurm_job": "15958597",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "package": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-a927d7c/stream_cqsa",
+   "version": "3.0.0.dev0",
+   "cuda_module": "cqsa_cuda_v13",
+   "cuda_module_file": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2/cqsa_cuda_v13.cpython-311-x86_64-linux-gnu.so",
+   "backward_kernel": "cuda",
+   "fwd": {
+    "times_s": [
+     6.026413732000947,
+     6.036952905000362
+    ],
+    "median_s": 6.031683318500654,
+    "min_s": 6.026413732000947,
+    "peak_gib": 8.1640625
+   },
+   "info": {
+    "engine": "classic",
+    "kernel": "cuda",
+    "itr": 2,
+    "c": 7,
+    "stream_from_host": false,
+    "accumulate_on_gpu": true,
+    "inputs_evicted": false,
+    "n_subproblems": 49
+   },
+   "rel_out_vs_flash_attn": null,
+   "bwd": {
+    "times_s": [
+     15.636901888001375,
+     15.63370364399998
+    ],
+    "median_s": 15.635302766000677,
+    "min_s": 15.63370364399998,
+    "peak_gib": 16.03125
+   },
+   "rel_grads_vs_flash_attn": null,
+   "inputs_gib": 3.0,
+   "wall_s": 68.41725063323975
+  },
+  {
+   "arm": "v223_cuda",
+   "N": 1048576,
+   "c": 7,
+   "itr": 2,
+   "dtype": "fp16",
+   "reps": 2,
+   "warmup": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g3",
+   "slurm_job": "15958597",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "package": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/v2-v2.2.3/stream_cqsa",
+   "version": "2.2.3",
+   "cuda_module": "cqsa_cuda_next_v11",
+   "cuda_module_file": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/stable/cqsa_cuda_next_v11.cpython-311-x86_64-linux-gnu.so",
+   "backward_kernel": "cuda",
+   "fwd": {
+    "times_s": [
+     8.310302930000034,
+     8.31008205100079
+    ],
+    "median_s": 8.310192490500413,
+    "min_s": 8.31008205100079,
+    "peak_gib": 8.1640625
+   },
+   "info": {
+    "engine": "classic",
+    "kernel": "cuda",
+    "itr": 2,
+    "c": 7,
+    "stream_from_host": false,
+    "accumulate_on_gpu": true,
+    "inputs_evicted": false,
+    "n_subproblems": 49
+   },
+   "rel_out_vs_flash_attn": null,
+   "bwd": {
+    "times_s": [
+     45.04215511700022,
+     45.05637697699967
+    ],
+    "median_s": 45.049266046999946,
+    "min_s": 45.04215511700022,
+    "peak_gib": 16.03125
+   },
+   "rel_grads_vs_flash_attn": null,
+   "inputs_gib": 3.0,
+   "wall_s": 163.58995842933655
+  },
+  {
+   "arm": "v223_triton",
+   "N": 1048576,
+   "c": 7,
+   "itr": 2,
+   "dtype": "fp16",
+   "reps": 2,
+   "warmup": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g3",
+   "slurm_job": "15958597",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "package": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/v2-v2.2.3/stream_cqsa",
+   "version": "2.2.3",
+   "cuda_module": "cqsa_cuda_next_v11",
+   "cuda_module_file": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/stable/cqsa_cuda_next_v11.cpython-311-x86_64-linux-gnu.so",
+   "backward_kernel": "triton",
+   "fwd": {
+    "times_s": [
+     8.310899280999365,
+     8.311169530999905
+    ],
+    "median_s": 8.311034405999635,
+    "min_s": 8.310899280999365,
+    "peak_gib": 8.1640625
+   },
+   "info": {
+    "engine": "classic",
+    "kernel": "cuda",
+    "itr": 2,
+    "c": 7,
+    "stream_from_host": false,
+    "accumulate_on_gpu": true,
+    "inputs_evicted": false,
+    "n_subproblems": 49
+   },
+   "rel_out_vs_flash_attn": null,
+   "bwd": {
+    "times_s": [
+     29.50475185399955,
+     29.49433068399958
+    ],
+    "median_s": 29.499541268999565,
+    "min_s": 29.49433068399958,
+    "peak_gib": 16.03125
+   },
+   "rel_grads_vs_flash_attn": null,
+   "inputs_gib": 3.0,
+   "wall_s": 117.65825390815735
+  },
+  {
+   "arm": "v3_wave",
+   "N": 1048576,
+   "c": 7,
+   "itr": 2,
+   "dtype": "fp16",
+   "reps": 2,
+   "warmup": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "torch": "2.10.0+cu130",
+   "node": "della-l09g3",
+   "slurm_job": "15958597",
+   "nvidia_smi": "NVIDIA A100-SXM4-80GB, 1410 MHz, 1410 MHz, 81920 MiB",
+   "package": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-a927d7c/stream_cqsa",
+   "version": "3.0.0.dev0",
+   "cuda_module": "cqsa_cuda_v13",
+   "cuda_module_file": "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2/cqsa_cuda_v13.cpython-311-x86_64-linux-gnu.so",
+   "backward_kernel": "cuda",
+   "fwd": {
+    "times_s": [
+     8.338920820999192,
+     8.337885757999175
+    ],
+    "median_s": 8.338403289499183,
+    "min_s": 8.337885757999175,
+    "peak_gib": 10.679197788238525
+   },
+   "info": {
+    "engine": "wave",
+    "kernel": "auto",
+    "max_wave_tokens": 193024,
+    "gather": true,
+    "itr": 2,
+    "c": 7,
+    "interest_set": [
+     0,
+     1,
+     3
+    ],
+    "wave_oom_retries": 0,
+    "inputs_evicted": false,
+    "n_subproblems": 49
+   },
+   "rel_out_vs_flash_attn": null,
+   "bwd": {
+    "times_s": [
+     44.920306870000786,
+     44.93035835400042
+    ],
+    "median_s": 44.9253326120006,
+    "min_s": 44.920306870000786,
+    "peak_gib": 19.0625
+   },
+   "rel_grads_vs_flash_attn": null,
+   "inputs_gib": 3.0,
+   "wall_s": 163.25680112838745
+  },
+  {
+   "arm": "v3_auto",
+   "N": 1048576,
+   "c": 7,
+   "itr": 2,
+   "dtype": "fp16",
+   "reps": 2,
+   "warmup": 1,
+   "status": "skipped",
+   "reason": "budget: 1442 s elapsed + 167 s estimated > 1500 s"
+  }
+ ]
+}

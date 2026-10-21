@@ -1,0 +1,19 @@
+== combined v3 job 15958597 on della-l09g3  Wed Oct 21 05:07:56 PM EDT 2026
+NVIDIA A100-SXM4-80GB, 210 MHz, 1410 MHz, 81920 MiB
+code /scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-a927d7c | v13 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2 | native_v2 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/native_v2/frozen/b2 | results /scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/ultimate
+== part u1 starts 17:07:56 -> /scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/ultimate/v3_combined_15958597_u1.log
+== part u1 exit 0 (124 = timeout)  17:32:14
+`benchmarks/ultimate/engine_ab.py`; B=1 H=8 D=64 causal, device-resident inputs, acc=GPU, 2 timed runs after 1 warm-up, medians (ms). Backward = torch.autograd.grad of attention()'s output. rel = norm-relative error of the fp16/bf16 output / the worst gradient against the monolithic flash_attn call on the same inputs.
+| target | measured | pass |
+== part u2 starts 17:32:14 -> /scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/ultimate/v3_combined_15958597_u2.log
+== part u2 exit 0 (124 = timeout)  17:47:23
+## Targets (docs/ultimate/03_kernels_report.md section 9, package U2)
+- forward N=131072 c=7: W=1 v2 / v12f = 1.017 (target within 1%: NOT met); one-launch wave / monolithic flash_attn = 1.002
+- forward N=131072 c=73: W=1 v2 / v12f = 1.018 (target within 1%: NOT met); one-launch wave / monolithic flash_attn = 1.023 (target <= 1.10 at c=73: met)
+- forward N=1048576 c=7: W=1 v2 / v12f = 1.026 (target within 1%: NOT met); one-launch wave / monolithic flash_attn = 0.973
+- backward N=131072 c=7: W=1 v2 / v12b = 0.998 (target within 1%: met); old bwd_wave / v2 = 2.57x (target >= 2x: met); v2 / monolithic flash_attn bwd = 0.995
+- backward N=131072 c=73: W=1 v2 / v12b = 0.996 (target within 1%: met); old bwd_wave / v2 = 2.42x (target >= 2x: met); v2 / monolithic flash_attn bwd = 1.015
+- backward N=1048576 c=7: W=1 v2 / v12b = 1.001 (target within 1%: met); old bwd_wave / v2 = 2.62x (target >= 2x: met); v2 / monolithic flash_attn bwd = 0.990
+15958597||00:39:31
+15958597.batch||00:39:31
+15958597.extern||00:39:31

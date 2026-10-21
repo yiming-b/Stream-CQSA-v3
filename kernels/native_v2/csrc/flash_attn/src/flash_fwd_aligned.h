@@ -74,6 +74,12 @@ inline __device__ void compute_attn_1rowblock_aligned(const Params &params, cons
 
     const BlockInfo</*Varlen=*/!Is_even_MN> binfo(params, bidb);
     if (m_block * kBlockM >= binfo.actual_seqlen_q) return;
+    // A caller-stated lens_even that is false would make this instantiation
+    // load the ragged tile unpredicated (in place: rows past the tensor); a
+    // loud failure, not a silent one.
+    if constexpr (Is_even_MN) {
+        if (binfo.actual_seqlen_q % kBlockM != 0 || binfo.actual_seqlen_k % kBlockN != 0) { __trap(); }
+    }
 
     int n_block_max = cute::ceil_div(binfo.actual_seqlen_k, kBlockN);
     if (Is_causal) {

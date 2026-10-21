@@ -101,6 +101,11 @@ inline __device__ void compute_dq_dk_dv_1colblock_aligned(const Params &params, 
 
     const BlockInfo</*Varlen=*/!Is_even_MN> binfo(params, bidb);
     if (n_block * kBlockN >= binfo.actual_seqlen_k) return;
+    // A caller-stated lens_even that is false would make this instantiation
+    // load the ragged tiles unpredicated; a loud failure, not a silent one.
+    if constexpr (Is_even_MN && Use_runs) {
+        if (binfo.actual_seqlen_q % kBlockM != 0 || binfo.actual_seqlen_k % kBlockN != 0) { __trap(); }
+    }
 
     int m_block_max = cute::ceil_div(binfo.actual_seqlen_q, kBlockM);
     if (Is_local) {

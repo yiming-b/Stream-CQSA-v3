@@ -2582,30 +2582,38 @@ void wave_merge_cuda(at::Tensor acc, at::Tensor acc_l, at::Tensor acc_m,
 void wave_scatter_add_cuda(at::Tensor dst, const at::Tensor src_pack,
                            const at::Tensor order, const at::Tensor seg, const at::Tensor uniq);
 
-// The per-subproblem tables of a wave of W subproblems of S rows: lens on the
-// host (its H2D copy is returned and must outlive the launch), the packed
-// group bits and summaries. Returns {W, lens_dev, max_L, lens_even}.
+// The per-subproblem tables of a wave of W subproblems of S rows: lens either
+// on the device with `lens_even` stated by the caller (no host sync: a
+// pageable host-to-device copy synchronises the stream first), or on the host,
+// checked and copied here (lens_even derived; the copy is returned and must
+// outlive the launch), plus the packed group bits and summaries.
 struct WaveLens {
     int W;
     at::Tensor dev;
-    int max_L;
-    bool even;
+    bool even;      // every length is a multiple of 128: the Is_even_MN instantiation may run
 };
 
-static WaveLens wave_check_tables(const at::Tensor &lens, const int S, const at::Tensor &bits,
+static WaveLens wave_check_tables(const at::Tensor &lens, std::optional<bool> lens_even_, const int S, const at::Tensor &bits,
                                   const at::Tensor &blk_or, const at::Tensor &blk_and, const at::Device &device) {
     TORCH_CHECK(S > 0 && S % 128 == 0, "uniform layout: S must be a positive multiple of 128");
-    TORCH_CHECK(lens.device().is_cpu() && lens.dtype() == torch::kInt32 && lens.dim() == 1 && lens.numel() >= 1,
-                "lens must be a CPU int32 [W] tensor");
+    TORCH_CHECK(lens.dtype() == torch::kInt32 && lens.dim() == 1 && lens.numel() >= 1, "lens must be an int32 [W] tensor");
     CHECK_CONTIGUOUS(lens);
     const int W = static_cast<int>(lens.numel());
-    const int *l = lens.data_ptr<int>();
-    int max_L = 0;
     bool even = true;
-    for (int w = 0; w < W; ++w) {
-        TORCH_CHECK(l[w] > 0 && l[w] <= S, "lens[", w, "] = ", l[w], " outside (0, S = ", S, "]");
-        max_L = std::max(max_L, l[w]);
-        even = even && (l[w] % 128 == 0);
+    at::Tensor dev;
+    if (lens.device().is_cpu()) {
+        const int *l = lens.data_ptr<int>();
+        for (int w = 0; w < W; ++w) {
+            TORCH_CHECK(l[w] > 0 && l[w] <= S, "lens[", w, "] = ", l[w], " outside (0, S = ", S, "]");
+            even = even && (l[w] % 128 == 0);
+        }
+        TORCH_CHECK(!lens_even_.has_value() || lens_even_.value() == even, "lens_even contradicts lens");
+        dev = lens.to(device);
+    } else {
+        TORCH_CHECK(lens.device() == device, "lens must be on the inputs' device (or on the CPU)");
+        TORCH_CHECK(lens_even_.has_value(), "lens on the device needs lens_even (whether every length is a multiple of 128)");
+        even = lens_even_.value();
+        dev = lens;
     }
     const int64_t total = (int64_t)W * S;
     CHECK_DEVICE(bits); CHECK_CONTIGUOUS(bits);
@@ -2613,9 +2621,7 @@ static WaveLens wave_check_tables(const at::Tensor &lens, const int S, const at:
     CHECK_DEVICE(blk_or); CHECK_CONTIGUOUS(blk_or); CHECK_DEVICE(blk_and); CHECK_CONTIGUOUS(blk_and);
     TORCH_CHECK(blk_or.dtype() == torch::kInt64 && blk_and.dtype() == torch::kInt64, "summaries int64");
     TORCH_CHECK(blk_or.numel() == total / 64 && blk_and.numel() == total / 64, "summaries must be [W * S/64]");
-    // A pageable H2D copy completes before .to returns; the tensor keeps the
-    // device buffer alive until the caller drops it (after the launch).
-    return {W, lens.to(device), max_L, even};
+    return {W, dev, even};
 }
 
 // Every wave launch sets the per-subproblem strides of the uniform layout and
@@ -2641,7 +2647,7 @@ std::vector<at::Tensor>
 mha_fwd_wave(const at::Tensor &q,            // [R, H, D] token-major, last dim contiguous: the packed wave [W*S, H, D], or any tensor with block_base
              const at::Tensor &k,
              const at::Tensor &v,
-             const at::Tensor &lens,         // [W] int32 on the CPU: real rows of every subproblem
+             const at::Tensor &lens,         // [W] int32: real rows of every subproblem (CPU, or device with lens_even)
              const int S,                    // rows per subproblem (multiple of 128)
              const at::Tensor &bits,         // [W*S] int64 group bits (0 on padding)
              const at::Tensor &blk_or,       // [W*S/64] int64 64-token summaries
@@ -2652,7 +2658,8 @@ mha_fwd_wave(const at::Tensor &q,            // [R, H, D] token-major, last dim 
              const bool is_causal,
              std::optional<at::Tensor> out_acc_,      // [W*S, H, D] fp32 (allocated if absent)
              std::optional<at::Tensor> lse_,          // [W, H, S] fp32 (allocated if absent)
-             const int64_t cqs_fwd_flags) {
+             const int64_t cqs_fwd_flags,
+             std::optional<bool> lens_even) {         // every length a multiple of 128 (required with device lens)
     at::cuda::CUDAGuard device_guard{q.device()};
     auto q_dtype = q.dtype();
     TORCH_CHECK(q_dtype == torch::kFloat16 || q_dtype == torch::kBFloat16, "fp16/bf16 only");
@@ -2665,7 +2672,7 @@ mha_fwd_wave(const at::Tensor &q,            // [R, H, D] token-major, last dim 
     TORCH_CHECK(k.size(1) == num_heads && v.size(1) == num_heads, "wave mode: H_k must equal H");
     TORCH_CHECK(k.size(2) == head_size && v.size(2) == head_size, "head dim mismatch");
     TORCH_CHECK(head_size == 64 || head_size == 128, "the wave kernels exist for head dims 64 and 128");
-    const WaveLens wl = wave_check_tables(lens, S, bits, blk_or, blk_and, q.device());
+    const WaveLens wl = wave_check_tables(lens, lens_even, S, bits, blk_or, blk_and, q.device());
     const int W = wl.W;
     const int64_t total = (int64_t)W * S;
     const bool in_place = block_base_.has_value();
@@ -2734,7 +2741,7 @@ mha_bwd_wave(const at::Tensor &dout,         // [W*S, H, D] packed (0 on padding
              const at::Tensor &v,
              const at::Tensor &softmax_lse,  // [W, H, S] fp32: the GLOBAL lse of every packed token (finite on padding)
              const at::Tensor &dpsum,        // [W, H, S] fp32: rowsum(dO*O) of every packed token (0 on padding)
-             const at::Tensor &lens,         // [W] int32 on the CPU
+             const at::Tensor &lens,         // [W] int32 (CPU, or device with lens_even)
              const int S,
              const at::Tensor &bits,
              const at::Tensor &blk_or,
@@ -2742,7 +2749,8 @@ mha_bwd_wave(const at::Tensor &dout,         // [W*S, H, D] packed (0 on padding
              const float softmax_scale,
              const bool is_causal,
              std::optional<at::Tensor> dq_, std::optional<at::Tensor> dk_, std::optional<at::Tensor> dv_,
-             const int64_t cqs_bwd_flags) {
+             const int64_t cqs_bwd_flags,
+             std::optional<bool> lens_even) {
     at::cuda::CUDAGuard device_guard{q.device()};
     auto q_dtype = q.dtype();
     TORCH_CHECK(q_dtype == torch::kFloat16 || q_dtype == torch::kBFloat16, "fp16/bf16 only");
@@ -2752,7 +2760,7 @@ mha_bwd_wave(const at::Tensor &dout,         // [W*S, H, D] packed (0 on padding
     const int num_heads = q.size(1);
     const int head_size = q.size(2);
     TORCH_CHECK(head_size == 64 || head_size == 128, "the wave kernels exist for head dims 64 and 128");
-    const WaveLens wl = wave_check_tables(lens, S, bits, blk_or, blk_and, q.device());
+    const WaveLens wl = wave_check_tables(lens, lens_even, S, bits, blk_or, blk_and, q.device());
     const int W = wl.W;
     const int64_t total = (int64_t)W * S;
     CHECK_SHAPE(q, total, num_heads, head_size); CHECK_SHAPE(k, total, num_heads, head_size);
@@ -2831,7 +2839,7 @@ mha_fwd_cqs_census(const at::Tensor &cqs_group_bits, const at::Tensor &cqs_blk_o
     int W = 1, S = static_cast<int>(cqs_group_bits.numel());
     at::Tensor lens_dev;
     if (lens_.has_value()) {
-        const WaveLens wl = wave_check_tables(lens_.value(), static_cast<int>(S_), cqs_group_bits, cqs_blk_or, cqs_blk_and,
+        const WaveLens wl = wave_check_tables(lens_.value(), std::nullopt, static_cast<int>(S_), cqs_group_bits, cqs_blk_or, cqs_blk_and,
                                               cqs_group_bits.device());
         W = wl.W; S = static_cast<int>(S_);
         lens_dev = wl.dev;
@@ -2885,7 +2893,7 @@ mha_bwd_cqs_census(const at::Tensor &cqs_group_bits, const at::Tensor &cqs_blk_o
     int W = 1, S = static_cast<int>(cqs_group_bits.numel());
     at::Tensor lens_dev;
     if (lens_.has_value()) {
-        const WaveLens wl = wave_check_tables(lens_.value(), static_cast<int>(S_), cqs_group_bits, cqs_blk_or, cqs_blk_and,
+        const WaveLens wl = wave_check_tables(lens_.value(), std::nullopt, static_cast<int>(S_), cqs_group_bits, cqs_blk_or, cqs_blk_and,
                                               cqs_group_bits.device());
         W = wl.W; S = static_cast<int>(S_);
         lens_dev = wl.dev;
@@ -2922,14 +2930,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           pybind11::arg("block_base") = std::nullopt, pybind11::arg("seg_align") = 0,
           pybind11::arg("softmax_scale"), pybind11::arg("is_causal"),
           pybind11::arg("out_acc") = std::nullopt, pybind11::arg("lse") = std::nullopt,
-          pybind11::arg("cqs_fwd_flags") = 0);
+          pybind11::arg("cqs_fwd_flags") = 0, pybind11::arg("lens_even") = std::nullopt);
 #ifndef FLASHATTENTION_DISABLE_BACKWARD
     m.def("bwd_wave", &FLASH_NAMESPACE::mha_bwd_wave, "native_v2: CQS backward (global lse), W subproblems per launch (uniform layout)",
           pybind11::arg("dout"), pybind11::arg("q"), pybind11::arg("k"), pybind11::arg("v"), pybind11::arg("softmax_lse"), pybind11::arg("dpsum"),
           pybind11::arg("lens"), pybind11::arg("S"), pybind11::arg("bits"), pybind11::arg("blk_or"), pybind11::arg("blk_and"),
           pybind11::arg("softmax_scale"), pybind11::arg("is_causal"),
           pybind11::arg("dq") = std::nullopt, pybind11::arg("dk") = std::nullopt, pybind11::arg("dv") = std::nullopt,
-          pybind11::arg("cqs_bwd_flags") = 0);
+          pybind11::arg("cqs_bwd_flags") = 0, pybind11::arg("lens_even") = std::nullopt);
 #endif
     m.def("wave_merge", &FLASH_NAMESPACE::wave_merge_cuda, "deterministic batched merge of (out, lse) into the accumulator",
           pybind11::arg("acc"), pybind11::arg("acc_l"), pybind11::arg("acc_m"), pybind11::arg("out_pack"), pybind11::arg("lse_pack"),

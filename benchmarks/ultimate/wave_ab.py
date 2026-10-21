@@ -50,7 +50,8 @@ NATIVE = {}      # "v2": cqsa_native_v2, "old": cqsa_native
 
 
 def load_native():
-    for key, name in (("v2", "cqsa_native_v2"), ("old", "cqsa_native")):
+    """cqsa_native_v2 (CQSA_NATIVE_MODULE overrides the name: a dev build) and the first wave module cqsa_native."""
+    for key, name in (("v2", os.environ.get("CQSA_NATIVE_MODULE", "cqsa_native_v2")), ("old", "cqsa_native")):
         if key not in NATIVE:
             NATIVE[key] = importlib.import_module(name)
     assert NW.wave_api(NATIVE["v2"]) >= 2 and NW.wave_api(NATIVE["old"]) == 1
@@ -69,6 +70,11 @@ def timed(fn, iters):
 
 def tasks_for(N, c):
     return sorted(FA.c_tasks(N, c, 1), key=lambda t: (int(t.local_size), t.path))
+
+
+def first_index(tasks, task):
+    """Position of a task in the list by identity (the dataclass's == would compare its tensors)."""
+    return next(i for i, t in enumerate(tasks) if t is task)
 
 
 def wave_plan(tasks, N):
@@ -90,6 +96,8 @@ class Prepared:
         self.qs, self.ks, self.vs = (self.gather(t) for t in (qt, kt, vt))
         self.bb = NW.block_base_for(tb, lambda g: g).to(DEV)
         self.qt, self.kt, self.vt = qt, kt, vt
+        # lens on the device with lens_even stated: no host-to-device copy (a stream sync) inside the timed launch
+        self.lens, self.lens_even = tb.lens.to(DEV), bool((tb.lens % 128 == 0).all())
 
     def gather(self, t):
         g = torch.zeros((self.tb.total, H, D), device=DEV, dtype=t.dtype)
@@ -107,9 +115,11 @@ def fwd_v2(mod, p, in_place, fill=None):
     out = torch.empty((tb.total, H, D), device=DEV, dtype=torch.float32) if fill is None else torch.full((tb.total, H, D), fill, device=DEV, dtype=torch.float32)
     lse = torch.empty((tb.W, H, tb.S), device=DEV, dtype=torch.float32) if fill is None else torch.full((tb.W, H, tb.S), fill, device=DEV, dtype=torch.float32)
     if in_place:
-        mod.fwd_wave(p.qt, p.kt, p.vt, tb.lens, int(tb.S), tb.bits, tb.blk_or, tb.blk_and, p.bb, SEG_ALIGN, D ** -0.5, True, out, lse)
+        mod.fwd_wave(p.qt, p.kt, p.vt, p.lens, int(tb.S), tb.bits, tb.blk_or, tb.blk_and, p.bb, SEG_ALIGN, D ** -0.5, True, out, lse,
+                     lens_even=p.lens_even)
     else:
-        mod.fwd_wave(p.qs, p.ks, p.vs, tb.lens, int(tb.S), tb.bits, tb.blk_or, tb.blk_and, None, 0, D ** -0.5, True, out, lse)
+        mod.fwd_wave(p.qs, p.ks, p.vs, p.lens, int(tb.S), tb.bits, tb.blk_or, tb.blk_and, None, 0, D ** -0.5, True, out, lse,
+                     lens_even=p.lens_even)
     return out, lse
 
 
@@ -178,7 +188,7 @@ def part_fwd(res, N, c, iters):
     refs = fwd_loop(v12f, items, fill=NAN)
     eq_v12f, eq_old, maxd = True, True, 0.0
     for p in preps:
-        w0 = tasks.index(p.tb.tasks[0])
+        w0 = first_index(tasks, p.tb.tasks[0])
         out, lse = fwd_v2(v2, p, False, fill=NAN)
         e, d = equal_wave_vs_tasks(p, out, lse, refs[w0:w0 + p.tb.W]); eq_v12f &= e; maxd = max(maxd, d)
         out_i, lse_i = fwd_v2(v2, p, True, fill=NAN)
@@ -248,7 +258,7 @@ class PreparedBwd(Prepared):
         self.qv, self.kv, self.vv, self.dov = (torch.index_select(t, 0, tbv.tok) for t in (qt, kt, vt, dot))
         self.lse_v = torch.index_select(lse[0], 1, tbv.tok).contiguous()
         W = tbv.W
-        cu = [0] + [int(x) for x in torch.cumsum(torch.tensor([int(t.local_size) for t in wave]), 0)]
+        self.cu = cu = [0] + [int(x) for x in torch.cumsum(torch.tensor([int(t.local_size) for t in wave]), 0)]
         pos = torch.cat([torch.arange(cu[w] + 128 * w, cu[w] + 128 * w + int(t.local_size)) for w, t in enumerate(wave)]).to(DEV)
         self.dps_v = torch.zeros((H, int(tbv.total) + 128 * W), device=DEV, dtype=torch.float32)
         self.dps_v.index_copy_(1, pos, torch.index_select(dpsum[0], 1, tbv.tok))
@@ -258,7 +268,8 @@ def bwd_v2(mod, p, fill=None):
     tb = p.tb
     grads = [torch.empty((tb.total, H, D), device=DEV, dtype=DT) if fill is None else torch.full((tb.total, H, D), fill, device=DEV, dtype=DT)
              for _ in range(3)]
-    mod.bwd_wave(p.dos, p.qs, p.ks, p.vs, p.lse_p, p.dps_p, tb.lens, int(tb.S), tb.bits, tb.blk_or, tb.blk_and, D ** -0.5, True, *grads)
+    mod.bwd_wave(p.dos, p.qs, p.ks, p.vs, p.lse_p, p.dps_p, p.lens, int(tb.S), tb.bits, tb.blk_or, tb.blk_and, D ** -0.5, True, *grads,
+                 lens_even=p.lens_even)
     return grads
 
 
@@ -305,7 +316,7 @@ def part_bwd(res, N, c, iters):
     refs = bwd_loop(v12b, items, fill=NAN)
     eq, dq_max, eq_old, old_max = True, 0.0, True, 0.0
     for p in preps:
-        w0 = tasks.index(p.tb.tasks[0])
+        w0 = first_index(tasks, p.tb.tasks[0])
         dq, dk, dv = bwd_v2(v2, p, fill=NAN)
         for w in range(p.tb.W):
             L = int(p.tb.lens[w]); sl = slice(w * p.tb.S, w * p.tb.S + L)
@@ -314,7 +325,7 @@ def part_bwd(res, N, c, iters):
             dq_max = max(dq_max, BA.maxdiff(dq[sl], dq_r[0]))
         dqo, dko, dvo = bwd_old(old, p, fill=NAN)
         for w in range(p.tb.W):
-            L = int(p.tb.lens[w]); sl = slice(w * p.tb.S, w * p.tb.S + L); c0 = int(p.tbv.cu[w])
+            L = int(p.tb.lens[w]); sl = slice(w * p.tb.S, w * p.tb.S + L); c0 = p.cu[w]
             eq_old &= bool(torch.equal(dk[sl], dko[c0:c0 + L]) and torch.equal(dv[sl], dvo[c0:c0 + L]))
             old_max = max(old_max, BA.maxdiff(dq[sl], dqo[c0:c0 + L]))
         del dq, dk, dv, dqo, dko, dvo

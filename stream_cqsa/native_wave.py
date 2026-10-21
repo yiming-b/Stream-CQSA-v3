@@ -7,11 +7,13 @@ themselves never overlap (each fills the device), so `max_parallel` only ever
 bought the gaps. This engine makes the batching native to the kernel instead:
 
 * a **wave** is a set of subproblems whose token count fits the memory budget;
-* the ``cqsa_native`` extension runs the CQS forward for the whole wave in ONE
-  launch (``fwd_wave``): every subproblem is a "sequence" of a varlen batch,
-  with its own group bits, tile summaries and -- when the inputs are device
-  resident -- a block map that lets the kernel read the ORIGINAL Q/K/V in place
-  (no gather, no per-subproblem copy);
+* the native extension (``cqsa_native_v2``: the census + ALIGNED run-table kernels of
+  v12f / v12b on the uniform wave layout; ``cqsa_native``, the first wave module, as the
+  fallback) runs the CQS forward for the whole wave in ONE launch (``fwd_wave``): every
+  subproblem is one sequence of a padded batch with its real length in ``lens``, its own
+  group bits, tile summaries and -- when the inputs are device resident -- a block map
+  that lets the kernel read the ORIGINAL Q/K/V in place (no gather, no per-subproblem
+  copy);
 * one deterministic merge kernel (``wave_merge``) folds all of the wave's
   ``(out_i, lse_i)`` into the max-shifted accumulator, in a fixed order
   (packed rows sorted by global token, stable), so the result is exact and
@@ -224,17 +226,20 @@ def build_wave_tables(tasks: Sequence[SubproblemTask], device, uniform: bool = F
         S = -(-max_L // SEG_ALIGN) * SEG_ALIGN
         nblk, nbb = S // 64, S // SEG_ALIGN
         bits_np = np.zeros(W * S, dtype=np.int64); or_np = np.zeros(W * nblk, dtype=np.int64); and_np = np.zeros(W * nblk, dtype=np.int64)
-        tok_np = np.full(W * S, -1, dtype=np.int64); bb_np = np.zeros(W * nbb, dtype=np.int32)
+        tok_np = np.full(W * S, -1, dtype=np.int64)
+        # a task without a block map (an unaligned chunk layout) makes the wave gather-only
+        bb_np = np.zeros(W * nbb, dtype=np.int32) if all(b is not None for b in sb) else None
         for w, t in enumerate(tasks):
             L = sizes[w]
             bits_np[w * S: w * S + L] = t.group_bits.numpy()
             o = t.extra["blk_or"].numpy(); a = t.extra["blk_and"].numpy()
             or_np[w * nblk: w * nblk + o.shape[0]] = o; and_np[w * nblk: w * nblk + a.shape[0]] = a
             tok_np[w * S: w * S + L] = t.token_ids.numpy()
-            b = sb[w].numpy(); bb_np[w * nbb: w * nbb + b.shape[0]] = b; bb_np[w * nbb + b.shape[0]: (w + 1) * nbb] = b[-1]
+            if bb_np is not None:
+                b = sb[w].numpy(); bb_np[w * nbb: w * nbb + b.shape[0]] = b; bb_np[w * nbb + b.shape[0]: (w + 1) * nbb] = b[-1]
         bits = torch.from_numpy(bits_np).to(device, non_blocking=True)
         blk_or = torch.from_numpy(or_np).to(device, non_blocking=True); blk_and = torch.from_numpy(and_np).to(device, non_blocking=True)
-        tok_cpu = torch.from_numpy(tok_np); seg_base = torch.from_numpy(bb_np)
+        tok_cpu = torch.from_numpy(tok_np); seg_base = torch.from_numpy(bb_np) if bb_np is not None else None
         cu_np = np.arange(W + 1, dtype=np.int64) * S; blk_cu_np = (np.arange(W + 1) * nblk).astype(np.int32)
         bb_cu_np = (np.arange(W + 1) * nbb).astype(np.int32); total = W * S
     else:

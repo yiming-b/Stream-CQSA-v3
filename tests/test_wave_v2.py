@@ -205,6 +205,12 @@ def test_fwd_wave_w1_is_the_classic_call(causal):
     acc, lse_c, out16 = fwd_ab.cqs_fwd(ext, qi, ki, vi, fwd_ab.task_tables(t), causal, fill=NAN)
     acc_ref, lse_ref, out16_ref = fwd_ab.cqs_fwd(fwd_ab.MODS["v12f"], qi, ki, vi, fwd_ab.task_tables(t), causal, fill=NAN)
     assert torch.equal(acc, acc_ref) and torch.equal(lse_c, lse_ref) and torch.equal(out16, out16_ref)
+    # lens on the device (the sync-free path) with lens_even stated == lens on the CPU
+    from stream_cqsa.native_wave import build_wave_tables
+    tb = build_wave_tables([t], DEV, uniform=True)
+    out_d, lse_d = ext.fwd_wave(qi[0], ki[0], vi[0], tb.lens.to(DEV), int(tb.S), tb.bits, tb.blk_or, tb.blk_and, None, 0,
+                                64 ** -0.5, causal, lens_even=True)
+    assert torch.equal(out_d, acc[0]) and torch.equal(lse_d[0], lse_ref[0])
 
 
 @cuda
@@ -217,7 +223,8 @@ def test_fwd_in_place_equals_gathered_ragged_N():
         tb, out_g, lse_g = _wave(tasks, q, k, v, causal, in_place=False)
         _, out_i, lse_i = _wave(tasks, q, k, v, causal, in_place=True)
         valid = (tb.tok >= 0)
-        assert torch.equal(out_i[valid], out_g[valid]) and torch.equal(lse_i.view(tb.W * tb.S, -1)[valid], lse_g.view(tb.W * tb.S, -1)[valid])
+        rows = lambda lse: lse.transpose(1, 2).reshape(-1, lse.shape[1])     # [W, H, S] -> [W*S, H]
+        assert torch.equal(out_i[valid], out_g[valid]) and torch.equal(rows(lse_i)[valid], rows(lse_g)[valid])
 
 
 @cuda
@@ -228,9 +235,11 @@ def test_fwd_row_block_order_flags():
     tasks = _tasks(32768, 7)
     q, k, v = _qkv(32768, 4, 64, torch.float16)
     tb, out0, lse0 = _wave(tasks, q, k, v, True, True)
+    valid = tb.tok >= 0                                 # the NaN-filled padding rows are never written
+    rows = lambda lse: lse.transpose(1, 2).reshape(-1, lse.shape[1])
     for flags in (ext.CQS_FWD_REVERSE_M, ext.CQS_FWD_ASCENDING_M):
         _, out, lse = _wave(tasks, q, k, v, True, True, flags=flags)
-        assert torch.equal(out, out0) and torch.equal(lse, lse0)
+        assert torch.equal(out[valid], out0[valid]) and torch.equal(rows(lse)[valid], rows(lse0)[valid])
 
 
 # ------------------------------------------------------------------------------------------------ LEGACY routing
@@ -257,16 +266,14 @@ def test_mixed_subproblem_routes_to_legacy_inside_the_wave(causal):
 
 # ------------------------------------------------------------------------------------------------ backward identity
 def _global_lse_dpsum(q, k, v, dout, causal):
-    """The global lse [H, N] and rowsum(dO * O) [H, N] (fp32) of the full attention, from float64."""
-    qf, kf, vf = (t[0].double() for t in (q, k, v))
-    s = qf @ kf.transpose(-1, -2) * (q.shape[-1] ** -0.5)
-    if causal:
-        N = q.shape[-2]
-        s = s.masked_fill(torch.ones(N, N, dtype=torch.bool, device=q.device).triu(1), float("-inf"))
-    lse = torch.logsumexp(s, -1)
-    o = torch.softmax(s, -1) @ vf
-    dpsum = (o * dout[0].double()).sum(-1)
-    return lse.float(), dpsum.float()
+    """The global lse [H, N] and rowsum(dO * O) [H, N] (fp32) of the full attention: the shared input of the
+    wave backward and the per-task reference (the identity needs the same values on both sides, not exact
+    ones), from flash_attn on the shared GPU (a float64 score matrix would be H * N^2 * 8 bytes)."""
+    from flash_attn import flash_attn_func
+    o, lse, _ = flash_attn_func(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), causal=causal,
+                                softmax_scale=q.shape[-1] ** -0.5, return_attn_probs=True)
+    dpsum = (o.float() * dout.transpose(1, 2).float()).sum(-1).transpose(1, 2)          # [1, H, N]
+    return lse[0].contiguous(), dpsum[0].contiguous()
 
 
 def _bwd_wave(tasks, q, k, v, dout, lse, dpsum, causal, flags=0):
@@ -353,13 +360,22 @@ def test_bwd_mixed_subproblem_routes_to_legacy_inside_the_wave():
 
 
 # ------------------------------------------------------------------------------------------------ engine
-def _ref64(q, k, v, causal):
-    qf, kf, vf = (t.double() for t in (q, k, v))
-    s = qf @ kf.transpose(-1, -2) * (q.shape[-1] ** -0.5)
-    if causal:
-        N = q.shape[-2]
-        s = s.masked_fill(torch.ones(N, N, dtype=torch.bool, device=q.device).triu(1), float("-inf"))
-    return torch.softmax(s, -1) @ vf, torch.logsumexp(s, -1)
+def _ref64(q, k, v, causal, rows=2048):
+    """float64 attention and lse of [B, H, N, D] inputs, `rows` query rows at a time (the full [H, N, N] score
+    matrix would not fit next to the other users of the shared GPU)."""
+    B, H, N, D = q.shape
+    out = torch.empty((B, H, N, D), dtype=torch.float64, device=q.device)
+    lse = torch.empty((B, H, N), dtype=torch.float64, device=q.device)
+    kf, vf = k.double(), v.double()
+    col = torch.arange(N, device=q.device)
+    for r0 in range(0, N, rows):
+        r1 = min(N, r0 + rows)
+        s = q[:, :, r0:r1].double() @ kf.transpose(-1, -2) * (D ** -0.5)
+        if causal:
+            s = s.masked_fill((col[None, :] > torch.arange(r0, r1, device=q.device)[:, None]), float("-inf"))
+        lse[:, :, r0:r1] = torch.logsumexp(s, -1)
+        out[:, :, r0:r1] = torch.softmax(s, -1) @ vf
+    return out, lse
 
 
 def _rel(a, b):
@@ -495,8 +511,10 @@ def test_wave_argument_checks():
     summ = torch.zeros(4, dtype=torch.int64, device=DEV)
     with pytest.raises(RuntimeError, match="lens"):
         ext.fwd_wave(q, q, q, torch.tensor([0, 128], dtype=torch.int32), 128, bits, summ, summ, None, 0, 0.125, True)
-    with pytest.raises(RuntimeError, match="lens"):
+    with pytest.raises(RuntimeError, match="lens_even"):      # device lens without lens_even
         ext.fwd_wave(q, q, q, torch.tensor([128, 128], dtype=torch.int32, device=DEV), 128, bits, summ, summ, None, 0, 0.125, True)
+    with pytest.raises(RuntimeError, match="contradicts"):     # CPU lens with a wrong lens_even
+        ext.fwd_wave(q, q, q, torch.tensor([128, 100], dtype=torch.int32), 128, bits, summ, summ, None, 0, 0.125, True, lens_even=True)
     with pytest.raises(RuntimeError, match="multiple of 128"):
         ext.fwd_wave(q, q, q, torch.tensor([100, 100], dtype=torch.int32), 100, bits, summ, summ, None, 0, 0.125, True)
     with pytest.raises(RuntimeError, match="W\\*S rows"):

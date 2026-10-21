@@ -1,0 +1,110 @@
+code: /scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-e721c7e
+della-l02g13
+/scratch/gpfs/AKEY/yb2807/VENVs/CQSA311/bin/python
+Thu Sep 24 08:39:53 AM EDT 2026
+0, NVIDIA A100 80GB PCIe, 81920 MiB, 1410 MHz
+1, NVIDIA A100 80GB PCIe, 81920 MiB, 1410 MHz
+2, NVIDIA A100 80GB PCIe, 81920 MiB, 1410 MHz
+3, NVIDIA A100 80GB PCIe, 81920 MiB, 1410 MHz
+	[4mGPU0	GPU1	GPU2	GPU3	NIC0	NIC1	CPU Affinity	NUMA Affinity	GPU NUMA ID[0m
+GPU0	 X 	NV12	SYS	SYS	NODE	SYS	0,2,4,6,8,10	0		N/A
+GPU1	NV12	 X 	SYS	SYS	NODE	SYS	0,2,4,6,8,10	0		N/A
+GPU2	SYS	SYS	 X 	NV12	SYS	NODE	1,3,5,7,9,11	1		N/A
+GPU3	SYS	SYS	NV12	 X 	SYS	NODE	1,3,5,7,9,11	1		N/A
+NIC0	NODE	NODE	SYS	SYS	 X 	SYS				
+NIC1	SYS	SYS	NODE	NODE	SYS	 X 				
+
+Legend:
+
+  X    = Self
+  SYS  = Connection traversing PCIe as well as the SMP interconnect between NUMA nodes (e.g., QPI/UPI)
+  NODE = Connection traversing PCIe as well as the interconnect between PCIe Host Bridges within a NUMA node
+  PHB  = Connection traversing PCIe as well as a PCIe Host Bridge (typically the CPU)
+  PXB  = Connection traversing multiple PCIe bridges (without traversing the PCIe Host Bridge)
+  PIX  = Connection traversing at most a single PCIe bridge
+  NV#  = Connection traversing a bonded set of # NVLinks
+
+NIC Legend:
+
+  NIC0: mlx5_0
+  NIC1: mlx5_1
+
+2e7cb6d779ade5a1d4074d0547acc149  /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/stable/cqsa_cuda_next_v11.cpython-311-x86_64-linux-gnu.so
+9db744ebaf40c1f7350ba6d33a7333af  /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/stable/cqsa_cuda_next_v9.cpython-311-x86_64-linux-gnu.so
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-e721c7e/stream_cqsa/__init__.py 2.10.0+cu130 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/stable/cqsa_cuda_next_v11.cpython-311-x86_64-linux-gnu.so
+[rank 0 08:40:06] device 0 NVIDIA A100 80GB PCIe world=4 host=della-l02g13 SMs=108/108  calibrated rate 2.369e+07 tiles/s (4.1 s; seed 2.900e+07, seed: A100-SXM4-80GB / 1.15 (SXM ~15% faster on this workload, memory note))
+[rank 1 08:40:06] device 1 NVIDIA A100 80GB PCIe world=4 host=della-l02g13 SMs=108/108  calibrated rate 2.365e+07 tiles/s (4.1 s; seed 2.900e+07, seed: A100-SXM4-80GB / 1.15 (SXM ~15% faster on this workload, memory note))
+[rank 2 08:40:06] device 2 NVIDIA A100 80GB PCIe world=4 host=della-l02g13 SMs=108/108  calibrated rate 2.339e+07 tiles/s (4.2 s; seed 2.900e+07, seed: A100-SXM4-80GB / 1.15 (SXM ~15% faster on this workload, memory note))
+[rank 3 08:40:06] device 3 NVIDIA A100 80GB PCIe world=4 host=della-l02g13 SMs=108/108  calibrated rate 2.335e+07 tiles/s (4.2 s; seed 2.900e+07, seed: A100-SXM4-80GB / 1.15 (SXM ~15% faster on this workload, memory note))
+[rank 0 08:41:04] fwd N=1048576 itr=1 aligned_128_shared: single device 10.29 s
+fwd N= 1048576 itr=1 aligned_128_shared rr/allreduce/seed              world=4  single  10.29s  dist   3.55s  speedup 2.90x  local 3.40 3.37 3.42 2.01  pred 2.67 2.67 2.67 1.34  imb 1.122  merge 1.54s  units [2, 2, 2, 1]  peak+ 7.8GiB  rel.err 3.26e-08 lse.err 9.5e-07
+[rank3]:[W924 08:41:11.329559630 ProcessGroupNCCL.cpp:4025] Warning: [PG ID 0 PG GUID 0(default_pg) Rank 3] An unbatched P2P op (send/recv) was called on this ProcessGroup with size 4.  In eager initialization mode, unbatched P2P ops are treated as independent collective ops, and are thus serialized with all other ops on this ProcessGroup, including other P2P ops. To avoid serialization, either create additional independent ProcessGroups for the P2P ops or use batched P2P ops. You can squash this warning by setting the environment variable TORCH_NCCL_SHOW_EAGER_INIT_P2P_SERIALIZATION_WARNING to false. (function operator())
+[rank2]:[W924 08:41:11.329563290 ProcessGroupNCCL.cpp:4025] Warning: [PG ID 0 PG GUID 0(default_pg) Rank 2] An unbatched P2P op (send/recv) was called on this ProcessGroup with size 4.  In eager initialization mode, unbatched P2P ops are treated as independent collective ops, and are thus serialized with all other ops on this ProcessGroup, including other P2P ops. To avoid serialization, either create additional independent ProcessGroups for the P2P ops or use batched P2P ops. You can squash this warning by setting the environment variable TORCH_NCCL_SHOW_EAGER_INIT_P2P_SERIALIZATION_WARNING to false. (function operator())
+[rank1]:[W924 08:41:11.329566508 ProcessGroupNCCL.cpp:4025] Warning: [PG ID 0 PG GUID 0(default_pg) Rank 1] An unbatched P2P op (send/recv) was called on this ProcessGroup with size 4.  In eager initialization mode, unbatched P2P ops are treated as independent collective ops, and are thus serialized with all other ops on this ProcessGroup, including other P2P ops. To avoid serialization, either create additional independent ProcessGroups for the P2P ops or use batched P2P ops. You can squash this warning by setting the environment variable TORCH_NCCL_SHOW_EAGER_INIT_P2P_SERIALIZATION_WARNING to false. (function operator())
+[rank0]:[W924 08:41:11.329583916 ProcessGroupNCCL.cpp:4025] Warning: [PG ID 0 PG GUID 0(default_pg) Rank 0] An unbatched P2P op (send/recv) was called on this ProcessGroup with size 4.  In eager initialization mode, unbatched P2P ops are treated as independent collective ops, and are thus serialized with all other ops on this ProcessGroup, including other P2P ops. To avoid serialization, either create additional independent ProcessGroups for the P2P ops or use batched P2P ops. You can squash this warning by setting the environment variable TORCH_NCCL_SHOW_EAGER_INIT_P2P_SERIALIZATION_WARNING to false. (function operator())
+fwd N= 1048576 itr=1 aligned_128_shared rr/reduce_scatter/seed         world=4  single  10.29s  dist   3.51s  speedup 2.93x  local 3.40 3.37 3.42 2.01  pred 2.67 2.67 2.67 1.34  imb 1.123  merge 1.50s  units [2, 2, 2, 1]  peak+ 7.8GiB  rel.err 3.31e-08 lse.err 9.5e-07
+fwd N= 1048576 itr=1 aligned_128_shared lpt/allreduce/seed             world=4  single  10.29s  dist   3.95s  speedup 2.61x  local 3.73 3.68 3.71 3.83  pred 2.37 2.37 2.37 2.37  imb 1.025  merge 0.27s  units [6, 6, 6, 7]  peak+ 7.8GiB  rel.err 6.01e-05 lse.err 6.7e-06
+fwd N= 1048576 itr=1 aligned_128_shared lpt/reduce_scatter/seed        world=4  single  10.29s  dist   3.94s  speedup 2.62x  local 3.74 3.68 3.70 3.84  pred 2.37 2.37 2.37 2.37  imb 1.025  merge 0.25s  units [6, 6, 6, 7]  peak+ 7.8GiB  rel.err 6.01e-05 lse.err 6.7e-06
+[rank 0 08:43:33] fwd N=2097152 itr=1 aligned_128_shared: single device 38.91 s
+fwd N= 2097152 itr=1 aligned_128_shared rr/allreduce/seed              world=4  single  38.91s  dist  12.41s  speedup 3.14x  local 12.20 11.81 11.91 6.52  pred 10.63 10.63 10.63 5.31  imb 1.150  merge 5.89s  units [2, 2, 2, 1]  peak+ 15.5GiB  rel.err 3.22e-08 lse.err 9.5e-07
+fwd N= 2097152 itr=1 aligned_128_shared rr/reduce_scatter/seed         world=4  single  38.91s  dist  12.29s  speedup 3.17x  local 12.12 11.90 12.01 6.59  pred 10.63 10.63 10.63 5.31  imb 1.138  merge 5.71s  units [2, 2, 2, 1]  peak+ 15.5GiB  rel.err 3.28e-08 lse.err 9.5e-07
+fwd N= 2097152 itr=1 aligned_128_shared lpt/allreduce/seed             world=4  single  38.91s  dist  12.47s  speedup 3.12x  local 12.23 11.78 12.03 11.92  pred 9.35 9.34 9.35 9.34  imb 1.020  merge 0.68s  units [7, 6, 6, 6]  peak+ 15.5GiB  rel.err 1.21e-04 lse.err 8.6e-06
+fwd N= 2097152 itr=1 aligned_128_shared lpt/reduce_scatter/seed        world=4  single  38.91s  dist  12.46s  speedup 3.12x  local 12.26 11.81 12.07 11.95  pred 9.35 9.34 9.35 9.34  imb 1.020  merge 0.64s  units [7, 6, 6, 6]  peak+ 15.5GiB  rel.err 1.21e-04 lse.err 8.6e-06
+[rank 0 08:45:26] fwd N=1048576 itr=2 aligned_128: single device 14.19 s
+fwd N= 1048576 itr=2 aligned_128        rr/allreduce/seed              world=4  single  14.19s  dist   4.11s  speedup 3.46x  local 4.00 3.60 3.76 3.74  pred 2.50 2.33 2.43 2.39  imb 1.059  merge 0.50s  units [13, 12, 12, 12]  peak+ 4.2GiB  rel.err 8.54e-08 lse.err 9.5e-07
+fwd N= 1048576 itr=2 aligned_128        rr/reduce_scatter/seed         world=4  single  14.19s  dist   4.05s  speedup 3.51x  local 3.96 3.64 3.78 3.77  pred 2.50 2.33 2.43 2.39  imb 1.046  merge 0.40s  units [13, 12, 12, 12]  peak+ 4.2GiB  rel.err 8.54e-08 lse.err 9.5e-07
+fwd N= 1048576 itr=2 aligned_128        lpt/allreduce/seed             world=4  single  14.19s  dist   3.96s  speedup 3.58x  local 3.82 3.69 3.71 3.85  pred 2.41 2.41 2.41 2.41  imb 1.022  merge 0.27s  units [12, 12, 12, 13]  peak+ 4.2GiB  rel.err 8.00e-08 lse.err 9.5e-07
+fwd N= 1048576 itr=2 aligned_128        lpt/reduce_scatter/seed        world=4  single  14.19s  dist   3.94s  speedup 3.60x  local 3.77 3.73 3.74 3.86  pred 2.41 2.41 2.41 2.41  imb 1.022  merge 0.21s  units [12, 12, 12, 13]  peak+ 4.2GiB  rel.err 8.01e-08 lse.err 9.5e-07
+[rank 0 08:48:01] fwd N=2097152 itr=2 aligned_128: single device 45.93 s
+fwd N= 2097152 itr=2 aligned_128        rr/allreduce/seed              world=4  single  45.93s  dist  12.79s  speedup 3.59x  local 12.57 11.38 11.90 11.84  pred 9.76 9.08 9.48 9.33  imb 1.055  merge 1.40s  units [13, 12, 12, 12]  peak+ 8.3GiB  rel.err 8.50e-08 lse.err 9.5e-07
+fwd N= 2097152 itr=2 aligned_128        rr/reduce_scatter/seed         world=4  single  45.93s  dist  12.76s  speedup 3.60x  local 12.58 11.47 11.97 11.92  pred 9.76 9.08 9.48 9.33  imb 1.050  merge 1.28s  units [13, 12, 12, 12]  peak+ 8.3GiB  rel.err 8.50e-08 lse.err 9.5e-07
+fwd N= 2097152 itr=2 aligned_128        lpt/allreduce/seed             world=4  single  45.93s  dist  12.62s  speedup 3.64x  local 12.41 11.72 11.85 11.95  pred 9.42 9.42 9.40 9.41  imb 1.036  merge 0.90s  units [13, 12, 12, 12]  peak+ 8.3GiB  rel.err 8.17e-08 lse.err 9.5e-07
+fwd N= 2097152 itr=2 aligned_128        lpt/reduce_scatter/seed        world=4  single  45.93s  dist  12.48s  speedup 3.68x  local 12.30 11.84 11.92 11.97  pred 9.42 9.42 9.40 9.41  imb 1.025  merge 0.64s  units [13, 12, 12, 12]  peak+ 8.3GiB  rel.err 8.16e-08 lse.err 9.5e-07
+[rank 0 08:50:38] bwd N=1048576 itr=1: single device 33.43 s
+bwd N= 1048576 itr=1 rr/allreduce/seed              world=4  single  33.43s  dist  10.26s  speedup 3.26x  local 9.60 9.99 9.97 5.37  pred 7.97 7.96 7.96 3.98  imb 1.144  merge 4.89s  units [2, 2, 2, 1]  rel.err 0.00e+00
+bwd N= 1048576 itr=1 rr/reduce_scatter/seed         world=4  single  33.43s  dist   9.85s  speedup 3.39x  local 9.63 9.43 9.48 4.83  pred 7.97 7.96 7.96 3.98  imb 1.154  merge 5.02s  units [2, 2, 2, 1]  rel.err 0.00e+00
+bwd N= 1048576 itr=1 lpt/allreduce/seed             world=4  single  33.43s  dist   8.53s  speedup 3.92x  local 8.25 8.12 8.20 8.21  pred 7.00 7.00 7.00 7.00  imb 1.007  merge 0.41s  units [6, 6, 6, 7]  rel.err 9.96e-05
+bwd N= 1048576 itr=1 lpt/reduce_scatter/seed        world=4  single  33.43s  dist   8.61s  speedup 3.88x  local 8.38 8.26 8.33 8.34  pred 7.00 7.00 7.00 7.00  imb 1.006  merge 0.35s  units [6, 6, 6, 7]  rel.err 9.96e-05
+wrote /scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/dist_sched_homog.json
+part 1 exit 0  08:51:18
+[rank 2 08:51:27] device 2 NVIDIA A100 80GB PCIe world=4 host=della-l02g13 SMs=108/108  calibrated rate 2.342e+07 tiles/s (4.1 s; seed 2.900e+07, seed: A100-SXM4-80GB / 1.15 (SXM ~15% faster on this workload, memory note))
+[rank 3 08:51:27] device 3 NVIDIA A100 80GB PCIe world=4 host=della-l02g13 SMs=108/108  calibrated rate 2.377e+07 tiles/s (4.1 s; seed 2.900e+07, seed: A100-SXM4-80GB / 1.15 (SXM ~15% faster on this workload, memory note))
+[rank 0 08:51:27] device 0 NVIDIA A100 80GB PCIe world=4 host=della-l02g13 SMs=108/108  calibrated rate 2.350e+07 tiles/s (4.2 s; seed 2.900e+07, seed: A100-SXM4-80GB / 1.15 (SXM ~15% faster on this workload, memory note))
+[rank 1 08:51:28] device 1 NVIDIA A100 80GB PCIe world=4 host=della-l02g13 SMs=54/108  calibrated rate 1.409e+07 tiles/s (5.6 s; seed 2.900e+07, seed: A100-SXM4-80GB / 1.15 (SXM ~15% faster on this workload, memory note))
+/scratch/gpfs/AKEY/yb2807/VENVs/CQSA311/lib/python3.11/site-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+[rank 0 08:52:26] fwd N=1048576 itr=1 aligned_128_shared: single device 10.31 s
+/scratch/gpfs/AKEY/yb2807/VENVs/CQSA311/lib/python3.11/site-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+fwd N= 1048576 itr=1 aligned_128_shared rr/allreduce/seed              world=4  single  10.31s  dist   5.48s  speedup 1.88x  local 3.42 5.35 3.40 1.99  pred 2.67 2.67 2.67 1.34  imb 1.511  merge 3.49s  units [2, 2, 2, 1]  peak+ 7.8GiB  rel.err 3.26e-08 lse.err 9.5e-07
+fwd N= 1048576 itr=1 aligned_128_shared lpt/allreduce/seed             world=4  single  10.31s  dist   5.56s  speedup 1.86x  local 3.74 5.44 3.67 3.83  pred 2.37 2.37 2.37 2.37  imb 1.304  merge 1.89s  units [6, 6, 6, 7]  peak+ 7.8GiB  rel.err 6.01e-05 lse.err 6.7e-06
+fwd N= 1048576 itr=1 aligned_128_shared lpt/allreduce/measured         world=4  single  10.31s  dist   3.55s  speedup 2.90x  local 3.45 3.00 3.40 3.40  pred 3.29 2.74 3.30 3.26  imb 1.041  merge 0.55s  units [2, 1, 2, 2]  peak+ 7.8GiB  rel.err 3.46e-08 lse.err 9.5e-07
+[rank1]:[W924 08:52:46.843796326 ProcessGroupNCCL.cpp:4068] Warning: An unbatched P2P op (send/recv) was called on this ProcessGroup with size 4.  In lazy initialization mode, this will result in a new 2-rank NCCL communicator to be created. (function operator())
+[rank3]:[W924 08:52:46.843813579 ProcessGroupNCCL.cpp:4068] Warning: An unbatched P2P op (send/recv) was called on this ProcessGroup with size 4.  In lazy initialization mode, this will result in a new 2-rank NCCL communicator to be created. (function operator())
+[rank2]:[W924 08:52:46.843817472 ProcessGroupNCCL.cpp:4068] Warning: An unbatched P2P op (send/recv) was called on this ProcessGroup with size 4.  In lazy initialization mode, this will result in a new 2-rank NCCL communicator to be created. (function operator())
+[rank0]:[W924 08:52:46.843871727 ProcessGroupNCCL.cpp:4068] Warning: An unbatched P2P op (send/recv) was called on this ProcessGroup with size 4.  In lazy initialization mode, this will result in a new 2-rank NCCL communicator to be created. (function operator())
+fwd N= 1048576 itr=1 aligned_128_shared lpt/reduce_scatter/measured    world=4  single  10.31s  dist   3.52s  speedup 2.93x  local 3.43 2.98 3.38 3.39  pred 3.29 2.74 3.30 3.26  imb 1.040  merge 0.54s  units [2, 1, 2, 2]  peak+ 7.8GiB  rel.err 3.43e-08 lse.err 9.5e-07
+[rank 0 08:54:59] fwd N=2097152 itr=1 aligned_128_shared: single device 38.97 s
+fwd N= 2097152 itr=1 aligned_128_shared rr/allreduce/seed              world=4  single  38.97s  dist  19.90s  speedup 1.96x  local 12.21 19.69 11.93 6.54  pred 10.63 10.63 10.63 5.31  imb 1.564  merge 13.36s  units [2, 2, 2, 1]  peak+ 15.5GiB  rel.err 3.22e-08 lse.err 9.5e-07
+fwd N= 2097152 itr=1 aligned_128_shared lpt/allreduce/seed             world=4  single  38.97s  dist  18.83s  speedup 2.07x  local 12.20 18.59 11.90 11.85  pred 9.35 9.34 9.35 9.34  imb 1.363  merge 6.97s  units [7, 6, 6, 6]  peak+ 15.5GiB  rel.err 1.21e-04 lse.err 8.6e-06
+fwd N= 2097152 itr=1 aligned_128_shared lpt/allreduce/measured         world=4  single  38.97s  dist  12.30s  speedup 3.17x  local 12.08 10.46 12.05 12.01  pred 13.11 10.92 13.15 12.96  imb 1.037  merge 1.83s  units [2, 1, 2, 2]  peak+ 15.5GiB  rel.err 4.10e-08 lse.err 9.5e-07
+fwd N= 2097152 itr=1 aligned_128_shared lpt/reduce_scatter/measured    world=4  single  38.97s  dist  12.28s  speedup 3.17x  local 12.10 10.44 12.11 12.03  pred 13.11 10.92 13.15 12.96  imb 1.038  merge 1.85s  units [2, 1, 2, 2]  peak+ 15.5GiB  rel.err 4.07e-08 lse.err 9.5e-07
+wrote /scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/dist_sched_hetero.json
+part 2a exit 0  08:56:07
+[rank 3 08:56:16] device 3 NVIDIA A100 80GB PCIe world=4 host=della-l02g13 SMs=108/108  calibrated rate 2.315e+07 tiles/s (4.2 s; seed 2.900e+07, seed: A100-SXM4-80GB / 1.15 (SXM ~15% faster on this workload, memory note))
+[rank 2 08:56:16] device 2 NVIDIA A100 80GB PCIe world=4 host=della-l02g13 SMs=108/108  calibrated rate 2.313e+07 tiles/s (4.2 s; seed 2.900e+07, seed: A100-SXM4-80GB / 1.15 (SXM ~15% faster on this workload, memory note))
+[rank 0 08:56:16] device 0 NVIDIA A100 80GB PCIe world=4 host=della-l02g13 SMs=108/108  calibrated rate 2.260e+07 tiles/s (4.3 s; seed 2.900e+07, seed: A100-SXM4-80GB / 1.15 (SXM ~15% faster on this workload, memory note))
+[rank 1 08:56:17] device 1 NVIDIA A100 80GB PCIe world=4 host=della-l02g13 SMs=54/108  calibrated rate 1.449e+07 tiles/s (5.5 s; seed 2.900e+07, seed: A100-SXM4-80GB / 1.15 (SXM ~15% faster on this workload, memory note))
+/scratch/gpfs/AKEY/yb2807/VENVs/CQSA311/lib/python3.11/site-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+[rank 0 08:57:19] fwd N=1048576 itr=2 aligned_128: single device 14.08 s
+/scratch/gpfs/AKEY/yb2807/VENVs/CQSA311/lib/python3.11/site-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+fwd N= 1048576 itr=2 aligned_128        rr/allreduce/seed              world=4  single  14.08s  dist   5.47s  speedup 2.57x  local 4.00 5.34 3.80 3.82  pred 2.50 2.33 2.43 2.39  imb 1.259  merge 1.67s  units [13, 12, 12, 12]  peak+ 4.2GiB  rel.err 8.54e-08 lse.err 9.5e-07
+fwd N= 1048576 itr=2 aligned_128        lpt/allreduce/seed             world=4  single  14.08s  dist   5.57s  speedup 2.53x  local 3.78 5.46 3.78 3.88  pred 2.41 2.41 2.41 2.41  imb 1.292  merge 1.79s  units [12, 12, 12, 13]  peak+ 4.2GiB  rel.err 8.00e-08 lse.err 9.5e-07
+fwd N= 1048576 itr=2 aligned_128        lpt/allreduce/measured         world=4  single  14.08s  dist   4.32s  speedup 3.26x  local 4.05 4.00 4.21 4.14  pred 3.32 3.32 3.32 3.32  imb 1.027  merge 0.32s  units [13, 9, 14, 13]  peak+ 4.2GiB  rel.err 8.09e-08 lse.err 9.5e-07
+wrote /scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/dist_sched_hetero_itr2.json
+part 2b exit 0  08:57:36
+14330294||00:17:47
+14330294.batch||00:17:47
+14330294.extern||00:17:47

@@ -1,0 +1,67 @@
+code: /scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-837e2d9
+della-l02g16
+/scratch/gpfs/AKEY/yb2807/VENVs/CQSA311/bin/python
+0, NVIDIA A100 80GB PCIe, 81920 MiB
+1, NVIDIA A100 80GB PCIe, 81920 MiB
+2, NVIDIA A100 80GB PCIe, 81920 MiB
+3, NVIDIA A100 80GB PCIe, 81920 MiB
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/ultimate-837e2d9/stream_cqsa/__init__.py 2.10.0+cu130
+[rank 2 08:40:01] device 2 NVIDIA A100 80GB PCIe world=4 host=della-l02g16[rank 3 08:40:01] device 3 NVIDIA A100 80GB PCIe world=4 host=della-l02g16[rank 1 08:40:01] device 1 NVIDIA A100 80GB PCIe world=4 host=della-l02g16[rank 0 08:40:01] device 0 NVIDIA A100 80GB PCIe world=4 host=della-l02g16
+
+
+
+[rank 1 08:40:48] fwd N=1048576 itr=1 classic_align1: 2 tasks, sum L 898779
+[rank 2 08:40:48] fwd N=1048576 itr=1 classic_align1: 2 tasks, sum L 898780
+[rank 3 08:40:48] fwd N=1048576 itr=1 classic_align1: 1 tasks, sum L 449389
+[rank 0 08:40:48] fwd N=1048576 itr=1 classic_align1: 2 tasks, sum L 898780
+N= 1048576 itr=1 classic_align1       world=4  single   10.96s  dist    3.94s  speedup 2.78x  local/rank 3.81 3.77 3.62 2.17  imbalance 1.140  merge 0.13s  rel.err 3.26e-08  lse.err 9.54e-07  tasks/rank [2, 2, 2, 1]
+[rank 1 08:41:49] fwd N=1048576 itr=1 aligned_128: 2 tasks, sum L 898816
+[rank 2 08:41:49] fwd N=1048576 itr=1 aligned_128: 2 tasks, sum L 898688
+[rank 3 08:41:49] fwd N=1048576 itr=1 aligned_128: 1 tasks, sum L 449280
+[rank 0 08:41:49] fwd N=1048576 itr=1 aligned_128: 2 tasks, sum L 898944
+N= 1048576 itr=1 aligned_128          world=4  single   10.51s  dist    3.76s  speedup 2.79x  local/rank 3.64 3.65 3.54 2.13  imbalance 1.127  merge 0.13s  rel.err 3.26e-08  lse.err 9.54e-07  tasks/rank [2, 2, 2, 1]
+[rank 1 08:42:49] fwd N=1048576 itr=1 aligned_128_shared: 2 tasks, sum L 898816
+[rank 2 08:42:49] fwd N=1048576 itr=1 aligned_128_shared: 2 tasks, sum L 898688
+[rank 3 08:42:49] fwd N=1048576 itr=1 aligned_128_shared: 1 tasks, sum L 449280
+[rank 0 08:42:49] fwd N=1048576 itr=1 aligned_128_shared: 2 tasks, sum L 898944
+N= 1048576 itr=1 aligned_128_shared   world=4  single    9.80s  dist    3.59s  speedup 2.73x  local/rank 3.45 3.48 3.45 2.08  imbalance 1.115  merge 0.13s  rel.err 3.26e-08  lse.err 9.54e-07  tasks/rank [2, 2, 2, 1]
+[rank 2 08:44:35] fwd N=2097152 itr=1 classic_align1: 2 tasks, sum L 1797559
+[rank 1 08:44:35] fwd N=2097152 itr=1 classic_align1: 2 tasks, sum L 1797558
+[rank 0 08:44:35] fwd N=2097152 itr=1 classic_align1: 2 tasks, sum L 1797560
+[rank 3 08:44:35] fwd N=2097152 itr=1 classic_align1: 1 tasks, sum L 898779
+N= 2097152 itr=1 classic_align1       world=4  single   39.60s  dist   12.82s  speedup 3.09x  local/rank 12.49 12.60 12.06 6.82  imbalance 1.146  merge 0.33s  rel.err 3.21e-08  lse.err 9.54e-07  tasks/rank [2, 2, 2, 1]
+[rank 1 08:47:00] fwd N=2097152 itr=1 aligned_128: 2 tasks, sum L 1797504
+[rank 2 08:47:00] fwd N=2097152 itr=1 aligned_128: 2 tasks, sum L 1797632
+[rank 0 08:47:00] fwd N=2097152 itr=1 aligned_128: 2 tasks, sum L 1797632
+[rank 3 08:47:00] fwd N=2097152 itr=1 aligned_128: 1 tasks, sum L 898688
+N= 2097152 itr=1 aligned_128          world=4  single   38.77s  dist   12.59s  speedup 3.08x  local/rank 12.25 12.37 11.90 6.72  imbalance 1.144  merge 0.34s  rel.err 3.21e-08  lse.err 9.54e-07  tasks/rank [2, 2, 2, 1]
+[rank 1 08:49:24] fwd N=2097152 itr=1 aligned_128_shared: 2 tasks, sum L 1797504
+[rank 2 08:49:24] fwd N=2097152 itr=1 aligned_128_shared: 2 tasks, sum L 1797632
+[rank 0 08:49:24] fwd N=2097152 itr=1 aligned_128_shared: 2 tasks, sum L 1797632
+[rank 3 08:49:24] fwd N=2097152 itr=1 aligned_128_shared: 1 tasks, sum L 898688
+N= 2097152 itr=1 aligned_128_shared   world=4  single   38.06s  dist   12.41s  speedup 3.07x  local/rank 12.08 12.19 11.87 6.74  imbalance 1.137  merge 0.33s  rel.err 3.21e-08  lse.err 9.54e-07  tasks/rank [2, 2, 2, 1]
+[rank 1 08:51:01] fwd N=1048576 itr=2 classic_align1: 12 tasks, sum L 2311147
+[rank 2 08:51:01] fwd N=1048576 itr=2 classic_align1: 12 tasks, sum L 2311147
+[rank 0 08:51:01] fwd N=1048576 itr=2 classic_align1: 13 tasks, sum L 2503744
+[rank 3 08:51:01] fwd N=1048576 itr=2 classic_align1: 12 tasks, sum L 2311146
+N= 1048576 itr=2 classic_align1       world=4  single   15.45s  dist    4.83s  speedup 3.20x  local/rank 4.72 4.41 4.47 4.50  imbalance 1.043  merge 0.11s  rel.err 8.55e-08  lse.err 9.54e-07  tasks/rank [13, 12, 12, 12]
+[rank 2 08:52:08] fwd N=1048576 itr=2 aligned_128: 12 tasks, sum L 2311168
+[rank 1 08:52:08] fwd N=1048576 itr=2 aligned_128: 12 tasks, sum L 2311040
+[rank 0 08:52:08] fwd N=1048576 itr=2 aligned_128: 13 tasks, sum L 2503808
+[rank 3 08:52:08] fwd N=1048576 itr=2 aligned_128: 12 tasks, sum L 2311168
+N= 1048576 itr=2 aligned_128          world=4  single   13.85s  dist    4.57s  speedup 3.03x  local/rank 4.46 4.18 4.21 4.27  imbalance 1.041  merge 0.11s  rel.err 8.54e-08  lse.err 9.54e-07  tasks/rank [13, 12, 12, 12]
+[rank 2 08:53:59] fwd N=2097152 itr=2 classic_align1: 12 tasks, sum L 4622296
+[rank 1 08:53:59] fwd N=2097152 itr=2 classic_align1: 12 tasks, sum L 4622292
+[rank 0 08:53:59] fwd N=2097152 itr=2 classic_align1: 13 tasks, sum L 5007488
+[rank 3 08:53:59] fwd N=2097152 itr=2 classic_align1: 12 tasks, sum L 4622292
+N= 2097152 itr=2 classic_align1       world=4  single   48.17s  dist   14.00s  speedup 3.44x  local/rank 13.79 12.97 13.01 13.25  imbalance 1.040  merge 0.22s  rel.err 8.50e-08  lse.err 9.54e-07  tasks/rank [13, 12, 12, 12]
+[rank 1 08:56:34] fwd N=2097152 itr=2 aligned_128: 12 tasks, sum L 4622208
+[rank 2 08:56:34] fwd N=2097152 itr=2 aligned_128: 12 tasks, sum L 4622464
+[rank 0 08:56:34] fwd N=2097152 itr=2 aligned_128: 13 tasks, sum L 5007616
+[rank 3 08:56:34] fwd N=2097152 itr=2 aligned_128: 12 tasks, sum L 4622080
+N= 2097152 itr=2 aligned_128          world=4  single   45.69s  dist   13.67s  speedup 3.34x  local/rank 13.46 12.61 12.73 12.94  imbalance 1.040  merge 0.22s  rel.err 8.50e-08  lse.err 9.54e-07  tasks/rank [13, 12, 12, 12]
+wrote /scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/dist_telemetry.json
+exit 0  08:57:35
+14312486||00:17:46
+14312486.batch||00:17:46
+14312486.extern||00:17:46

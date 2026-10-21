@@ -10,6 +10,7 @@
 #include <ATen/cuda/CUDAGeneratorImpl.h>  // For at::Generator and at::PhiloxCudaState
 #include "philox_unpack.cuh"  // For at::cuda::philox::unpack
 #include <cuda_runtime_api.h>
+#include <c10/cuda/CUDAException.h>  // C10_CUDA_CHECK (the census test entries)
 
 #include <cutlass/numeric_types.h>
 
@@ -17,6 +18,8 @@
 #include "hardware_info.h"
 #include "flash.h"
 #include "static_switch.h"
+#include "cqs_census.h"
+#include "cqs_census_bwd.h"
 #include <array>
 #include <algorithm>
 #include <chrono>
@@ -460,50 +463,89 @@ void set_params_dgrad(Flash_bwd_params &params,
     params.deterministic = deterministic;
 }
 
+// cqs_fwd_flags of fwd_cqs_group_bits / fwd_wave.
+constexpr int kCqsFwdForceLegacy = 1;   // skip the census: v11's CQS forward (A/B and tests)
+constexpr int kCqsFwdReverseM = 2;      // ALIGNED visits row blocks in descending order
+constexpr int kCqsFwdAscendingM = 4;    // ALIGNED visits row blocks in ascending order
+// Neither order flag: descending for causal calls, ascending for non-causal ones. On an
+// A100-SXM4-80GB (job 14319938, results/ultimate/fwd_ab.md) descending order cut the causal
+// ALIGNED forward by 1.5-6.1% (heaviest row blocks first, no drain tail) and was neutral to
+// +1.0% non-causal, where every row block has the same work. Outputs are bit-identical.
+
+// The forward's census buffer: route words for `num_sub` subproblems (padded
+// to 8 bytes so the int2 runs that follow are aligned) and kCqsRunSlots runs
+// per (subproblem, row block of any height >= 64). Sets params.cqs_route /
+// cqs_runs; the strides are the caller's (1 / row blocks for a wave, 0 / 0
+// for a classic call whose batch entries share one table set).
+static at::Tensor alloc_fwd_census(Flash_fwd_params &params, int num_sub, int seqlen_q, const at::TensorOptions &opts) {
+    const int route_words = (num_sub + 1) & ~1;
+    const int max_m_blocks = (seqlen_q + 63) / 64;
+    auto census = torch::empty({route_words + (int64_t)num_sub * max_m_blocks * kCqsRunSlots * 2}, opts.dtype(torch::kInt32));
+    params.cqs_route = census.data_ptr<int>();
+    params.cqs_runs = reinterpret_cast<const int2 *>(params.cqs_route + route_words);
+    return census;
+}
+
+// The forward's eligibility for the census + ALIGNED route: the group-bits
+// mode with summaries in the production configuration. The gate reads the
+// parameters set_params_fprop actually set (F23 review fix: a causal call with
+// a sliding window has params.is_causal == false; it is local and LEGACY).
+static bool cqs_fwd_aligned_eligible(const Flash_fwd_params &params, int64_t cqs_fwd_flags) {
+    const bool cqs_is_local = !params.is_causal
+        && (params.window_size_left >= 0 || params.window_size_right >= 0);
+    return params.cqs_enabled && params.cqs_group_bits != nullptr && params.cqs_blk_or != nullptr
+        && params.cqs_blk_and != nullptr
+        && (cqs_fwd_flags & kCqsFwdForceLegacy) == 0
+        && params.p_dropout >= 1.f && params.p_ptr == nullptr && params.softcap == 0.f
+        && params.alibi_slopes_ptr == nullptr && !cqs_is_local
+        && (params.d == 64 || params.d == 128) && !params.seqlenq_ngroups_swapped
+        && params.cu_seqlens_q == nullptr && params.cu_seqlens_k == nullptr;
+}
+
 void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split_kernel=false) {
 #ifdef CQSA_MINIMAL_FWD_KERNELS
 #ifndef CQSA_MINIMAL_BOTH_DTYPES
     TORCH_CHECK(!params.is_bf16,
                 "this CQSA build only supports fp16; rebuild with "
-                "CQSA_KERNEL_SET=common (fp16+bf16) or =full.");
+                "CQSA_KERNEL_SET=common (fp16+bf16).");
 #endif
     TORCH_CHECK(!force_split_kernel, "CQSA minimal build does not support split-k forward.");
-#ifdef CQSA_MINIMAL_HDIM64_NONCAUSAL_ONLY
-    TORCH_CHECK(params.d == 64, "CQSA hdim64 non-causal build only supports head_dim=64.");
-    TORCH_CHECK(!params.is_causal, "CQSA hdim64 non-causal build only supports non-causal forward.");
-    run_mha_fwd_<cutlass::half_t, 64, false>(params, stream);
-#else
     TORCH_CHECK(params.d == 64 || params.d == 128,
-                "this CQSA build only supports head_dim=64 or 128; rebuild with "
-                "CQSA_KERNEL_SET=full for other head dims.");
+                "this CQSA build only supports head_dim=64 or 128");
+    // CQS off -> the plain forward. CQS on -> the census and the ALIGNED
+    // forward when the caller allocated the census (params.cqs_route), then
+    // LEGACY, whose CTAs return at once for every subproblem without a mixed
+    // tile; without a census LEGACY alone computes the call. Both launches go
+    // to the same stream, so the route is decided without a host sync. The
+    // ALIGNED launch dereferences the census buffers with no null check of its
+    // own, so a route implies the summaries it was built from.
+    TORCH_CHECK(params.cqs_route == nullptr
+                    || (params.cqs_enabled && params.cqs_group_bits != nullptr && params.cqs_blk_or != nullptr
+                        && params.cqs_blk_and != nullptr && params.cqs_runs != nullptr),
+                "native_v2: census route set without group bits / summaries");
     FP16_SWITCH(!params.is_bf16, [&] {
         BOOL_SWITCH(params.is_causal, Is_causal, [&] {
-#if defined(CQSA_NATIVE_HDIM64_ONLY) || defined(CQSA_NATIVE_FWD_HDIM64_ONLY)
-            TORCH_CHECK(params.d == 64, "this native build has forward kernels for head_dim=64 only "
-                        "(head_dim=128 runs on the classic engine / cqsa_cuda)");
-            run_mha_fwd_<elem_type, 64, Is_causal>(params, stream);
+#ifdef CQSA_NATIVE_HDIM64_ONLY
+            TORCH_CHECK(params.d == 64, "this native_v2 dev build has head_dim=64 kernels only");
+            if (!params.cqs_enabled || params.cqs_route != nullptr) { run_mha_fwd_<elem_type, 64, Is_causal>(params, stream); }
+            if (params.cqs_enabled) { run_mha_fwd_legacy_<elem_type, 64, Is_causal>(params, stream); }
 #else
             if (params.d == 64) {
-                run_mha_fwd_<elem_type, 64, Is_causal>(params, stream);
+                if (!params.cqs_enabled || params.cqs_route != nullptr) { run_mha_fwd_<elem_type, 64, Is_causal>(params, stream); }
+                if (params.cqs_enabled) { run_mha_fwd_legacy_<elem_type, 64, Is_causal>(params, stream); }
             } else {
-                run_mha_fwd_<elem_type, 128, Is_causal>(params, stream);
+                if (!params.cqs_enabled || params.cqs_route != nullptr) { run_mha_fwd_<elem_type, 128, Is_causal>(params, stream); }
+                if (params.cqs_enabled) { run_mha_fwd_legacy_<elem_type, 128, Is_causal>(params, stream); }
             }
 #endif
         });
     });
-#endif
 #else
-    FP16_SWITCH(!params.is_bf16, [&] {
-        HEADDIM_SWITCH(params.d, [&] {
-            BOOL_SWITCH(params.is_causal, Is_causal, [&] {
-                if (params.num_splits <= 1 && !force_split_kernel) {  // If we don't set it num_splits == 0
-                    run_mha_fwd_<elem_type, kHeadDim, Is_causal>(params, stream);
-                } else {
-                    run_mha_fwd_splitkv_dispatch<elem_type, kHeadDim, Is_causal>(params, stream);
-                }
-            });
-        });
-    });
+    // The CQS-on routing (census -> ALIGNED -> LEGACY, and LEGACY alone for a
+    // call without a census) exists only in the branch above; upstream's
+    // dispatch would send every CQS call through run_mha_fwd_ -> the ALIGNED
+    // launcher with null census buffers. setup.py always defines the macro.
+#error "native_v2 requires CQSA_MINIMAL_FWD_KERNELS: the CQS-on ALIGNED/LEGACY routing exists only in that branch"
 #endif
 }
 
@@ -622,7 +664,8 @@ mha_fwd_impl(at::Tensor &q,         // batch_size x seqlen_q x num_heads x round
         std::optional<int64_t> cqs_blk_size_ = std::nullopt,
         std::optional<at::Tensor> cqs_out_acc_ = std::nullopt,
         std::optional<at::Tensor> cqs_block_base_ = std::nullopt,
-        std::optional<int64_t> cqs_seg_align_ = std::nullopt) {
+        std::optional<int64_t> cqs_seg_align_ = std::nullopt,
+        const int64_t cqs_fwd_flags = 0) {
 
     // Otherwise the kernel will be launched from cuda:0 device
     at::cuda::CUDAGuard device_guard{q.device()};
@@ -848,6 +891,19 @@ mha_fwd_impl(at::Tensor &q,         // batch_size x seqlen_q x num_heads x round
 
     set_params_alibi(params, alibi_slopes_, batch_size, num_heads);
 
+    // The census and the ALIGNED forward serve the group-bits mode with
+    // summaries in the production configuration; anything else (and a forced
+    // LEGACY call) keeps params.cqs_route null and runs v11's forward. The
+    // batch entries of a classic call share the one set of tables (every
+    // wave stride is 0, as set_params_fprop's reset leaves it), so the census
+    // runs once and the route word is one.
+    at::Tensor cqs_census;
+    if (cqs_fwd_aligned_eligible(params, cqs_fwd_flags)) {
+        cqs_census = alloc_fwd_census(params, /*num_sub=*/1, seqlen_q, opts);
+        params.cqs_reverse_m = (cqs_fwd_flags & kCqsFwdReverseM) != 0
+            || (params.is_causal && (cqs_fwd_flags & kCqsFwdAscendingM) == 0);
+    }
+
     if (seqlen_k > 0) {
         auto stream = at::cuda::getCurrentCUDAStream().stream();
         run_mha_fwd(params, stream);
@@ -955,7 +1011,8 @@ mha_fwd_cqs_group_bits(at::Tensor &q,         // batch_size x seqlen_q x num_hea
                        std::optional<int64_t> cqs_blk_size_ = std::nullopt,
                        std::optional<at::Tensor> cqs_out_acc_ = std::nullopt,
                        std::optional<at::Tensor> cqs_block_base_ = std::nullopt,
-                       std::optional<int64_t> cqs_seg_align_ = std::nullopt) {
+                       std::optional<int64_t> cqs_seg_align_ = std::nullopt,
+                       const int64_t cqs_fwd_flags = 0) {
     auto cqs_group_bits_opt = std::optional<at::Tensor>(cqs_group_bits);
     return mha_fwd_impl(
         q,
@@ -979,7 +1036,8 @@ mha_fwd_cqs_group_bits(at::Tensor &q,         // batch_size x seqlen_q x num_hea
         cqs_blk_size_,
         cqs_out_acc_,
         cqs_block_base_,
-        cqs_seg_align_);
+        cqs_seg_align_,
+        cqs_fwd_flags);
 }
 
 void run_mha_bwd(Flash_bwd_params &params, cudaStream_t stream);
@@ -1625,6 +1683,34 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
 }
 
 #ifndef FLASHATTENTION_DISABLE_BACKWARD
+// cqs_bwd_flags of bwd / bwd_wave.
+constexpr int kCqsBwdForceLegacy = 1;   // skip the census: v11's CQS backward (A/B and tests)
+
+// The backward's census buffer, as alloc_fwd_census: route words for
+// `num_sub` subproblems and kCqsBwdRunSlots runs per (subproblem, column block
+// of any width >= 64).
+static at::Tensor alloc_bwd_census(Flash_bwd_params &params, int num_sub, int seqlen_k, const at::TensorOptions &opts) {
+    const int route_words = (num_sub + 1) & ~1;
+    const int max_n_blocks = (seqlen_k + 63) / 64;
+    auto census = torch::empty({route_words + (int64_t)num_sub * max_n_blocks * kCqsBwdRunSlots * 2}, opts.dtype(torch::kInt32));
+    params.cqs_bwd_route = census.data_ptr<int>();
+    params.cqs_bwd_runs = reinterpret_cast<const int2 *>(params.cqs_bwd_route + route_words);
+    return census;
+}
+
+// The host side of cqs_bwd_aligned_eligible (flash_bwd_aligned.h), on the
+// post-set_params values (a causal call with a window has params.is_causal ==
+// false: local, LEGACY).
+static bool cqs_bwd_census_eligible(const Flash_bwd_params &params, int64_t cqs_bwd_flags) {
+    return params.cqs_enabled && params.cqs_group_bits != nullptr && params.cqs_blk_or != nullptr
+        && params.cqs_blk_and != nullptr && !params.cqsa_numden_mode
+        && (cqs_bwd_flags & kCqsBwdForceLegacy) == 0
+        && params.p_dropout >= 1.f && params.softcap == 0.f && params.alibi_slopes_ptr == nullptr
+        && (params.is_causal || (params.window_size_left < 0 && params.window_size_right < 0))
+        && params.cu_seqlens_q == nullptr && params.cu_seqlens_k == nullptr
+        && (params.d == 64 || params.d == 128);
+}
+
 void run_mha_bwd(Flash_bwd_params &params, cudaStream_t stream) {
 #ifdef CQSA_MINIMAL_FWD_KERNELS
 #ifndef CQSA_MINIMAL_BOTH_DTYPES
@@ -1643,7 +1729,7 @@ void run_mha_bwd(Flash_bwd_params &params, cudaStream_t stream) {
     FP16_SWITCH(!params.is_bf16, [&] {
         BOOL_SWITCH(params.is_causal, Is_causal, [&] {
 #ifdef CQSA_NATIVE_HDIM64_ONLY
-            TORCH_CHECK(params.d == 64, "this native dev build only has head_dim=64 kernels");
+            TORCH_CHECK(params.d == 64, "this native_v2 dev build has head_dim=64 kernels only");
             run_mha_bwd_<elem_type, 64, Is_causal>(params, stream);
 #else
             if (params.d == 64) {
@@ -1701,7 +1787,9 @@ mha_bwd(const at::Tensor &dout,  // batch_size x seqlen_q x num_heads, x multipl
         std::optional<int64_t> cqs_blk_size_ = std::nullopt,
         // Precomputed rowsum(dO * O), [batch, heads, seqlen_q]. When given, the
         // preprocess pass is skipped and `out` is never read.
-        std::optional<at::Tensor> dsoftmax_sum_ = std::nullopt){
+        std::optional<at::Tensor> dsoftmax_sum_ = std::nullopt,
+        // kCqsBwdForceLegacy runs v11's CQS backward without a census.
+        const int64_t cqs_bwd_flags = 0){
 
     #ifdef FLASHATTENTION_DISABLE_BACKWARD
         TORCH_CHECK(false, "This flash attention build does not support backward.");
@@ -1915,6 +2003,16 @@ mha_bwd(const at::Tensor &dout,  // batch_size x seqlen_q x num_heads, x multipl
         params.cqsa_ext_dpsum = true;
     }
     params.dq_accum_split_stride = !deterministic ? 0 : dq_accum.stride(0);
+
+    // The census and the ALIGNED backward serve the group-bits mode with
+    // summaries in the production configuration (the conditions of
+    // cqs_bwd_aligned_eligible in flash_bwd_aligned.h, which the launcher
+    // re-checks); anything else, and a forced LEGACY call, keeps
+    // params.cqs_bwd_route null and runs v11's backward.
+    at::Tensor cqs_census;
+    if (cqs_bwd_census_eligible(params, cqs_bwd_flags)) {
+        cqs_census = alloc_bwd_census(params, /*num_sub=*/1, seqlen_k, opts);
+    }
 
     auto launch = &run_mha_bwd;
 
@@ -2461,16 +2559,22 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
     return {out, softmax_lse};
 }
 
+
 // ============================================================================
-// next/native: WAVE mode -- several CQS subproblems in ONE launch.
+// next/native_v2: WAVE mode -- several CQS subproblems in ONE launch, in the
+// UNIFORM layout (docs/ultimate/01_design_a100.md 4.5).
 //
-// Layout is FlashAttention's varlen batch: subproblem w owns packed rows
-// [cu_seqlens[w], cu_seqlens[w+1]) of every per-token array (bits, out, lse,
-// dq/dk/dv ...). Q/K/V are either the packed wave itself, or -- with
-// block_base -- any token-major [R, H, D] tensor (the ORIGINAL sequence, a
-// chunk pool) that the subproblems address in place; block_base entries are
-// relative to cu_seqlens[w], so q_ptr + cu_seqlens[w]*row_stride + delta lands
-// on the global row. The forward hands over only the fp32 output and the lse.
+// W subproblems, each padded to S rows (S % 128 == 0), are FlashAttention's
+// ordinary batch of W sequences: subproblem w owns rows [w*S, w*S + lens[w])
+// of every per-token array (bits, out, lse, dq/dk/dv ...), its 64-token
+// summaries sit at w * S/64 and its block map at w * S/128. Q/K/V are either
+// the packed wave itself [W*S, H, D] (batch stride S rows) or -- with
+// block_base holding the row, in the tensor the kernel reads, of every
+// 128-block -- any token-major [R, H, D] tensor (the ORIGINAL sequence, a
+// chunk pool) that the subproblems address in place (batch stride 0). lens
+// makes both legal for any N: the kernels never touch a padding row. The
+// forward hands over only the fp32 output and the lse; the backward takes the
+// GLOBAL lse and rowsum(dO*O) in the same [W, H, S] layout.
 // ============================================================================
 void wave_merge_cuda(at::Tensor acc, at::Tensor acc_l, at::Tensor acc_m,
                      const at::Tensor out_pack, const at::Tensor lse_pack,
@@ -2478,32 +2582,85 @@ void wave_merge_cuda(at::Tensor acc, at::Tensor acc_l, at::Tensor acc_m,
 void wave_scatter_add_cuda(at::Tensor dst, const at::Tensor src_pack,
                            const at::Tensor order, const at::Tensor seg, const at::Tensor uniq);
 
-static void wave_check_tables(const at::Tensor &cu_seqlens, const at::Tensor &bits, const at::Tensor &blk_or,
-                              const at::Tensor &blk_and, const at::Tensor &blk_cu, const int total_q) {
-    CHECK_DEVICE(cu_seqlens); CHECK_CONTIGUOUS(cu_seqlens);
-    TORCH_CHECK(cu_seqlens.dtype() == torch::kInt32 && cu_seqlens.dim() == 1 && cu_seqlens.numel() >= 2, "cu_seqlens [W+1] int32");
+// The per-subproblem tables of a wave of W subproblems of S rows: lens either
+// on the device with `lens_even` stated by the caller (no host sync: a
+// pageable host-to-device copy synchronises the stream first), or on the host,
+// checked and copied here (lens_even derived; the copy is returned and must
+// outlive the launch), plus the packed group bits and summaries.
+struct WaveLens {
+    int W;
+    at::Tensor dev;
+    bool even;      // every length is a multiple of 128: the Is_even_MN instantiation may run
+};
+
+static WaveLens wave_check_tables(const at::Tensor &lens, std::optional<bool> lens_even_, const int S, const at::Tensor &bits,
+                                  const at::Tensor &blk_or, const at::Tensor &blk_and, const at::Device &device) {
+    TORCH_CHECK(S > 0 && S % 128 == 0, "uniform layout: S must be a positive multiple of 128");
+    TORCH_CHECK(lens.dtype() == torch::kInt32 && lens.dim() == 1 && lens.numel() >= 1, "lens must be an int32 [W] tensor");
+    CHECK_CONTIGUOUS(lens);
+    const int W = static_cast<int>(lens.numel());
+    bool even = true;
+    at::Tensor dev;
+    if (lens.device().is_cpu()) {
+        const int *l = lens.data_ptr<int>();
+        for (int w = 0; w < W; ++w) {
+            TORCH_CHECK(l[w] > 0 && l[w] <= S, "lens[", w, "] = ", l[w], " outside (0, S = ", S, "]");
+            even = even && (l[w] % 128 == 0);
+        }
+        TORCH_CHECK(!lens_even_.has_value() || lens_even_.value() == even, "lens_even contradicts lens");
+        dev = lens.to(device);
+    } else {
+        TORCH_CHECK(lens.device() == device, "lens must be on the inputs' device (or on the CPU)");
+        TORCH_CHECK(lens_even_.has_value(), "lens on the device needs lens_even (whether every length is a multiple of 128)");
+        even = lens_even_.value();
+        dev = lens;
+    }
+    const int64_t total = (int64_t)W * S;
     CHECK_DEVICE(bits); CHECK_CONTIGUOUS(bits);
-    TORCH_CHECK(bits.dtype() == torch::kInt64 && bits.numel() == total_q, "bits must be [total] int64");
+    TORCH_CHECK(bits.dtype() == torch::kInt64 && bits.numel() == total, "bits must be [W*S] int64");
     CHECK_DEVICE(blk_or); CHECK_CONTIGUOUS(blk_or); CHECK_DEVICE(blk_and); CHECK_CONTIGUOUS(blk_and);
-    TORCH_CHECK(blk_or.dtype() == torch::kInt64 && blk_and.dtype() == torch::kInt64 && blk_or.numel() == blk_and.numel(), "summaries");
-    CHECK_DEVICE(blk_cu); CHECK_CONTIGUOUS(blk_cu);
-    TORCH_CHECK(blk_cu.dtype() == torch::kInt32 && blk_cu.numel() == cu_seqlens.numel(), "blk_cu [W+1] int32");
+    TORCH_CHECK(blk_or.dtype() == torch::kInt64 && blk_and.dtype() == torch::kInt64, "summaries int64");
+    TORCH_CHECK(blk_or.numel() == total / 64 && blk_and.numel() == total / 64, "summaries must be [W * S/64]");
+    return {W, dev, even};
 }
 
-// Uniform layout: W subproblems, each padded to S rows (S % 128 == 0). Plain batched
-// launch (b = W, seqlen = S); tables at bidb * stride. q/k/v are either the packed wave
-// [W*S, H, D] (batch stride S rows) or, with block_base [W * S/128] holding the row of
-// every 128-block in the tensor the kernel reads, any [R, H, D] tensor (batch stride 0).
-// Padding keys are hidden by the causal mask, so causal only.
+// Every wave launch sets the per-subproblem strides of the uniform layout and
+// the lens; bb_stride stays 0 (the block map is per subproblem too, set by the
+// caller when reading in place).
+static void set_wave_tables(Flash_fwd_params &params, const WaveLens &wl, const int S,
+                            const at::Tensor &bits, const at::Tensor &blk_or, const at::Tensor &blk_and) {
+    params.cqs_enabled = true;
+    params.cqs_num_chunks = 0; params.cqs_owner_chunk = 0; params.cqs_chunk_ends = nullptr;
+    params.cqs_group_bits = bits.data_ptr<int64_t>();
+    params.cqs_blk_or = blk_or.data_ptr<int64_t>();
+    params.cqs_blk_and = blk_and.data_ptr<int64_t>();
+    params.cqs_blk_size = 64;
+    params.cqs_num_blocks = S / 64;                       // per subproblem (lens refine it per CTA)
+    params.cqs_wave_lens = wl.dev.data_ptr<int>();
+    params.cqs_wave_lens_even = wl.even;
+    params.cqs_wave_tok_stride = S;
+    params.cqs_wave_blk_stride = S / 64;
+    params.cqs_wave_route_stride = 1;
+}
+
 std::vector<at::Tensor>
-mha_fwd_wave_uniform(const at::Tensor &q, const at::Tensor &k, const at::Tensor &v,
-                     const int S, const int W,
-                     const at::Tensor &bits, const at::Tensor &blk_or, const at::Tensor &blk_and,
-                     std::optional<at::Tensor> block_base_, const int seg_align,
-                     const float softmax_scale, const bool is_causal,
-                     std::optional<at::Tensor> out_acc_, std::optional<at::Tensor> lse_) {
-    TORCH_CHECK(is_causal, "the uniform wave layout is causal only (padding keys rely on the causal mask)");
-    TORCH_CHECK(S > 0 && S % 128 == 0 && W > 0, "uniform layout: S must be a positive multiple of 128");
+mha_fwd_wave(const at::Tensor &q,            // [R, H, D] token-major, last dim contiguous: the packed wave [W*S, H, D], or any tensor with block_base
+             const at::Tensor &k,
+             const at::Tensor &v,
+             const at::Tensor &lens,         // [W] int32: real rows of every subproblem (CPU, or device with lens_even)
+             const int S,                    // rows per subproblem (multiple of 128)
+             const at::Tensor &bits,         // [W*S] int64 group bits (0 on padding)
+             const at::Tensor &blk_or,       // [W*S/64] int64 64-token summaries
+             const at::Tensor &blk_and,
+             std::optional<at::Tensor> block_base_,   // [W*S/128] int32: row in q/k/v of every 128-block (in-place reads)
+             const int seg_align,
+             const float softmax_scale,
+             const bool is_causal,
+             std::optional<at::Tensor> out_acc_,      // [W*S, H, D] fp32 (allocated if absent)
+             std::optional<at::Tensor> lse_,          // [W, H, S] fp32 (allocated if absent)
+             const int64_t cqs_fwd_flags,
+             std::optional<bool> lens_even) {         // every length a multiple of 128 (required with device lens)
+    at::cuda::CUDAGuard device_guard{q.device()};
     auto q_dtype = q.dtype();
     TORCH_CHECK(q_dtype == torch::kFloat16 || q_dtype == torch::kBFloat16, "fp16/bf16 only");
     TORCH_CHECK(k.dtype() == q_dtype && v.dtype() == q_dtype, "dtype mismatch");
@@ -2514,19 +2671,15 @@ mha_fwd_wave_uniform(const at::Tensor &q, const at::Tensor &k, const at::Tensor 
     const int head_size = q.size(2);
     TORCH_CHECK(k.size(1) == num_heads && v.size(1) == num_heads, "wave mode: H_k must equal H");
     TORCH_CHECK(k.size(2) == head_size && v.size(2) == head_size, "head dim mismatch");
-    TORCH_CHECK(head_size % 8 == 0 && head_size <= 256, "head dim");
+    TORCH_CHECK(head_size == 64 || head_size == 128, "the wave kernels exist for head dims 64 and 128");
+    const WaveLens wl = wave_check_tables(lens, lens_even, S, bits, blk_or, blk_and, q.device());
+    const int W = wl.W;
     const int64_t total = (int64_t)W * S;
-    const int nblk = S / 64, nbb = S / 128;
-    CHECK_DEVICE(bits); CHECK_CONTIGUOUS(bits);
-    TORCH_CHECK(bits.dtype() == torch::kInt64 && bits.numel() == total, "bits must be [W*S] int64");
-    CHECK_DEVICE(blk_or); CHECK_CONTIGUOUS(blk_or); CHECK_DEVICE(blk_and); CHECK_CONTIGUOUS(blk_and);
-    TORCH_CHECK(blk_or.dtype() == torch::kInt64 && blk_and.dtype() == torch::kInt64, "summaries int64");
-    TORCH_CHECK(blk_or.numel() == (int64_t)W * nblk && blk_and.numel() == (int64_t)W * nblk, "summaries must be [W * S/64]");
     const bool in_place = block_base_.has_value();
     if (in_place) {
         auto bb = block_base_.value();
         CHECK_DEVICE(bb); CHECK_CONTIGUOUS(bb);
-        TORCH_CHECK(bb.dtype() == torch::kInt32 && bb.numel() == (int64_t)W * nbb, "block_base must be [W * S/128] int32");
+        TORCH_CHECK(bb.dtype() == torch::kInt32 && bb.numel() == total / 128, "block_base must be [W * S/128] int32");
         TORCH_CHECK(seg_align == 128, "uniform layout: seg_align must be 128");
     } else {
         TORCH_CHECK(q.size(0) == total && k.size(0) == total && v.size(0) == total, "packed q/k/v must have W*S rows");
@@ -2556,7 +2709,7 @@ mha_fwd_wave_uniform(const at::Tensor &q, const at::Tensor &k, const at::Tensor 
     Flash_fwd_params params;
     set_params_fprop(params, W, S, S, S, S, num_heads, num_heads, head_size, head_size_rounded,
                      q, k, v, out4, nullptr, nullptr, nullptr, nullptr, softmax_lse.data_ptr(),
-                     0.f, softmax_scale, -1, 0, 0.f, /*seqlenq_ngroups_swapped=*/false, /*unpadded_lse=*/false);
+                     0.f, softmax_scale, -1, is_causal ? 0 : -1, 0.f, /*seqlenq_ngroups_swapped=*/false, /*unpadded_lse=*/false);
     // batch stride: the packed wave advances S rows per subproblem; in place, every
     // subproblem reads the same tensor and the block map does the addressing.
     params.q_batch_stride = in_place ? 0 : (int64_t)S * params.q_row_stride;
@@ -2564,242 +2717,236 @@ mha_fwd_wave_uniform(const at::Tensor &q, const at::Tensor &k, const at::Tensor 
     params.v_batch_stride = in_place ? 0 : (int64_t)S * params.v_row_stride;
     params.o_ptr = nullptr;                              // fp32 copy only
     params.cqs_out_acc_ptr = out_acc.data_ptr();
-    params.cqs_enabled = true;
-    params.cqs_num_chunks = 0; params.cqs_owner_chunk = 0; params.cqs_chunk_ends = nullptr;
-    params.cqs_group_bits = bits.data_ptr<int64_t>();
-    params.cqs_blk_or = blk_or.data_ptr<int64_t>();
-    params.cqs_blk_and = blk_and.data_ptr<int64_t>();
-    params.cqs_blk_size = 64;
-    params.cqs_num_blocks = nblk;                        // per subproblem
-    params.cqs_wave = true;
-    params.cqs_blk_cu = nullptr; params.cqs_bb_cu = nullptr;
-    params.cqs_wave_tok_stride = S;
-    params.cqs_wave_blk_stride = nblk;
-    params.cqs_wave_bb_stride = nbb;
+    set_wave_tables(params, wl, S, bits, blk_or, blk_and);
     params.cqs_block_base = in_place ? block_base_.value().data_ptr<int>() : nullptr;
     params.cqs_seg_align = in_place ? seg_align : 0;
+    params.cqs_wave_bb_stride = in_place ? S / 128 : 0;
+    at::Tensor cqs_census;
+    if (cqs_fwd_aligned_eligible(params, cqs_fwd_flags)) {
+        cqs_census = alloc_fwd_census(params, W, S, opts);
+        params.cqs_wave_run_stride = S / CqsAlignedTile<64>::kBlockM;   // row blocks per subproblem (128 at both head dims)
+        params.cqs_reverse_m = (cqs_fwd_flags & kCqsFwdReverseM) != 0
+            || (is_causal && (cqs_fwd_flags & kCqsFwdAscendingM) == 0);
+    }
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     run_mha_fwd(params, stream);
     return {out_acc, softmax_lse};
 }
 
-std::vector<at::Tensor>
-mha_fwd_wave(const at::Tensor &q,            // [R, H, D] token-major, last dim contiguous
-             const at::Tensor &k,
-             const at::Tensor &v,
-             const at::Tensor &cu_seqlens,   // [W+1] int32
-             const int max_seqlen,
-             const int total_q,              // cu_seqlens[W]
-             const at::Tensor &bits,         // [total] int64
-             const at::Tensor &blk_or,       // packed 64-token summaries
-             const at::Tensor &blk_and,
-             const at::Tensor &blk_cu,       // [W+1] int32
-             std::optional<at::Tensor> block_base_,   // packed int32, relative to cu_seqlens[w]
-             std::optional<at::Tensor> bb_cu_,        // [W+1] int32
-             const int seg_align,
-             const float softmax_scale,
-             const bool is_causal,
-             std::optional<at::Tensor> out_acc_,      // [total, H, D] fp32 (allocated if absent)
-             std::optional<at::Tensor> lse_,          // [H, total] fp32  (uniform: [W, H, S])
-             const int uniform_S,                     // > 0: uniform layout (causal), W subproblems of S rows each
-             const int uniform_W) {
-    at::cuda::CUDAGuard device_guard{q.device()};
-    if (uniform_S > 0) {
-        return mha_fwd_wave_uniform(q, k, v, uniform_S, uniform_W, bits, blk_or, blk_and, block_base_, seg_align,
-                                    softmax_scale, is_causal, out_acc_, lse_);
-    }
-    TORCH_CHECK(!is_causal, "causal wave launches use the uniform layout (uniform_S > 0); the varlen layout is non-causal only");
-    auto q_dtype = q.dtype();
-    TORCH_CHECK(q_dtype == torch::kFloat16 || q_dtype == torch::kBFloat16, "fp16/bf16 only");
-    TORCH_CHECK(k.dtype() == q_dtype && v.dtype() == q_dtype, "dtype mismatch");
-    CHECK_DEVICE(q); CHECK_DEVICE(k); CHECK_DEVICE(v);
-    TORCH_CHECK(q.dim() == 3 && k.dim() == 3 && v.dim() == 3, "q/k/v must be [R, H, D]");
-    TORCH_CHECK(q.stride(-1) == 1 && k.stride(-1) == 1 && v.stride(-1) == 1, "last dim must be contiguous");
-    const int num_heads = q.size(1);
-    const int head_size = q.size(2);
-    TORCH_CHECK(k.size(1) == num_heads && v.size(1) == num_heads, "wave mode: H_k must equal H");
-    TORCH_CHECK(k.size(2) == head_size && v.size(2) == head_size, "head dim mismatch");
-    TORCH_CHECK(head_size % 8 == 0 && head_size <= 256, "head dim");
-    const int W = cu_seqlens.numel() - 1;
-    wave_check_tables(cu_seqlens, bits, blk_or, blk_and, blk_cu, total_q);
-    if (!block_base_.has_value()) {
-        TORCH_CHECK(q.size(0) == total_q && k.size(0) == total_q && v.size(0) == total_q, "packed q/k/v must have total rows");
-    } else {
-        auto bb = block_base_.value();
-        CHECK_DEVICE(bb); CHECK_CONTIGUOUS(bb);
-        TORCH_CHECK(bb.dtype() == torch::kInt32, "block_base must be int32");
-        TORCH_CHECK(bb_cu_.has_value(), "bb_cu required with block_base");
-        CHECK_DEVICE(bb_cu_.value()); CHECK_CONTIGUOUS(bb_cu_.value());
-        TORCH_CHECK(bb_cu_.value().dtype() == torch::kInt32 && bb_cu_.value().numel() == W + 1, "bb_cu [W+1] int32");
-        TORCH_CHECK(seg_align > 0 && seg_align % 128 == 0, "seg_align must be a positive multiple of 128");
-    }
-
-    auto opts = q.options();
-    at::Tensor out_acc;
-    if (out_acc_.has_value()) {
-        out_acc = out_acc_.value();
-        CHECK_DEVICE(out_acc); CHECK_CONTIGUOUS(out_acc);
-        TORCH_CHECK(out_acc.dtype() == torch::kFloat32, "out_acc fp32");
-        CHECK_SHAPE(out_acc, total_q, num_heads, head_size);
-    } else {
-        out_acc = torch::empty({total_q, num_heads, head_size}, opts.dtype(at::kFloat));
-    }
-    at::Tensor softmax_lse;
-    if (lse_.has_value()) {
-        softmax_lse = lse_.value();
-        CHECK_DEVICE(softmax_lse); CHECK_CONTIGUOUS(softmax_lse);
-        TORCH_CHECK(softmax_lse.dtype() == torch::kFloat32, "lse fp32");
-        CHECK_SHAPE(softmax_lse, num_heads, total_q);
-    } else {
-        softmax_lse = torch::empty({num_heads, total_q}, opts.dtype(at::kFloat));
-    }
-
-    auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
-    const int head_size_rounded = round_multiple(head_size, head_size <= 128 ? 32 : 64);
-    const int seqlen_rounded = round_multiple(max_seqlen, 128);
-
-    Flash_fwd_params params;
-    set_params_fprop(params, W, max_seqlen, max_seqlen, seqlen_rounded, seqlen_rounded,
-                     num_heads, num_heads, head_size, head_size_rounded,
-                     q, k, v, out_acc,                   // out_acc only lends its strides
-                     cu_seqlens.data_ptr(), cu_seqlens.data_ptr(), nullptr,
-                     nullptr, softmax_lse.data_ptr(),
-                     0.f, softmax_scale, -1, is_causal ? 0 : -1, 0.f,
-                     /*seqlenq_ngroups_swapped=*/false, /*unpadded_lse=*/true);
-    params.total_q = total_q;
-    params.o_ptr = nullptr;                              // fp32 copy only
-    params.cqs_out_acc_ptr = out_acc.data_ptr();
-    params.cqs_enabled = true;
-    params.cqs_num_chunks = 0; params.cqs_owner_chunk = 0; params.cqs_chunk_ends = nullptr;
-    params.cqs_group_bits = bits.data_ptr<int64_t>();
-    params.cqs_blk_or = blk_or.data_ptr<int64_t>();
-    params.cqs_blk_and = blk_and.data_ptr<int64_t>();
-    params.cqs_blk_size = 64;
-    params.cqs_num_blocks = static_cast<int>(blk_or.numel());
-    params.cqs_wave = true;
-    params.cqs_wave_tok_stride = 0; params.cqs_wave_blk_stride = 0; params.cqs_wave_bb_stride = 0;
-    params.cqs_blk_cu = blk_cu.data_ptr<int>();
-    params.cqs_block_base = block_base_.has_value() ? block_base_.value().data_ptr<int>() : nullptr;
-    params.cqs_bb_cu = bb_cu_.has_value() ? bb_cu_.value().data_ptr<int>() : nullptr;
-    params.cqs_seg_align = block_base_.has_value() ? seg_align : 0;
-
-    auto stream = at::cuda::getCurrentCUDAStream().stream();
-    if (max_seqlen > 0) { run_mha_fwd(params, stream); }
-    return {out_acc, softmax_lse};
-}
-
 #ifndef FLASHATTENTION_DISABLE_BACKWARD
 std::vector<at::Tensor>
-mha_bwd_wave(const at::Tensor &dout,         // [total, H, D] packed
-             const at::Tensor &q,            // [total, H, D] packed
+mha_bwd_wave(const at::Tensor &dout,         // [W*S, H, D] packed (0 on padding rows)
+             const at::Tensor &q,            // [W*S, H, D] packed
              const at::Tensor &k,
              const at::Tensor &v,
-             const at::Tensor &softmax_lse,  // [H, total] fp32, the GLOBAL lse gathered per packed token
-             const at::Tensor &dpsum,        // [H, total + 128*W] fp32: rowsum(dO*O) at cu_seqlens[w] + 128*w
-             const at::Tensor &cu_seqlens,   // [W+1] int32
-             const int max_seqlen,
-             const int total_q,
+             const at::Tensor &softmax_lse,  // [W, H, S] fp32: the GLOBAL lse of every packed token (finite on padding)
+             const at::Tensor &dpsum,        // [W, H, S] fp32: rowsum(dO*O) of every packed token (0 on padding)
+             const at::Tensor &lens,         // [W] int32 (CPU, or device with lens_even)
+             const int S,
              const at::Tensor &bits,
              const at::Tensor &blk_or,
              const at::Tensor &blk_and,
-             const at::Tensor &blk_cu,
              const float softmax_scale,
              const bool is_causal,
-             std::optional<at::Tensor> dq_, std::optional<at::Tensor> dk_, std::optional<at::Tensor> dv_) {
+             std::optional<at::Tensor> dq_, std::optional<at::Tensor> dk_, std::optional<at::Tensor> dv_,
+             const int64_t cqs_bwd_flags,
+             std::optional<bool> lens_even) {
     at::cuda::CUDAGuard device_guard{q.device()};
     auto q_dtype = q.dtype();
     TORCH_CHECK(q_dtype == torch::kFloat16 || q_dtype == torch::kBFloat16, "fp16/bf16 only");
     TORCH_CHECK(k.dtype() == q_dtype && v.dtype() == q_dtype && dout.dtype() == q_dtype, "dtype mismatch");
     CHECK_DEVICE(q); CHECK_DEVICE(k); CHECK_DEVICE(v); CHECK_DEVICE(dout); CHECK_DEVICE(softmax_lse); CHECK_DEVICE(dpsum);
-    TORCH_CHECK(q.dim() == 3, "q [total, H, D]");
+    TORCH_CHECK(q.dim() == 3, "q [W*S, H, D]");
     const int num_heads = q.size(1);
     const int head_size = q.size(2);
-    TORCH_CHECK(head_size % 8 == 0 && head_size <= 256, "head dim");
-    const int W = cu_seqlens.numel() - 1;
-    wave_check_tables(cu_seqlens, bits, blk_or, blk_and, blk_cu, total_q);
-    CHECK_SHAPE(q, total_q, num_heads, head_size); CHECK_SHAPE(k, total_q, num_heads, head_size);
-    CHECK_SHAPE(v, total_q, num_heads, head_size); CHECK_SHAPE(dout, total_q, num_heads, head_size);
+    TORCH_CHECK(head_size == 64 || head_size == 128, "the wave kernels exist for head dims 64 and 128");
+    const WaveLens wl = wave_check_tables(lens, lens_even, S, bits, blk_or, blk_and, q.device());
+    const int W = wl.W;
+    const int64_t total = (int64_t)W * S;
+    CHECK_SHAPE(q, total, num_heads, head_size); CHECK_SHAPE(k, total, num_heads, head_size);
+    CHECK_SHAPE(v, total, num_heads, head_size); CHECK_SHAPE(dout, total, num_heads, head_size);
     TORCH_CHECK(q.stride(-1) == 1 && k.stride(-1) == 1 && v.stride(-1) == 1 && dout.stride(-1) == 1, "last dim contiguous");
-    CHECK_CONTIGUOUS(softmax_lse); CHECK_SHAPE(softmax_lse, num_heads, total_q);
+    CHECK_CONTIGUOUS(softmax_lse); CHECK_SHAPE(softmax_lse, W, num_heads, S);
+    CHECK_CONTIGUOUS(dpsum); CHECK_SHAPE(dpsum, W, num_heads, S);
     TORCH_CHECK(softmax_lse.dtype() == torch::kFloat32 && dpsum.dtype() == torch::kFloat32, "lse/dpsum fp32");
-    CHECK_CONTIGUOUS(dpsum); CHECK_SHAPE(dpsum, num_heads, total_q + 128 * W);
 
     auto opts = q.options();
     at::Tensor dq = dq_.has_value() ? dq_.value() : torch::empty_like(q);
     at::Tensor dk = dk_.has_value() ? dk_.value() : torch::empty_like(k);
     at::Tensor dv = dv_.has_value() ? dv_.value() : torch::empty_like(v);
-    CHECK_SHAPE(dq, total_q, num_heads, head_size); CHECK_SHAPE(dk, total_q, num_heads, head_size); CHECK_SHAPE(dv, total_q, num_heads, head_size);
+    CHECK_SHAPE(dq, total, num_heads, head_size); CHECK_SHAPE(dk, total, num_heads, head_size); CHECK_SHAPE(dv, total, num_heads, head_size);
     TORCH_CHECK(dq.stride(-1) == 1 && dk.stride(-1) == 1 && dv.stride(-1) == 1, "grad last dim contiguous");
 
     auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
     const int head_size_rounded = round_multiple(head_size, head_size <= 128 ? 32 : 64);
-    const int seqlen_rounded = round_multiple(max_seqlen, 128);
-    // dq is accumulated in fp32 with atomics, per packed row, 128 rows of slack per subproblem
-    // (see mha_varlen_bwd). The caller-supplied dpsum means the preprocess pass -- which would
-    // have zeroed it -- is skipped, so zero it here.
-    auto dq_accum = torch::zeros({total_q + 128 * W, num_heads, head_size_rounded}, opts.dtype(at::kFloat));
+    // dq is accumulated in fp32 with atomics; the caller-supplied dpsum means the
+    // preprocess pass -- which would have zeroed it -- is skipped, so zero it here.
+    auto dq_accum = torch::zeros({total, num_heads, head_size_rounded}, opts.dtype(at::kFloat));
+    // [W, S, H, D] views lend the batch strides of the uniform layout.
+    auto q4 = q.view({W, S, num_heads, head_size}), k4 = k.view({W, S, num_heads, head_size}), v4 = v.view({W, S, num_heads, head_size});
+    auto do4 = dout.view({W, S, num_heads, head_size});
+    auto dq4 = dq.view({W, S, num_heads, head_size}), dk4 = dk.view({W, S, num_heads, head_size}), dv4 = dv.view({W, S, num_heads, head_size});
 
     Flash_bwd_params params;
-    set_params_dgrad(params, W, max_seqlen, max_seqlen, seqlen_rounded, seqlen_rounded,
-                     num_heads, num_heads, head_size, head_size_rounded,
-                     q, k, v, dout /* stands in for `out`, never read */,
-                     dout, dq, dk, dv,
-                     cu_seqlens.data_ptr(), cu_seqlens.data_ptr(),
+    set_params_dgrad(params, W, S, S, S, S, num_heads, num_heads, head_size, head_size_rounded,
+                     q4, k4, v4, do4 /* stands in for `out`, never read */,
+                     do4, dq4, dk4, dv4,
+                     nullptr, nullptr,
                      dq_accum.data_ptr(), nullptr, nullptr,
                      softmax_lse.data_ptr(), dpsum.data_ptr(),
                      0.f, softmax_scale, -1, is_causal ? 0 : -1, 0.f,
-                     /*deterministic=*/false, /*unpadded_lse=*/true);
+                     /*deterministic=*/false, /*unpadded_lse=*/false);
     params.dq_accum_split_stride = 0;
-    params.total_q = total_q;
     params.cqsa_numden_mode = false;
     params.cqsa_ext_dpsum = true;
-    params.cqs_enabled = true;
-    params.cqs_num_chunks = 0; params.cqs_owner_chunk = 0; params.cqs_chunk_ends = nullptr;
-    params.cqs_group_bits = bits.data_ptr<int64_t>();
-    params.cqs_blk_or = blk_or.data_ptr<int64_t>();
-    params.cqs_blk_and = blk_and.data_ptr<int64_t>();
-    params.cqs_blk_size = 64;
-    params.cqs_num_blocks = static_cast<int>(blk_or.numel());
     params.cqs_out_acc_ptr = nullptr;
     params.cqs_block_base = nullptr; params.cqs_seg_align = 0;
-    params.cqs_wave = true;
-    params.cqs_wave_tok_stride = 0; params.cqs_wave_blk_stride = 0; params.cqs_wave_bb_stride = 0;
-    params.cqs_blk_cu = blk_cu.data_ptr<int>();
-    params.cqs_bb_cu = nullptr;
-
+    set_wave_tables(params, wl, S, bits, blk_or, blk_and);
+    at::Tensor cqs_census;
+    if (cqs_bwd_census_eligible(params, cqs_bwd_flags)) {
+        cqs_census = alloc_bwd_census(params, W, S, opts);
+        params.cqs_wave_bwd_run_stride = S / 64;             // column blocks per subproblem at the narrowest width
+    }
     auto stream = at::cuda::getCurrentCUDAStream().stream();
-    if (max_seqlen > 0) { run_mha_bwd(params, stream); }
+    run_mha_bwd(params, stream);
     return {dq, dk, dv};
 }
 #endif
+
+// The census the CQS forward runs, exposed for tests: on one subproblem
+// (lens absent: L = bits.numel()) or on a wave (lens [W] on the CPU, S rows
+// per subproblem, tables packed as fwd_wave takes them). Returns the route
+// words (int32 [W]: 0 = ALIGNED, else kCqsRoute* bits), the run tables (int32
+// [W, S / kBlockM, kCqsRunSlots, 2], {hi, lo} runs in descending n closed by
+// {-1, -1}) and the ALIGNED tile shape (int32 [2] on the CPU).
+std::vector<at::Tensor>
+mha_fwd_cqs_census(const at::Tensor &cqs_group_bits, const at::Tensor &cqs_blk_or, const at::Tensor &cqs_blk_and,
+                   const bool is_causal, const int64_t head_size, std::optional<at::Tensor> lens_, const int64_t S_) {
+    at::cuda::CUDAGuard device_guard{cqs_group_bits.device()};
+    for (const at::Tensor *t : {&cqs_group_bits, &cqs_blk_or, &cqs_blk_and}) {
+        CHECK_DEVICE((*t)); CHECK_CONTIGUOUS((*t));
+        TORCH_CHECK(t->dtype() == torch::kInt64, "cqs group bits and summaries must be int64");
+    }
+    TORCH_CHECK(head_size == 64 || head_size == 128, "the ALIGNED forward exists for head dims 64 and 128");
+    const int block_m = head_size == 64 ? CqsAlignedTile<64>::kBlockM : CqsAlignedTile<128>::kBlockM;
+    const int block_n = head_size == 64 ? CqsAlignedTile<64>::kBlockN : CqsAlignedTile<128>::kBlockN;
+    Flash_fwd_params params = {};
+    params.is_causal = is_causal;
+    params.cqs_enabled = true;
+    params.cqs_group_bits = cqs_group_bits.data_ptr<int64_t>();
+    params.cqs_blk_or = cqs_blk_or.data_ptr<int64_t>();
+    params.cqs_blk_and = cqs_blk_and.data_ptr<int64_t>();
+    int W = 1, S = static_cast<int>(cqs_group_bits.numel());
+    at::Tensor lens_dev;
+    if (lens_.has_value()) {
+        const WaveLens wl = wave_check_tables(lens_.value(), std::nullopt, static_cast<int>(S_), cqs_group_bits, cqs_blk_or, cqs_blk_and,
+                                              cqs_group_bits.device());
+        W = wl.W; S = static_cast<int>(S_);
+        lens_dev = wl.dev;
+        params.cqs_wave_lens = lens_dev.data_ptr<int>();
+        params.cqs_wave_tok_stride = S;
+        params.cqs_wave_blk_stride = S / 64;
+        params.cqs_wave_route_stride = 1;
+        params.cqs_wave_run_stride = S / block_m;
+    } else {
+        TORCH_CHECK(S > 0, "empty group bits");
+        TORCH_CHECK(cqs_blk_or.numel() == cqs_blk_and.numel() && cqs_blk_or.numel() >= (S + 63) / 64,
+                    "cqs block summaries (64 tokens each) too short");
+    }
+    params.seqlen_q = params.seqlen_k = S;
+    const int num_m = (S + block_m - 1) / block_m;
+    const int route_words = (W + 1) & ~1;
+    auto census = torch::empty({route_words + (int64_t)W * num_m * kCqsRunSlots * 2}, cqs_group_bits.options().dtype(torch::kInt32));
+    params.cqs_route = census.data_ptr<int>();
+    params.cqs_runs = reinterpret_cast<const int2 *>(params.cqs_route + route_words);
+    run_cqs_fwd_census(params, block_m, block_n, W, at::cuda::getCurrentCUDAStream().stream());
+    return {census.slice(0, 0, W), census.slice(0, route_words).view({W, num_m, kCqsRunSlots, 2}),
+            torch::tensor({block_m, block_n}, torch::dtype(torch::kInt32))};
+}
+
+// The census the CQS backward runs, exposed for tests (as mha_fwd_cqs_census,
+// per column block: runs of m blocks in descending m) for the backward's tile
+// shape on this device (run_mha_bwd_hdim64/128 in flash_bwd_launch_template.h:
+// 128x128 / 64x128 with >= 144 KB of smem per block, else 64x128 / 64x64).
+std::vector<at::Tensor>
+mha_bwd_cqs_census(const at::Tensor &cqs_group_bits, const at::Tensor &cqs_blk_or, const at::Tensor &cqs_blk_and,
+                   const bool is_causal, const int64_t head_size, std::optional<at::Tensor> lens_, const int64_t S_) {
+    at::cuda::CUDAGuard device_guard{cqs_group_bits.device()};
+    for (const at::Tensor *t : {&cqs_group_bits, &cqs_blk_or, &cqs_blk_and}) {
+        CHECK_DEVICE((*t)); CHECK_CONTIGUOUS((*t));
+        TORCH_CHECK(t->dtype() == torch::kInt64, "cqs group bits and summaries must be int64");
+    }
+    TORCH_CHECK(head_size == 64 || head_size == 128, "the ALIGNED backward exists for head dims 64 and 128");
+    int device;
+    C10_CUDA_CHECK(cudaGetDevice(&device));
+    int max_smem_per_block;
+    C10_CUDA_CHECK(cudaDeviceGetAttribute(&max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
+    const bool big = max_smem_per_block >= 144 * 1024;
+    const int block_m = head_size == 64 ? (big ? 128 : 64) : 64;
+    const int block_n = head_size == 64 ? 128 : (big ? 128 : 64);
+    Flash_bwd_params params = {};
+    params.is_causal = is_causal;
+    params.cqs_enabled = true;
+    params.cqs_group_bits = cqs_group_bits.data_ptr<int64_t>();
+    params.cqs_blk_or = cqs_blk_or.data_ptr<int64_t>();
+    params.cqs_blk_and = cqs_blk_and.data_ptr<int64_t>();
+    int W = 1, S = static_cast<int>(cqs_group_bits.numel());
+    at::Tensor lens_dev;
+    if (lens_.has_value()) {
+        const WaveLens wl = wave_check_tables(lens_.value(), std::nullopt, static_cast<int>(S_), cqs_group_bits, cqs_blk_or, cqs_blk_and,
+                                              cqs_group_bits.device());
+        W = wl.W; S = static_cast<int>(S_);
+        lens_dev = wl.dev;
+        params.cqs_wave_lens = lens_dev.data_ptr<int>();
+        params.cqs_wave_tok_stride = S;
+        params.cqs_wave_blk_stride = S / 64;
+        params.cqs_wave_route_stride = 1;
+        params.cqs_wave_bwd_run_stride = S / block_n;
+    } else {
+        TORCH_CHECK(S > 0, "empty group bits");
+        TORCH_CHECK(cqs_blk_or.numel() == cqs_blk_and.numel() && cqs_blk_or.numel() >= (S + 63) / 64,
+                    "cqs block summaries (64 tokens each) too short");
+    }
+    params.seqlen_q = params.seqlen_k = S;
+    const int num_n = (S + block_n - 1) / block_n;
+    const int route_words = (W + 1) & ~1;
+    auto census = torch::empty({route_words + (int64_t)W * num_n * kCqsBwdRunSlots * 2}, cqs_group_bits.options().dtype(torch::kInt32));
+    params.cqs_bwd_route = census.data_ptr<int>();
+    params.cqs_bwd_runs = reinterpret_cast<const int2 *>(params.cqs_bwd_route + route_words);
+    run_cqs_bwd_census(params, block_m, block_n, W, at::cuda::getCurrentCUDAStream().stream());
+    return {census.slice(0, 0, W), census.slice(0, route_words).view({W, num_n, kCqsBwdRunSlots, 2}),
+            torch::tensor({block_m, block_n}, torch::dtype(torch::kInt32))};
+}
 
 } // namespace FLASH_NAMESPACE
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "FlashAttention";
-    m.def("fwd_wave", &FLASH_NAMESPACE::mha_fwd_wave, "next/native: CQS forward, several subproblems per launch",
-          pybind11::arg("q"), pybind11::arg("k"), pybind11::arg("v"), pybind11::arg("cu_seqlens"), pybind11::arg("max_seqlen"),
-          pybind11::arg("total_q"), pybind11::arg("bits"), pybind11::arg("blk_or"), pybind11::arg("blk_and"), pybind11::arg("blk_cu"),
-          pybind11::arg("block_base") = std::nullopt, pybind11::arg("bb_cu") = std::nullopt, pybind11::arg("seg_align") = 0,
+    // The wave entry points' API generation (stream_cqsa/native_wave.py selects the layout by it).
+    m.attr("WAVE_API") = 2;
+    m.def("fwd_wave", &FLASH_NAMESPACE::mha_fwd_wave, "native_v2: CQS forward, W subproblems per launch (uniform layout)",
+          pybind11::arg("q"), pybind11::arg("k"), pybind11::arg("v"), pybind11::arg("lens"), pybind11::arg("S"),
+          pybind11::arg("bits"), pybind11::arg("blk_or"), pybind11::arg("blk_and"),
+          pybind11::arg("block_base") = std::nullopt, pybind11::arg("seg_align") = 0,
           pybind11::arg("softmax_scale"), pybind11::arg("is_causal"),
           pybind11::arg("out_acc") = std::nullopt, pybind11::arg("lse") = std::nullopt,
-          pybind11::arg("uniform_S") = 0, pybind11::arg("uniform_W") = 0);
+          pybind11::arg("cqs_fwd_flags") = 0, pybind11::arg("lens_even") = std::nullopt);
 #ifndef FLASHATTENTION_DISABLE_BACKWARD
-    m.def("bwd_wave", &FLASH_NAMESPACE::mha_bwd_wave, "next/native: CQS backward (global lse), several subproblems per launch",
+    m.def("bwd_wave", &FLASH_NAMESPACE::mha_bwd_wave, "native_v2: CQS backward (global lse), W subproblems per launch (uniform layout)",
           pybind11::arg("dout"), pybind11::arg("q"), pybind11::arg("k"), pybind11::arg("v"), pybind11::arg("softmax_lse"), pybind11::arg("dpsum"),
-          pybind11::arg("cu_seqlens"), pybind11::arg("max_seqlen"), pybind11::arg("total_q"),
-          pybind11::arg("bits"), pybind11::arg("blk_or"), pybind11::arg("blk_and"), pybind11::arg("blk_cu"),
+          pybind11::arg("lens"), pybind11::arg("S"), pybind11::arg("bits"), pybind11::arg("blk_or"), pybind11::arg("blk_and"),
           pybind11::arg("softmax_scale"), pybind11::arg("is_causal"),
-          pybind11::arg("dq") = std::nullopt, pybind11::arg("dk") = std::nullopt, pybind11::arg("dv") = std::nullopt);
+          pybind11::arg("dq") = std::nullopt, pybind11::arg("dk") = std::nullopt, pybind11::arg("dv") = std::nullopt,
+          pybind11::arg("cqs_bwd_flags") = 0, pybind11::arg("lens_even") = std::nullopt);
 #endif
-    m.def("wave_merge", &FLASH_NAMESPACE::wave_merge_cuda, "next/native: deterministic batched merge of (out, lse) into the accumulator",
+    m.def("wave_merge", &FLASH_NAMESPACE::wave_merge_cuda, "deterministic batched merge of (out, lse) into the accumulator",
           pybind11::arg("acc"), pybind11::arg("acc_l"), pybind11::arg("acc_m"), pybind11::arg("out_pack"), pybind11::arg("lse_pack"),
           pybind11::arg("order"), pybind11::arg("seg"), pybind11::arg("uniq"), pybind11::arg("S") = 0);
-    m.def("wave_scatter_add", &FLASH_NAMESPACE::wave_scatter_add_cuda, "next/native: deterministic batched scatter-add");
+    m.def("wave_scatter_add", &FLASH_NAMESPACE::wave_scatter_add_cuda, "deterministic batched scatter-add");
     m.def("fwd", &FLASH_NAMESPACE::mha_fwd, "Forward pass");
     m.def("fwd_cqs", &FLASH_NAMESPACE::mha_fwd_cqs, "Forward pass with deterministic CQS mask");
     m.def("fwd_cqs_group_bits", &FLASH_NAMESPACE::mha_fwd_cqs_group_bits,
-          "Forward pass with per-token CQS group-bit mask",
+          "Forward pass with per-token CQS group-bit mask (a W=1 wave)",
           pybind11::arg("q"), pybind11::arg("k"), pybind11::arg("v"), pybind11::arg("out_"), pybind11::arg("alibi_slopes_"),
           pybind11::arg("p_dropout"), pybind11::arg("softmax_scale"), pybind11::arg("is_causal"),
           pybind11::arg("window_size_left"), pybind11::arg("window_size_right"), pybind11::arg("softcap"),
@@ -2808,7 +2955,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           pybind11::arg("cqs_blk_size") = pybind11::none(),
           pybind11::arg("cqs_out_acc") = pybind11::none(),
           pybind11::arg("cqs_block_base") = pybind11::none(),
-          pybind11::arg("cqs_seg_align") = pybind11::none());
+          pybind11::arg("cqs_seg_align") = pybind11::none(),
+          pybind11::arg("cqs_fwd_flags") = 0);
+    m.def("fwd_cqs_census", &FLASH_NAMESPACE::mha_fwd_cqs_census,
+          "The CQS forward's tile census (route words, run tables, tile shape); for tests",
+          pybind11::arg("cqs_group_bits"), pybind11::arg("cqs_blk_or"), pybind11::arg("cqs_blk_and"),
+          pybind11::arg("is_causal"), pybind11::arg("head_size"), pybind11::arg("lens") = std::nullopt, pybind11::arg("S") = 0);
+    m.attr("CQS_FWD_FORCE_LEGACY") = FLASH_NAMESPACE::kCqsFwdForceLegacy;
+    m.attr("CQS_FWD_REVERSE_M") = FLASH_NAMESPACE::kCqsFwdReverseM;
+    m.attr("CQS_FWD_ASCENDING_M") = FLASH_NAMESPACE::kCqsFwdAscendingM;
+    m.attr("CQS_FWD_RUN_SLOTS") = FLASH_NAMESPACE::kCqsRunSlots;
     m.def("bwd_cqs_group_bits", &FLASH_NAMESPACE::mha_bwd_cqs_group_bits, "Backward pass with per-token CQS group-bit mask");
     m.def("fwd_cqsa", &FLASH_NAMESPACE::mha_fwd_cqsa, "Forward pass with fused CQSA (num_chunk=7, interest=(0,1,3), configurable num_itr)");
     m.def("fwd_cqsa_profile", &FLASH_NAMESPACE::mha_fwd_cqsa_profile, "Forward pass with fused CQSA + host timing + configurable num_itr");
@@ -2827,7 +2983,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           pybind11::arg("cqs_blk_or") = pybind11::none(),
           pybind11::arg("cqs_blk_and") = pybind11::none(),
           pybind11::arg("cqs_blk_size") = pybind11::none(),
-          pybind11::arg("dsoftmax_sum") = pybind11::none());
+          pybind11::arg("dsoftmax_sum") = pybind11::none(),
+          pybind11::arg("cqs_bwd_flags") = 0);
+    m.def("bwd_cqs_census", &FLASH_NAMESPACE::mha_bwd_cqs_census,
+          "The CQS backward's tile census (route words, run tables, tile shape); for tests",
+          pybind11::arg("cqs_group_bits"), pybind11::arg("cqs_blk_or"), pybind11::arg("cqs_blk_and"),
+          pybind11::arg("is_causal"), pybind11::arg("head_size"), pybind11::arg("lens") = std::nullopt, pybind11::arg("S") = 0);
+    m.attr("CQS_BWD_FORCE_LEGACY") = FLASH_NAMESPACE::kCqsBwdForceLegacy;
+    m.attr("CQS_BWD_RUN_SLOTS") = FLASH_NAMESPACE::kCqsBwdRunSlots;
     m.def("varlen_bwd", &FLASH_NAMESPACE::mha_varlen_bwd, "Backward pass (variable length)");
 #endif
     m.def("fwd_kvcache", &FLASH_NAMESPACE::mha_fwd_kvcache, "Forward pass, with KV-cache");

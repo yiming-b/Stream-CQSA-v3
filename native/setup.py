@@ -1,43 +1,33 @@
-import glob
+"""Build the native wave extension cqsa_native_v2 (package U2 of the ultimate program).
+
+Kernel sets (CQSA_KERNEL_SET): `common` (default; fp16 + bf16, head dims 64 + 128, causal and
+non-causal) and `native_v2_dev` (head dim 64 fp16 only, for fast iteration; defines
+CQSA_NATIVE_HDIM64_ONLY so the dispatch never references the hdim128 units). Every forward
+(dtype, hdim, causal) and every backward (dtype, hdim) is two translation units: the main one
+(CQS off + the census-driven ALIGNED wave kernel) and `_legacy` (v11's CQS code with the wave
+offsets, the per-element path whose ptxas run dominates the build). CQSA_NATIVE_V2_MODULE names
+the module (default cqsa_native_v2) so a dev build can live next to the shipping one.
+"""
 import os
-import re
 from pathlib import Path
 
-from setuptools import find_packages, setup
+from setuptools import setup
 
 import torch
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME
 
 
 THIS_DIR = Path(__file__).resolve().parent
-PACKAGE_NAME = "stream-cqsa"
-
-
-def get_version() -> str:
-    init_py = (THIS_DIR / "stream_cqsa" / "__init__.py").read_text(encoding="utf-8")
-    match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', init_py, re.MULTILINE)
-    if not match:
-        raise RuntimeError("Unable to find __version__ in stream_cqsa/__init__.py")
-    return match.group(1)
 
 
 def detect_cuda_arch() -> str:
-    """
-    Compute capability of the GPU in this machine, e.g. "80" for A100.
-
-    Source installs are the supported path: the user builds for the GPU they
-    actually have, so the default is to detect it rather than to guess. Set
-    FLASH_ATTN_CUDA_ARCHS explicitly to cross-compile or to cover several
-    generations, e.g. "80;86;89;90".
-    """
+    """Compute capability of the GPU in this machine, e.g. "80" for A100; sm_80 without one."""
     try:
         major, minor = torch.cuda.get_device_capability(0)
         return f"{major}{minor}"
     except Exception:
-        # No visible GPU at build time (CI, container, login node). sm_80 is a
-        # reasonable floor: FlashAttention's SM80 kernels need Ampere or newer.
-        print("WARNING: no CUDA device visible at build time; defaulting to "
-              "arch 80. Set FLASH_ATTN_CUDA_ARCHS to match your target GPU.")
+        print("WARNING: no CUDA device visible at build time; defaulting to arch 80. "
+              "Set FLASH_ATTN_CUDA_ARCHS to match your target GPU.")
         return "80"
 
 
@@ -62,11 +52,6 @@ def nvcc_arch_flags(archs: list[str]) -> list[str]:
 
 
 def cqsa_kernel_set() -> str:
-    # Default to the A100-focused fast iteration path. Set CQSA_KERNEL_SET=full
-    # to compile all forward kernels.
-    # `common` is the shipping default: fp16 + bf16, head_dim 64 and 128,
-    # causal and non-causal. Covers most transformers without `full`'s
-    # multi-hour compile.
     return os.getenv("CQSA_KERNEL_SET", "common").strip().lower()
 
 
@@ -74,84 +59,26 @@ def cqsa_sources() -> list[str]:
     base = [
         "csrc/flash_attn/flash_api.cpp",
         "csrc/flash_attn/src/cqsa_kernel.cu",
+        "csrc/flash_attn/src/cqs_census.cu",
+        "csrc/flash_attn/src/cqs_census_bwd.cu",
         "csrc/flash_attn/src/wave_kernels.cu",
     ]
-
     kernel_set = cqsa_kernel_set()
-    if kernel_set == "full":
-        return (
-            base
-            + sorted(glob.glob(str(THIS_DIR / "csrc" / "flash_attn" / "src" / "flash_fwd_*.cu")))
-            + sorted(glob.glob(str(THIS_DIR / "csrc" / "flash_attn" / "src" / "flash_bwd_*.cu")))
-        )
-    if kernel_set == "a100_fp16_hdim128":
-        return base + [
-            "csrc/flash_attn/src/flash_fwd_hdim128_fp16_sm80.cu",
-            "csrc/flash_attn/src/flash_fwd_hdim128_fp16_causal_sm80.cu",
-            "csrc/flash_attn/src/flash_bwd_hdim128_fp16_sm80.cu",
-        ]
     if kernel_set == "common":
-        # Shipping target: both dtypes users actually train in, and the two head
-        # dims that cover most transformers (Llama 128, GPT-2 64). Exotic head
-        # dims need CQSA_KERNEL_SET=full.
-        return base + [
-            "csrc/flash_attn/src/flash_fwd_hdim64_fp16_sm80.cu",
-            "csrc/flash_attn/src/flash_fwd_hdim64_fp16_causal_sm80.cu",
-            "csrc/flash_attn/src/flash_fwd_hdim128_fp16_sm80.cu",
-            "csrc/flash_attn/src/flash_fwd_hdim128_fp16_causal_sm80.cu",
-            "csrc/flash_attn/src/flash_fwd_hdim64_bf16_sm80.cu",
-            "csrc/flash_attn/src/flash_fwd_hdim64_bf16_causal_sm80.cu",
-            "csrc/flash_attn/src/flash_fwd_hdim128_bf16_sm80.cu",
-            "csrc/flash_attn/src/flash_fwd_hdim128_bf16_causal_sm80.cu",
-            "csrc/flash_attn/src/flash_bwd_hdim64_fp16_sm80.cu",
-            "csrc/flash_attn/src/flash_bwd_hdim128_fp16_sm80.cu",
-            "csrc/flash_attn/src/flash_bwd_hdim64_bf16_sm80.cu",
-            "csrc/flash_attn/src/flash_bwd_hdim128_bf16_sm80.cu",
-        ]
-    if kernel_set == "a100_fp16_hdim64_128":
-        return base + [
-            "csrc/flash_attn/src/flash_fwd_hdim64_fp16_sm80.cu",
-            "csrc/flash_attn/src/flash_fwd_hdim64_fp16_causal_sm80.cu",
-            "csrc/flash_attn/src/flash_fwd_hdim128_fp16_sm80.cu",
-            "csrc/flash_attn/src/flash_fwd_hdim128_fp16_causal_sm80.cu",
-            "csrc/flash_attn/src/flash_bwd_hdim64_fp16_sm80.cu",
-            "csrc/flash_attn/src/flash_bwd_hdim128_fp16_sm80.cu",
-        ]
-    if kernel_set == "native_common64":
-        # the shipping native set: wave modes exist for head_dim=64 (fp16 + bf16, causal and
-        # non-causal); the backward covers 64 and 128; head_dim=128 forward is served by cqsa_cuda
-        return base + [
-            "csrc/flash_attn/src/flash_fwd_hdim64_fp16_sm80.cu",
-            "csrc/flash_attn/src/flash_fwd_hdim64_fp16_causal_sm80.cu",
-            "csrc/flash_attn/src/flash_fwd_hdim64_bf16_sm80.cu",
-            "csrc/flash_attn/src/flash_fwd_hdim64_bf16_causal_sm80.cu",
-            "csrc/flash_attn/src/flash_bwd_hdim64_fp16_sm80.cu",
-            "csrc/flash_attn/src/flash_bwd_hdim128_fp16_sm80.cu",
-            "csrc/flash_attn/src/flash_bwd_hdim64_bf16_sm80.cu",
-            "csrc/flash_attn/src/flash_bwd_hdim128_bf16_sm80.cu",
-        ]
-    if kernel_set == "native_dev":
-        # fast iteration: hdim64 fp16 only, forward (causal + non-causal) and backward
-        return base + [
-            "csrc/flash_attn/src/flash_fwd_hdim64_fp16_sm80.cu",
-            "csrc/flash_attn/src/flash_fwd_hdim64_fp16_causal_sm80.cu",
-            "csrc/flash_attn/src/flash_bwd_hdim64_fp16_sm80.cu",
-        ]
-    if kernel_set == "native_fwd64":
-        return base + [
-            "csrc/flash_attn/src/flash_fwd_hdim64_fp16_sm80.cu",
-            "csrc/flash_attn/src/flash_fwd_hdim64_fp16_causal_sm80.cu",
-        ]
-    if kernel_set == "a100_fp16_hdim64_noncau":
-        return base + [
-            "csrc/flash_attn/src/flash_fwd_hdim64_fp16_sm80.cu",
-            "csrc/flash_attn/src/flash_bwd_hdim64_fp16_sm80.cu",
-        ]
-    raise RuntimeError(
-        f"Unknown CQSA_KERNEL_SET='{kernel_set}'. "
-        "Expected one of: full, common, a100_fp16_hdim128, "
-        "a100_fp16_hdim64_128, a100_fp16_hdim64_noncau."
-    )
+        dtypes, hdims = ("fp16", "bf16"), (64, 128)
+    elif kernel_set == "native_v2_dev":
+        dtypes, hdims = ("fp16",), (64,)
+    else:
+        raise RuntimeError(f"Unknown CQSA_KERNEL_SET='{kernel_set}' for native_v2. Expected common or native_v2_dev.")
+    # The main units first: they are short (minutes) and hold every new line of code, so a
+    # compile error surfaces early; the LEGACY units (v11's code, 20-30 min each) follow.
+    return base + [
+        f"csrc/flash_attn/src/flash_fwd_hdim{hd}_{dt}{causal}{part}_sm80.cu"
+        for part in ("", "_legacy") for dt in dtypes for hd in hdims for causal in ("", "_causal")
+    ] + [
+        f"csrc/flash_attn/src/flash_bwd_hdim{hd}_{dt}{part}_sm80.cu"
+        for part in ("", "_legacy") for dt in dtypes for hd in hdims
+    ]
 
 
 def build_extension() -> CUDAExtension:
@@ -162,15 +89,9 @@ def build_extension() -> CUDAExtension:
 
     cutlass_header = THIS_DIR / "csrc" / "cutlass" / "include" / "cutlass" / "cutlass.h"
     if not cutlass_header.exists():
-        raise RuntimeError(
-            "csrc/cutlass is missing. Copy it from flash-attention or clone with submodules before build."
-        )
+        raise RuntimeError("csrc/cutlass is missing (a symlink to the repo's csrc/cutlass).")
 
     kernel_set = cqsa_kernel_set()
-    sources = cqsa_sources()
-    if not sources:
-        raise RuntimeError("No CUDA sources found for CQSA build")
-
     nvcc_threads = os.getenv("NVCC_THREADS", "4")
     arch_flags = nvcc_arch_flags(cuda_arch_list())
 
@@ -187,33 +108,27 @@ def build_extension() -> CUDAExtension:
             "--expt-extended-lambda",
             "--use_fast_math",
         ] + ([
-            # Measurement build: compiles CQS out of the backward kernel to
-            # recover the stock-FlashAttention baseline. Not correct; A/B only.
-            "-DCQSA_BWD_NO_CQS",
-        ] if os.getenv("CQSA_BWD_NO_CQS") else []) + [
+            # Build diagnostics: source lines in the SASS, the ptxas resource
+            # report per instantiation, and per-phase compile times (ptxas
+            # included) appended to this CSV, one row per phase and TU.
+            "-lineinfo", "-Xptxas", "-v", "-time", os.environ["CQSA_NVCC_TIME_CSV"],
+        ] if os.getenv("CQSA_NVCC_TIME_CSV") else []) + [
             "--threads",
             str(nvcc_threads),
             *arch_flags,
         ],
     }
 
-    define_macros = []
-    if kernel_set != "full":
-        define_macros.append(("CQSA_MINIMAL_FWD_KERNELS", None))
-    if kernel_set == "a100_fp16_hdim64_noncau":
-        define_macros.append(("CQSA_MINIMAL_HDIM64_NONCAUSAL_ONLY", None))
+    # The CQS-on routing (census -> ALIGNED -> LEGACY) exists only in the minimal dispatch.
+    define_macros = [("CQSA_MINIMAL_FWD_KERNELS", None)]
     if kernel_set == "common":
         define_macros.append(("CQSA_MINIMAL_BOTH_DTYPES", None))
-    if kernel_set in ("native_dev", "native_fwd64"):
+    else:
         define_macros.append(("CQSA_NATIVE_HDIM64_ONLY", None))
-    if kernel_set == "native_common64":
-        define_macros.append(("CQSA_NATIVE_FWD_HDIM64_ONLY", None))
-        define_macros.append(("CQSA_MINIMAL_BOTH_DTYPES", None))
-
 
     return CUDAExtension(
-        name="cqsa_native",
-        sources=sources,
+        name=os.getenv("CQSA_NATIVE_V2_MODULE", "cqsa_native_v2"),
+        sources=cqsa_sources(),
         include_dirs=[
             str(THIS_DIR / "csrc" / "flash_attn"),
             str(THIS_DIR / "csrc" / "flash_attn" / "src"),
@@ -225,10 +140,9 @@ def build_extension() -> CUDAExtension:
 
 
 setup(
-    name=PACKAGE_NAME,
-    version=get_version(),
-    description="CQSA: lightweight CUDA extension for CQS/CQSA forward kernels",
-    packages=find_packages(include=["stream_cqsa", "stream_cqsa.*"]),
+    name="cqsa-native-v2",
+    version="3.0.0.dev0",
+    description="Stream-CQSA native wave kernel: census + ALIGNED run-table forward and backward on the uniform wave layout",
     ext_modules=[build_extension()],
     cmdclass={"build_ext": BuildExtension.with_options(use_ninja=True)},
     python_requires=">=3.9",

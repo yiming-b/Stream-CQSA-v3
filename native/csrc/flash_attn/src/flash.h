@@ -8,6 +8,7 @@
 
 #include <cuda.h>
 #include <vector>
+#include <vector_types.h>  // int2 (cqs_runs, cqs_bwd_runs)
 
 #include <ATen/cuda/CUDAGeneratorImpl.h> // For at::Generator and at::PhiloxCudaState
 
@@ -178,26 +179,45 @@ struct Flash_fwd_params : public Qkv_params {
     // Null disables it and the kernel reads a pre-gathered buffer as before.
     int * __restrict__ cqs_block_base;
     int cqs_seg_align;
-    // next/native wave mode: several CQS subproblems in ONE launch, laid out
-    // like FlashAttention's varlen batch (cu_seqlens_q == cu_seqlens_k, one
-    // "sequence" per subproblem). cqs_group_bits is packed with the tokens;
-    // the block summaries and block_base tables are packed with their own
-    // prefix arrays. Subproblem bidb uses
-    //     bits      + cu_seqlens_q[bidb]
-    //     blk_or/and + cqs_blk_cu[bidb],  num_blocks = cqs_blk_cu[bidb+1] - cqs_blk_cu[bidb]
-    //     block_base + cqs_bb_cu[bidb]    (entries RELATIVE to cu_seqlens_q[bidb])
-    bool cqs_wave;
-    int * __restrict__ cqs_blk_cu;
-    int * __restrict__ cqs_bb_cu;
-    // Uniform ("batch") wave layout, causal forward: every subproblem padded to the
-    // same S (multiple of 128) so the wave is FlashAttention's ordinary batch of W
-    // sequences and subproblem bidb's tables start at bidb * stride -- an offset
-    // the compiler rematerialises from blockIdx instead of holding in a register.
-    // Padding keys sit after every real key and are hidden by the causal mask;
-    // padding queries are computed and discarded. cu_seqlens == nullptr then.
+    // next/native_v2: the UNIFORM wave layout. A launch is FlashAttention's
+    // ordinary batch of b = W sequences of seqlen_q = S rows (S % 128 == 0),
+    // one per CQS subproblem; subproblem bidb's tables start at bidb * stride
+    // (an offset the compiler rematerialises from blockIdx instead of holding
+    // in a register; the varlen wave held table pointers at REG 255 and ran
+    // 12% slower at W=1, docs/LOG.md Phase 6). A classic single-subproblem
+    // call is the same thing with every stride 0 (one table set, b >= 1).
+    //     bits        + bidb * cqs_wave_tok_stride
+    //     blk_or/and  + bidb * cqs_wave_blk_stride
+    //     block_base  + bidb * cqs_wave_bb_stride   (entries RELATIVE to row 0 of the subproblem)
+    // cqs_wave_lens[bidb] is the subproblem's real row count (null: seqlen_q
+    // for all): row blocks past it exit, the key loop stops at its last tile,
+    // the ragged last tile takes the Is_even_MN=false predication and mask.
+    // Padding rows (lens[bidb] <= row < S) are therefore never read or
+    // written by the attention kernels; cqs_wave_lens_even says every length
+    // is a multiple of 128 (the host's Is_even_MN choice).
+    const int * __restrict__ cqs_wave_lens;
+    bool cqs_wave_lens_even;
     int cqs_wave_tok_stride;
     int cqs_wave_blk_stride;
     int cqs_wave_bb_stride;
+    // next/ v12f, per subproblem: routing between the two CQS-on forward
+    // instantiations. Null route: the host sent this call to LEGACY (v11's
+    // loop with the per-element path) without a census. Otherwise the census
+    // kernel (cqs_census.cu) has written route[bidb * cqs_wave_route_stride]
+    // (0: every visited tile of the subproblem is fully live or fully masked,
+    // so ALIGNED computes it; nonzero: a mixed tile or a run-table overflow,
+    // so LEGACY does) and, per row block of the ALIGNED tile shape, the live
+    // column tiles as runs {hi, lo} in descending n, kCqsRunSlots slots per
+    // row block, closed by {-1, -1}, at (bidb * cqs_wave_run_stride + m).
+    // The stride is 1 / the subproblem's row blocks for a wave, 0 / 0 for a
+    // classic call whose batch entries share one table set.
+    int * __restrict__ cqs_route;
+    const int2 * __restrict__ cqs_runs;
+    int cqs_wave_route_stride;
+    int cqs_wave_run_stride;
+    // ALIGNED only: visit row blocks in descending order (heaviest causal
+    // rows first). Each CTA's result does not depend on the order.
+    bool cqs_reverse_m;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -249,13 +269,35 @@ struct Flash_bwd_params : public Flash_fwd_params {
 
     bool deterministic;
     index_t dq_accum_split_stride;
+
+    // next/ v12b, per subproblem: routing between the two CQS-on backward
+    // instantiations, as cqs_route / cqs_runs for the forward: route at
+    // bidb * cqs_wave_route_stride (null: no census ran, the one kernel
+    // launched computes the call), runs of live m blocks {hi, lo} in
+    // descending m per column block at (bidb * cqs_wave_bwd_run_stride + n),
+    // kCqsBwdRunSlots slots, closed by {-1, -1}. Both kernels are launched on
+    // the stream; the CTAs of the one not chosen return at once.
+    int * __restrict__ cqs_bwd_route;
+    const int2 * __restrict__ cqs_bwd_runs;
+    int cqs_wave_bwd_run_stride;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+// With CQS off, the plain forward; with CQS on, the census and the ALIGNED
+// wave forward (the host calls it only when it allocated the census).
 template<typename T, int Headdim, bool Is_causal> void run_mha_fwd_(Flash_fwd_params &params, cudaStream_t stream);
+// v11's CQS-on forward (per-element mask path) with the per-subproblem
+// offsets, in its own translation units so its long ptxas run is paid only
+// when it changes.
+template<typename T, int Headdim, bool Is_causal> void run_mha_fwd_legacy_(Flash_fwd_params &params, cudaStream_t stream);
 template<typename T, int Headdim, bool Is_causal> void run_mha_fwd_splitkv_dispatch(Flash_fwd_params &params, cudaStream_t stream);
 
+// The whole backward (preprocess, census + ALIGNED or plain loop, LEGACY when
+// needed, convert_dQ); flash_bwd_hdim*_sm80.cu.
 template<typename T, int Headdim, bool Is_causal> void run_mha_bwd_(Flash_bwd_params &params, cudaStream_t stream);
+// Only v11's dq/dk/dv kernel (LEGACY) with the per-subproblem offsets, in its
+// own translation units (flash_bwd_hdim*_legacy_sm80.cu).
+template<typename T, int Headdim, bool Is_causal> void run_mha_bwd_legacy_(Flash_bwd_params &params, cudaStream_t stream);
 
 }  // namespace FLASH_NAMESPACE

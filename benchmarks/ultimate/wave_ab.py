@@ -20,7 +20,8 @@ per-wave median (one wave's inputs are prepared at a time: the 1M backward's fou
 Identity in every part (NaN-pre-filled outputs): v2 wave out/lse == v12f per task (torch.equal) and == the old
 wave; v2 dk/dv == v12b per task, dq within the atomics' drift. Targets (docs/ultimate/03_kernels_report.md 9):
 W=1 within 1% of v12f / v12b; c=73 one-launch forward <= 1.10x monolithic flash_attn; wave backward >= 2x
-faster than the old bwd_wave. Timing: 1 warm-up + 5 timed runs, CUDA events, median (min stored); GPU name in
+faster than the old bwd_wave. Timing: 1 warm-up + --iters timed runs (3; --iters-1m at N=1M, 2, and one fewer
+for the 1M engine rows: the part shares a 59-minute gpu-test job), CUDA events, median (min stored); GPU name in
 every row. Output: results/ultimate/wave_ab.json (+ wave_ab.md by --report).
 
     SNAP=$(bash slurm/ultimate/snapshot.sh) && sbatch --export=ALL,CQSA_SRC=$SNAP,NATIVE_V2_DIR=<frozen> slurm/ultimate/wave_ab.slurm
@@ -192,7 +193,7 @@ def part_fwd(res, N, c, iters):
     q, k, v = (torch.randn(1, H, N, D, device=DEV, dtype=DT) for _ in range(3))
     qt, kt, vt = (x[0].transpose(0, 1) for x in (q, k, v))
     items = task_inputs(tasks, q, k, v)
-    r = dict(gpu=GPU, part="fwd", N=N, c=c, W=len(tasks), n_waves=len(waves), wave_sizes=[len(w) for w in waves],
+    r = dict(gpu=GPU, part="fwd", N=N, c=c, iters=iters, W=len(tasks), n_waves=len(waves), wave_sizes=[len(w) for w in waves],
              S=[], L_min=min(int(t.local_size) for t in tasks), L_max=max(int(t.local_size) for t in tasks),
              sum_L=sum(int(t.local_size) for t in tasks), causal=True, D=D, H=H)
     v2, old, v12f = NATIVE["v2"], NATIVE["old"], FA.MODS["v12f"]
@@ -265,6 +266,28 @@ def part_fwd(res, N, c, iters):
 
 
 # ---------------------------------------------------------------------------- backward part
+def mono_bwd_arms(N, iters):
+    """Monolithic flash_attn and SDPA-flash backward at N through autograd (1 warm-up + iters; bwd_ab.fa2_arms
+    also re-times the direct extension call, which the 1M rows cannot afford)."""
+    from flash_attn import flash_attn_func
+    from torch.nn.attention import sdpa_kernel, SDPBackend
+    torch.manual_seed(1)
+    r = {}
+    q, k, v = (torch.randn(1, N, H, D, device=DEV, dtype=DT, requires_grad=True) for _ in range(3))
+    o = flash_attn_func(q, k, v, causal=True, softmax_scale=D ** -0.5)
+    do = torch.randn_like(o)
+    r["flash_attn_bwd_ms"], r["flash_attn_bwd_min_ms"] = timed(lambda: torch.autograd.grad(o, (q, k, v), do, retain_graph=True), iters)
+    del q, k, v, o, do
+    q, k, v = (torch.randn(1, H, N, D, device=DEV, dtype=DT, requires_grad=True) for _ in range(3))
+    with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+        o = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True, scale=D ** -0.5)
+        do = torch.randn_like(o)
+        r["sdpa_flash_bwd_ms"], r["sdpa_flash_bwd_min_ms"] = timed(lambda: torch.autograd.grad(o, (q, k, v), do, retain_graph=True), iters)
+    del q, k, v, o, do
+    torch.cuda.empty_cache()
+    return r
+
+
 def global_lse_dpsum(q, k, v, dout):
     """The global lse [1, H, N] and rowsum(dO * O) [1, H, N] of the causal attention, from flash_attn."""
     from flash_attn import flash_attn_func
@@ -335,7 +358,7 @@ def part_bwd(res, N, c, iters):
     lse, dpsum = global_lse_dpsum(q, k, v, dout)
     qt, kt, vt, dot = (x[0].transpose(0, 1) for x in (q, k, v, dout))
     items = bwd_task_inputs(tasks, q, k, v, dout, lse, dpsum)
-    r = dict(gpu=GPU, part="bwd", N=N, c=c, W=len(tasks), n_waves=len(waves), wave_sizes=[len(w) for w in waves],
+    r = dict(gpu=GPU, part="bwd", N=N, c=c, iters=iters, W=len(tasks), n_waves=len(waves), wave_sizes=[len(w) for w in waves],
              S=[], L_min=min(int(t.local_size) for t in tasks), L_max=max(int(t.local_size) for t in tasks),
              causal=True, D=D, H=H)
     v2, old, v12b = NATIVE["v2"], NATIVE["old"], BA.MODS["v12b"]
@@ -390,7 +413,7 @@ def part_bwd(res, N, c, iters):
     r["v2_bwd_w1_over_v12b_w1"] = r["v2_bwd_w1_ms"] / r["v12b_w1_ms"]
     del p1, items
     torch.cuda.empty_cache()
-    fa = BA.fa2_arms(N, D, True, iters)
+    fa = mono_bwd_arms(N, iters)
     r.update({f"monolithic_{kk}": vv for kk, vv in fa.items()})
     for name in ("v2_bwd_wave", "old_bwd_wave", "v12b_loop", "v11_loop"):
         r[f"{name}_over_flash_attn"] = r.get(f"{name}_ms", float("nan")) / fa["flash_attn_bwd_ms"]
@@ -411,7 +434,7 @@ def part_engine(res, N, c, iters, backward=True):
     iset = QUORUM_SETS[c]
     torch.manual_seed(0)
     q, k, v = (torch.randn(1, H, N, D, device=DEV, dtype=DT) for _ in range(3))
-    r = dict(gpu=GPU, part="engine", N=N, c=c, causal=True, D=D, H=H)
+    r = dict(gpu=GPU, part="engine", N=N, c=c, iters=iters, causal=True, D=D, H=H)
     outs = {}
     for key_m in ("v2", "old"):
         use_native(key_m)
@@ -510,7 +533,8 @@ def report(res):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--smoke", action="store_true", help="small N, 2 iterations: correctness on a shared GPU")
-    ap.add_argument("--iters", type=int, default=5)
+    ap.add_argument("--iters", type=int, default=3, help="timed runs per arm (1 warm-up each)")
+    ap.add_argument("--iters-1m", type=int, default=2, help="timed runs per arm at N >= 2^20 (the engine rows there: one fewer)")
     ap.add_argument("--out", default=os.environ.get("WAVE_AB_OUT", OUT_DEFAULT))
     ap.add_argument("--report", metavar="JSON", help="only write the markdown report of an existing JSON next to it")
     a = ap.parse_args()
@@ -529,13 +553,15 @@ def main():
         configs, iters = [(16384, 7), (32768, 73)], 2
         a.out = a.out.replace(".json", "_smoke.json")
     t0 = time.time()
-    res = dict(info=FA.gpu_info(), rows=[], H=H, D=D, dtype="float16", iters=iters, smoke=a.smoke,
-               timing=f"1 warm-up + {iters} timed runs, CUDA events, median (min also stored)",
+    res = dict(info=FA.gpu_info(), rows=[], H=H, D=D, dtype="float16", iters=iters, iters_1m=a.iters_1m, smoke=a.smoke,
+               timing=f"1 warm-up + {iters} timed runs ({a.iters_1m} at N=1M, {max(1, a.iters_1m - 1)} for its engine rows), "
+                      "CUDA events, median (min also stored)",
                modules={k: getattr(m, "__file__", k) for k, m in list(FA.MODS.items()) + list(BA.MODS.items()) + list(NATIVE.items())})
     print(json.dumps(res["info"]), flush=True)
     os.makedirs(os.path.dirname(a.out), exist_ok=True)
-    parts = [(part_fwd, (N, c, iters)) for N, c in configs] + [(part_bwd, (N, c, iters)) for N, c in configs] \
-        + [(part_engine, (N, c, iters)) for N, c in configs]
+    it = lambda N: iters if N < (1 << 20) else a.iters_1m
+    parts = [(part_fwd, (N, c, it(N))) for N, c in configs] + [(part_bwd, (N, c, it(N))) for N, c in configs] \
+        + [(part_engine, (N, c, it(N) if N < (1 << 20) else max(1, a.iters_1m - 1))) for N, c in configs]
     for part, args in parts:
         try:
             part(res, *args)

@@ -1,24 +1,34 @@
-# next/native -- the native multi-subproblem CQS kernel ("wave" kernel)
+# native/ -- the multi-subproblem CQS kernel ("wave" kernel), v2
 
-Separate from `next/kernel/v*` (one kernel launch per subproblem). Copied from v11
-and extended; nothing here touches the previous version.
+The wave kernel runs W >= 1 CQS subproblems in ONE launch. Version 2 (ultimate program package U2,
+`docs/ultimate/progress/U2.md`; design `docs/ultimate/01_design_a100.md` 4.5) is the classic module's
+census + ALIGNED run-table design (`kernels/v12f`, `kernels/v12b`, `docs/ultimate/03_kernels_report.md`)
+on the uniform wave layout: every subproblem padded to S = ceil(max L / 128) * 128 rows, grid
+(S/128, W, H), per-subproblem tables at `bidb * stride`, real lengths in `lens[W]`. These sources are
+`kernels/native_v2/` (the development tree with its own build); the release `setup.py` builds them as
+`cqsa_native` with `CQSA_BUILD_NATIVE=1` (or alone as the companion wheel, `CQSA_ONLY_NATIVE=1`).
 
-    csrc/flash_attn/            FlashAttention-2 + CQS sources (v11 copy + wave mode)
-      src/flash.h               Flash_fwd_params: cqs_wave, cqs_blk_cu, cqs_bb_cu
-      src/flash_fwd_kernel.h    per-subproblem CQS tables (Cqs_mode 3/4 = wave), fp32-only epilogue
-      src/flash_bwd_kernel.h    per-subproblem CQS tables (runtime flag)
-      src/flash_fwd_launch_template.h   CQS_MODE_SWITCH with the wave modes
-      src/wave_kernels.cu       wave_merge (deterministic batched merge), wave_scatter_add
-      flash_api.cpp             fwd_wave / bwd_wave entry points + bindings
-    setup.py                    builds `cqsa_native` (CQSA_KERNEL_SET=native_common64: hdim64 fp16+bf16 forwards with the wave modes,
-                            every backward; head_dim=128 forwards run on cqsa_cuda -- their wave instantiations do not come out of ptxas)
-    build.sh / build.slurm      CPU-node build (~20-40 min)
-    test_wave.py                exactness tests (kernel == v11 bit for bit at W=1, engine vs fp64, bwd vs fp64, host pool)
-    bench_wave.py               vs previous engine / FA-2, timeline plot
-    run_test.slurm              gpu-test job: tests then bench
+    csrc/flash_attn/
+      src/flash.h                 Flash_fwd_params: cqs_wave_* strides, cqs_wave_lens, the census route / run tables
+      src/cqs_census.cu           forward census: one warp per (subproblem, row block) -> route[w], runs of live tiles
+      src/cqs_census_bwd.cu       backward census: per (subproblem, column block)
+      src/flash_fwd_aligned.h     ALIGNED wave forward (v12f's loop; per-step in-place block-map delta; fp32-only epilogue)
+      src/flash_bwd_aligned.h     ALIGNED wave backward (v12b's loop)
+      src/flash_fwd_kernel.h      LEGACY forward (v11's loop with the per-subproblem offsets) for subproblems with mixed tiles
+      src/flash_bwd_kernel.h      LEGACY backward
+      src/flash_*_sm80.cu         one main unit (plain + ALIGNED) and one *_legacy unit per (dtype, hdim, causal)
+      src/wave_kernels.cu         wave_merge (deterministic batched merge), wave_scatter_add
+      flash_api.cpp               fwd_wave / bwd_wave (uniform layout, lens on the CPU or on the device with lens_even),
+                                  the classic entries (a W=1 wave), fwd_cqs_census / bwd_cqs_census for tests
+    setup.py                      standalone build of this tree (module cqsa_native_v2; CQSA_KERNEL_SET common | native_v2_dev)
+    build.sh                      detached build on della-vis1 with a watchdog scoped to its own ptxas processes
+    build.slurm                   the same on a CPU node
 
-Engine: `stream_cqsa/native_wave.py` (wave_forward, wave_backward, wave_attention, ChunkPool).
+Engine: `stream_cqsa/native_wave.py` (wave_forward, wave_backward, wave_attention, ChunkPool); it loads
+`cqsa_native_v2` when importable, else the first wave module `cqsa_native` (WAVE_API 1: v11's loop, uniform
+layout for causal and varlen for non-causal, hdim64 forwards only), whose sources live in
+`/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/native`.
 
-Status / how to continue:
-    build:  sbatch native/build.slurm         -> native/cqsa_native*.so, log results/native/build_native_build_<job>.out
-    test:   sbatch native/run_test.slurm      -> results/native/native_test_<job>.out, plots results/native/wave_*.png
+Tests: `tests/test_wave_v2.py` (the wave vs the per-task v12f / v12b modules bit for bit, LEGACY routing, the
+engine vs float64, the chunk pool and the host accumulator). Benchmark: `benchmarks/ultimate/wave_ab.py`
+(`slurm/ultimate/parts/u2.sh` in the combined ultimate job; `results/ultimate/wave_ab.md`).

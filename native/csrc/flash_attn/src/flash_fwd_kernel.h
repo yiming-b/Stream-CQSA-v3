@@ -61,21 +61,10 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
     // 2 = runtime flag. Modes 0/1 fold every CQS branch below; mode 2 keeps
     // them as runtime branches (used for the non-causal CQS-on case, whose
     // compile-time-on instantiation mis-compiles into 2.3x the instructions).
-    // next/native: modes 3 (causal, compile-time on) and 4 (non-causal,
-    // runtime flag) are the WAVE variants of 1 and 2: several subproblems per
-    // launch, with per-subproblem CQS tables (see Flash_fwd_params::cqs_wave).
-    const bool Is_cqs = (Cqs_mode == 2 || Cqs_mode == 4) ? params.cqs_enabled : (Cqs_mode == 1 || Cqs_mode == 3);
-    // Mode 3: causal wave in the UNIFORM layout (batch of W padded sequences, tables at
-    // bidb * stride, cu_seqlens == nullptr). Mode 2 (non-causal, runtime CQS) also serves
-    // the non-causal wave in the varlen layout at runtime (its compile-time wave
-    // instantiation, mode 4, did not come out of ptxas).
-    // Wave modes exist for head dim 64 only: at head dim 128 the wave instantiations
-    // (and the runtime wave branch of mode 2) do not come out of ptxas in bounded time,
-    // the same pathology as v10's non-causal mode 1. Head dim 128 compiles as v11 and
-    // is served by the classic engine.
-    constexpr bool Wave_ok = (Kernel_traits::kHeadDim == 64);
-    constexpr bool Is_wave_uniform = Wave_ok && (Cqs_mode >= 3);
-    const bool Is_wave_varlen = Wave_ok && (Cqs_mode == 2) && params.cqs_wave;
+    // next/native_v2: this is the LEGACY kernel of the uniform wave layout --
+    // several subproblems per launch, subproblem bidb's tables at bidb * stride
+    // (Flash_fwd_params::cqs_wave_*; every stride is 0 for a classic call).
+    const bool Is_cqs = (Cqs_mode == 2) ? params.cqs_enabled : (Cqs_mode == 1);
 
     using Element = typename Kernel_traits::Element;
     using ElementAccum = typename Kernel_traits::ElementAccum;
@@ -106,20 +95,14 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
     const BlockInfo</*Varlen=*/!Is_even_MN> binfo(params, bidb);
     if (m_block * kBlockM >= binfo.actual_seqlen_q) return;
 
-    // next/native: this CTA's CQS tables. In wave mode they are the packed
-    // tables offset to this subproblem; otherwise the params fields as before.
-    int cqs_tok0 = 0, cqs_blk0 = 0, cqs_bb0 = 0;
-    int cqs_nblk = params.cqs_num_blocks;
-    if constexpr (Is_wave_uniform) {
-        cqs_tok0 = bidb * params.cqs_wave_tok_stride;
-        cqs_blk0 = bidb * params.cqs_wave_blk_stride;
-        cqs_bb0  = bidb * params.cqs_wave_bb_stride;
-    } else if (Is_wave_varlen) {
-        cqs_tok0 = params.cu_seqlens_q[bidb];
-        cqs_blk0 = params.cqs_blk_cu[bidb];
-        cqs_nblk = params.cqs_blk_cu[bidb + 1] - cqs_blk0;
-        cqs_bb0  = params.cqs_bb_cu == nullptr ? 0 : params.cqs_bb_cu[bidb];
-    }
+    // This CTA's CQS tables: the subproblem's slice of the packed wave tables
+    // (offsets rematerialised from blockIdx), with the summary count of its
+    // real length.
+    const int cqs_tok0 = bidb * params.cqs_wave_tok_stride;
+    const int cqs_blk0 = bidb * params.cqs_wave_blk_stride;
+    const int cqs_bb0  = bidb * params.cqs_wave_bb_stride;
+    const int cqs_nblk = params.cqs_wave_lens == nullptr ? params.cqs_num_blocks
+        : (binfo.actual_seqlen_q + kCqsBlk - 1) / kCqsBlk;
     const int64_t* cqs_bits_p = params.cqs_group_bits == nullptr ? nullptr : params.cqs_group_bits + cqs_tok0;
     const int64_t* cqs_or_p   = params.cqs_blk_or     == nullptr ? nullptr : params.cqs_blk_or     + cqs_blk0;
     const int64_t* cqs_and_p  = params.cqs_blk_and    == nullptr ? nullptr : params.cqs_blk_and    + cqs_blk0;
@@ -1362,6 +1345,14 @@ inline __device__ void compute_attn(const Params &params) {
     const int bidb = blockIdx.y;
     // The block index for the head.
     const int bidh = blockIdx.z;
+
+    // When the census ran (cqs_route set), this CQS-on (LEGACY) kernel
+    // computes subproblem bidb only if the census found a mixed tile or a
+    // run-table overflow in it; otherwise the ALIGNED kernel launched just
+    // before it already did (flash_fwd_aligned.h).
+    if constexpr (Cqs_mode != 0) {
+        if (params.cqs_route != nullptr && __ldg(params.cqs_route + bidb * params.cqs_wave_route_stride) == 0) { return; }
+    }
 
     // We want the fwd and bwd to generate the same dropout pattern (RNG), without restricting
     // them to have the same number of threads or have to traverse the attention matrix

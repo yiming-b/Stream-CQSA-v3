@@ -8,7 +8,8 @@
 #   CQSA_V13_SO        (unused here) U1's classic module: the per-task arms of this part are the frozen v12f b3 /
 #                      v12b b5 modules the kernels report measured (V12F_DIR / V12B_DIR below), so the wave is
 #                      compared with exactly those kernels
-#   WAVE_AB_ITERS      timed runs per arm (default 5; 1 warm-up each)
+#   WAVE_AB_ITERS      timed runs per arm at N=131072 (default 3; 1 warm-up each)
+#   WAVE_AB_ITERS_1M   timed runs per arm at N=1M (default 2; the 1M engine rows take one fewer)
 #
 # Arms (fp16, H=8, D=64, causal; A100-SXM4-80GB expected): N=131072 c=7 (one launch of 7 subproblems) and c=73
 # (one launch of 73), N=1048576 c=7 (the engine's default-budget waves, 2 subproblems per launch): cqsa_native_v2
@@ -17,9 +18,12 @@
 # engine rows (wave_forward / wave_backward end to end on both modules). Identity in every part. A failing arm
 # records its error in the row and the later arms run; a failing part records a traceback in `errors`.
 #
-# Expected: ~25-30 min of GPU time on an A100-SXM4-80GB (the 1M backward arms dominate: ~12 min), device peak
-# ~30 GiB (1M: Q/K/V/dO, the per-task copies of 7 tasks of L~450K, one wave's packed inputs and fp32 dq_accum,
-# the flash_attn reference), host RSS ~4 GB (the interpreter, the 1M task tables and wave tables); --mem=20G.
+# Expected: ~18-22 min of GPU time on an A100-SXM4-80GB with the defaults (the budget is 25 min of a shared
+# 59-minute gpu-test job): N=131072 parts ~3 min, 1M forward ~4 min (per run: v2 wave ~6 s, old wave ~8 s, v12f
+# loop ~6 s, flash_attn ~6 s), 1M backward ~7 min (v2 ~16 s, old bwd_wave ~38 s, v12b loop ~16 s, flash_attn
+# ~15 s per run; identity copies once), 1M engine rows ~3 min. Device peak ~30 GiB (1M: Q/K/V/dO, the per-task
+# copies of 7 tasks of L~450K, one wave's packed inputs and fp32 dq_accum, the flash_attn reference), host RSS
+# ~4 GB (the interpreter, the 1M task tables and wave tables): --mem=20G.
 #
 # Read the results: $CQSA_SRC_RESULTS/wave_ab.md, sections Forward / Backward / Engine and "Targets": W=1 v2 /
 # v12f (v12b) within 1% (the classic call pays nothing for the wave layout), c=73 one-launch forward <= 1.10x
@@ -45,7 +49,7 @@ echo "code: $ROOT"
 python -P -c "import stream_cqsa, torch, flash_attn, cqsa_native_v2 as a, cqsa_native as b, cqsa_cuda_next_v12f as c, cqsa_cuda_next_v12b as d; print(stream_cqsa.__file__, torch.__version__, flash_attn.__version__); print(a.__file__, 'WAVE_API', a.WAVE_API); print(b.__file__); print(c.__file__); print(d.__file__)" || { echo "U2 part: module import failed"; exit 1; }
 ls -la --time-style=full-iso "$NATIVE_V2_DIR"/cqsa_native_v2*.so; md5sum "$NATIVE_V2_DIR"/cqsa_native_v2*.so
 mkdir -p "$OUT"
-python -P -u "$ROOT/benchmarks/ultimate/wave_ab.py" --iters "${WAVE_AB_ITERS:-5}" --out "$OUT/wave_ab.json"
+python -P -u "$ROOT/benchmarks/ultimate/wave_ab.py" --iters "${WAVE_AB_ITERS:-3}" --iters-1m "${WAVE_AB_ITERS_1M:-2}" --out "$OUT/wave_ab.json"
 rc=$?
 echo "== U2 part: exit $rc  $(date)"
 exit $rc

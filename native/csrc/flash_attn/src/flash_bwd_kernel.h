@@ -100,11 +100,13 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
     const BlockInfo</*Varlen=*/!Is_even_MN> binfo(params, bidb);
     if (n_block * kBlockN >= binfo.actual_seqlen_k) return;
 
-    // next/native wave mode: this CTA's subproblem starts at these offsets in
-    // the packed CQS tables (see Flash_fwd_params::cqs_wave). Zero otherwise.
-    const int cqs_tok0 = (params.cqs_wave && params.cu_seqlens_q != nullptr) ? params.cu_seqlens_q[bidb] : 0;
-    const int cqs_blk0 = params.cqs_wave ? params.cqs_blk_cu[bidb] : 0;
-    const int cqs_nblk = params.cqs_wave ? (params.cqs_blk_cu[bidb + 1] - cqs_blk0) : params.cqs_num_blocks;
+    // next/native_v2: this CTA's CQS tables in the uniform wave layout --
+    // subproblem bidb's slice at bidb * stride (0 for a classic call), with
+    // the summary count of its real length (see Flash_fwd_params::cqs_wave_*).
+    const int cqs_tok0 = bidb * params.cqs_wave_tok_stride;
+    const int cqs_blk0 = bidb * params.cqs_wave_blk_stride;
+    const int cqs_nblk = params.cqs_wave_lens == nullptr ? params.cqs_num_blocks
+        : (binfo.actual_seqlen_q + params.cqs_blk_size - 1) / params.cqs_blk_size;
 
     int m_block_max = cute::ceil_div(binfo.actual_seqlen_q, kBlockM);
     if (Is_local) {

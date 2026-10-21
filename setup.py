@@ -86,15 +86,11 @@ def cqsa_sources(root: str = "csrc") -> list[str]:
         f"{root}/flash_attn/src/cqsa_kernel.cu",
     ]
     if root.startswith("native"):
-        base.append(f"{root}/flash_attn/src/wave_kernels.cu")     # the wave merge / scatter-add kernels
-        # the native forward has wave modes for head_dim=64 only (fp16 + bf16); its hdim128
-        # forward instantiations do not come out of ptxas, so the extension ships the hdim64
-        # forwards and every backward, and head_dim=128 forwards run on cqsa_cuda
-        return base + [f"{root}/flash_attn/src/{f}" for f in (
-            "flash_fwd_hdim64_fp16_sm80.cu", "flash_fwd_hdim64_fp16_causal_sm80.cu",
-            "flash_fwd_hdim64_bf16_sm80.cu", "flash_fwd_hdim64_bf16_causal_sm80.cu",
-            "flash_bwd_hdim64_fp16_sm80.cu", "flash_bwd_hdim128_fp16_sm80.cu",
-            "flash_bwd_hdim64_bf16_sm80.cu", "flash_bwd_hdim128_bf16_sm80.cu")]
+        # native/ is the wave kernel v2 (the same sources as kernels/native_v2): the classic
+        # module's census + ALIGNED + LEGACY design on the uniform wave layout, W subproblems
+        # per launch, plus the wave merge / scatter-add kernels; the same translation units as
+        # csrc/ (head dims 64 and 128, causal and non-causal, every unit split main / legacy)
+        base.append(f"{root}/flash_attn/src/wave_kernels.cu")
 
     # csrc/ is the v13 classic module (the same sources as kernels/v13): a census kernel
     # classifies every tile of a call on the device and routes it to the ALIGNED run-table
@@ -173,8 +169,6 @@ def build_extension(name: str = "cqsa_cuda", root: str = "csrc"):
     # (head dims 64 / 128); flash_api.cpp refuses to build without it
     if root == "csrc" or kernel_set != "full":
         define_macros.append(("CQSA_MINIMAL_FWD_KERNELS", None))
-    if root.startswith("native"):
-        define_macros.append(("CQSA_NATIVE_FWD_HDIM64_ONLY", None))
     if kernel_set == "common":
         define_macros.append(("CQSA_MINIMAL_BOTH_DTYPES", None))
 
@@ -216,8 +210,8 @@ setup(
     #                           second extension of v2 (cqsa_cuda_nc from csrc_nc/, v9's non-causal
     #                           forward) is retired: csrc_nc/ stays in the tree until the release
     #                           decides, but is not built.
-    #   cqsa_native   native/   the multi-subproblem wave kernel (optional: CQSA_BUILD_NATIVE=1;
-    #                           hdim64 wave modes, hdim128 as v11); stream_cqsa.native_wave uses it
+    #   cqsa_native   native/   the multi-subproblem wave kernel v2 (optional: CQSA_BUILD_NATIVE=1;
+    #                           head dims 64 and 128, both dtypes); stream_cqsa.native_wave uses it
     ext_modules=[] if SKIP_EXT else (
         [build_extension("cqsa_cuda", "csrc")]
         + ([build_extension("cqsa_native", "native/csrc")]

@@ -74,11 +74,9 @@ def nvcc_arch_flags(archs: list[str]) -> list[str]:
 
 
 def cqsa_kernel_set() -> str:
-    # Default to the A100-focused fast iteration path. Set CQSA_KERNEL_SET=full
-    # to compile all forward kernels.
-    # `common` is the shipping default: fp16 + bf16, head_dim 64 and 128,
-    # causal and non-causal. Covers most transformers without `full`'s
-    # multi-hour compile.
+    # `common` is the shipping default: fp16 + bf16, head dims 64 and 128, causal and
+    # non-causal (most transformers). `a100_fp16_hdim64_128` drops bf16 for a shorter
+    # development build. Other head dims have no census / ALIGNED kernels (kernels/v13).
     return os.getenv("CQSA_KERNEL_SET", "common").strip().lower()
 
 
@@ -98,56 +96,30 @@ def cqsa_sources(root: str = "csrc") -> list[str]:
             "flash_bwd_hdim64_fp16_sm80.cu", "flash_bwd_hdim128_fp16_sm80.cu",
             "flash_bwd_hdim64_bf16_sm80.cu", "flash_bwd_hdim128_bf16_sm80.cu")]
 
+    # csrc/ is the v13 classic module (the same sources as kernels/v13): a census kernel
+    # classifies every tile of a call on the device and routes it to the ALIGNED run-table
+    # kernel (upstream FlashAttention-2's loop over the live tiles) or to v11's CQS kernel
+    # (LEGACY, the per-element mask path, for mixed tiles), in both directions. Every
+    # (dtype, hdim, causal) forward and every (dtype, hdim) backward is two translation
+    # units, the main one and the *_legacy one whose ptxas run dominates the build; the
+    # dispatch covers head dims 64 and 128 (flash_api.cpp's CQSA_MINIMAL_FWD_KERNELS branch),
+    # causal and non-causal, so one module serves both. LEGACY units first: ninja starts
+    # jobs in this order and they are the long ones.
+    base += [f"{root}/flash_attn/src/cqs_census.cu", f"{root}/flash_attn/src/cqs_census_bwd.cu"]
     kernel_set = cqsa_kernel_set()
-    if kernel_set == "full":
-        return (
-            base
-            + sorted(glob.glob(str(THIS_DIR / root / "flash_attn" / "src" / "flash_fwd_*.cu")))
-            + sorted(glob.glob(str(THIS_DIR / root / "flash_attn" / "src" / "flash_bwd_*.cu")))
+    dtypes = {"common": ("fp16", "bf16"), "a100_fp16_hdim64_128": ("fp16",)}.get(kernel_set)
+    if dtypes is None:
+        raise RuntimeError(
+            f"Unknown CQSA_KERNEL_SET='{kernel_set}'. Expected common (fp16 + bf16, the shipping set) or "
+            "a100_fp16_hdim64_128 (fp16 only); both cover head dims 64 and 128, causal and non-causal."
         )
-    if kernel_set == "a100_fp16_hdim128":
-        return base + [
-            f"{root}/flash_attn/src/flash_fwd_hdim128_fp16_sm80.cu",
-            f"{root}/flash_attn/src/flash_fwd_hdim128_fp16_causal_sm80.cu",
-            f"{root}/flash_attn/src/flash_bwd_hdim128_fp16_sm80.cu",
-        ]
-    if kernel_set == "common":
-        # Shipping target: both dtypes users actually train in, and the two head
-        # dims that cover most transformers (Llama 128, GPT-2 64). Exotic head
-        # dims need CQSA_KERNEL_SET=full.
-        return base + [
-            f"{root}/flash_attn/src/flash_fwd_hdim64_fp16_sm80.cu",
-            f"{root}/flash_attn/src/flash_fwd_hdim64_fp16_causal_sm80.cu",
-            f"{root}/flash_attn/src/flash_fwd_hdim128_fp16_sm80.cu",
-            f"{root}/flash_attn/src/flash_fwd_hdim128_fp16_causal_sm80.cu",
-            f"{root}/flash_attn/src/flash_fwd_hdim64_bf16_sm80.cu",
-            f"{root}/flash_attn/src/flash_fwd_hdim64_bf16_causal_sm80.cu",
-            f"{root}/flash_attn/src/flash_fwd_hdim128_bf16_sm80.cu",
-            f"{root}/flash_attn/src/flash_fwd_hdim128_bf16_causal_sm80.cu",
-            f"{root}/flash_attn/src/flash_bwd_hdim64_fp16_sm80.cu",
-            f"{root}/flash_attn/src/flash_bwd_hdim128_fp16_sm80.cu",
-            f"{root}/flash_attn/src/flash_bwd_hdim64_bf16_sm80.cu",
-            f"{root}/flash_attn/src/flash_bwd_hdim128_bf16_sm80.cu",
-        ]
-    if kernel_set == "a100_fp16_hdim64_128":
-        return base + [
-            f"{root}/flash_attn/src/flash_fwd_hdim64_fp16_sm80.cu",
-            f"{root}/flash_attn/src/flash_fwd_hdim64_fp16_causal_sm80.cu",
-            f"{root}/flash_attn/src/flash_fwd_hdim128_fp16_sm80.cu",
-            f"{root}/flash_attn/src/flash_fwd_hdim128_fp16_causal_sm80.cu",
-            f"{root}/flash_attn/src/flash_bwd_hdim64_fp16_sm80.cu",
-            f"{root}/flash_attn/src/flash_bwd_hdim128_fp16_sm80.cu",
-        ]
-    if kernel_set == "a100_fp16_hdim64_noncau":
-        return base + [
-            f"{root}/flash_attn/src/flash_fwd_hdim64_fp16_sm80.cu",
-            f"{root}/flash_attn/src/flash_bwd_hdim64_fp16_sm80.cu",
-        ]
-    raise RuntimeError(
-        f"Unknown CQSA_KERNEL_SET='{kernel_set}'. "
-        "Expected one of: full, common, a100_fp16_hdim128, "
-        "a100_fp16_hdim64_128, a100_fp16_hdim64_noncau."
-    )
+    legacy = [f"{root}/flash_attn/src/flash_fwd_hdim{hd}_{dt}{causal}_legacy_sm80.cu"
+              for dt in dtypes for hd in (64, 128) for causal in ("", "_causal")]
+    legacy += [f"{root}/flash_attn/src/flash_bwd_hdim{hd}_{dt}_legacy_sm80.cu" for dt in dtypes for hd in (64, 128)]
+    main = [f"{root}/flash_attn/src/flash_fwd_hdim{hd}_{dt}{causal}_sm80.cu"
+            for dt in dtypes for hd in (64, 128) for causal in ("", "_causal")]
+    main += [f"{root}/flash_attn/src/flash_bwd_hdim{hd}_{dt}_sm80.cu" for dt in dtypes for hd in (64, 128)]
+    return base + legacy + main
 
 
 def build_extension(name: str = "cqsa_cuda", root: str = "csrc"):
@@ -166,6 +138,9 @@ def build_extension(name: str = "cqsa_cuda", root: str = "csrc"):
     sources = cqsa_sources(root)
     if not sources:
         raise RuntimeError("No CUDA sources found for CQSA build")
+    if root == "csrc" and os.getenv("CQSA_BWD_NO_CQS"):
+        raise RuntimeError("CQSA_BWD_NO_CQS is a measurement flag of the native tree's v11 backward; the classic "
+                           "module's LEGACY backward keeps the full CQS path")
 
     nvcc_threads = os.getenv("NVCC_THREADS", "4")
     arch_flags = nvcc_arch_flags(cuda_arch_list())
@@ -194,12 +169,12 @@ def build_extension(name: str = "cqsa_cuda", root: str = "csrc"):
     }
 
     define_macros = []
-    if kernel_set != "full":
+    # the classic module's census -> ALIGNED -> LEGACY routing lives only in the MINIMAL dispatch
+    # (head dims 64 / 128); flash_api.cpp refuses to build without it
+    if root == "csrc" or kernel_set != "full":
         define_macros.append(("CQSA_MINIMAL_FWD_KERNELS", None))
     if root.startswith("native"):
         define_macros.append(("CQSA_NATIVE_FWD_HDIM64_ONLY", None))
-    if kernel_set == "a100_fp16_hdim64_noncau":
-        define_macros.append(("CQSA_MINIMAL_HDIM64_NONCAUSAL_ONLY", None))
     if kernel_set == "common":
         define_macros.append(("CQSA_MINIMAL_BOTH_DTYPES", None))
 
@@ -234,15 +209,17 @@ setup(
     version=get_version(),
     description="Stream-CQSA v2: exact out-of-memory recovery for attention (engine, planner, devkit, native kernels)",
     packages=find_packages(include=["stream_cqsa", "stream_cqsa.*"]),
-    # Two extensions from two kernel source trees (see docs/kernel_technical_note.md):
-    #   cqsa_cuda     csrc/     v11 forward: the fast causal kernel; CQS-off path == FlashAttention-2
-    #   cqsa_cuda_nc  csrc_nc/  v9 forward: serves NON-causal calls (v11's non-causal CQS-on
-    #                           instantiation is mis-compiled by ptxas -- an open issue)
-    # The interface picks per call (CQSA_CUDA_MODULE / CQSA_CUDA_MODULE_NONCAUSAL).
+    # Extensions (see docs/kernel_technical_note.md, docs/ultimate/03_kernels_report.md):
+    #   cqsa_cuda     csrc/     the v13 classic module: census + ALIGNED run-table kernels with
+    #                           v11's code as the LEGACY fallback, forward and backward, causal and
+    #                           non-causal in one module (CQS-off path == FlashAttention-2). The
+    #                           second extension of v2 (cqsa_cuda_nc from csrc_nc/, v9's non-causal
+    #                           forward) is retired: csrc_nc/ stays in the tree until the release
+    #                           decides, but is not built.
     #   cqsa_native   native/   the multi-subproblem wave kernel (optional: CQSA_BUILD_NATIVE=1;
     #                           hdim64 wave modes, hdim128 as v11); stream_cqsa.native_wave uses it
     ext_modules=[] if SKIP_EXT else (
-        [build_extension("cqsa_cuda", "csrc"), build_extension("cqsa_cuda_nc", "csrc_nc")]
+        [build_extension("cqsa_cuda", "csrc")]
         + ([build_extension("cqsa_native", "native/csrc")]
            if os.getenv("CQSA_BUILD_NATIVE", "").strip().lower() in ("1", "true", "yes") else [])),
     cmdclass={} if SKIP_EXT else {"build_ext": BuildExtension.with_options(use_ninja=True)},

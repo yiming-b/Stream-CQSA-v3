@@ -1273,6 +1273,12 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
 
 template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Is_softcap, bool Return_softmax, int Cqs_mode, typename Params>
 inline __device__ void compute_attn(const Params &params) {
+    // next/ v12f: when the census ran (cqs_route set), this CQS-on (LEGACY)
+    // kernel computes the call only if the census found a mixed tile;
+    // otherwise the ALIGNED kernel launched just before it already did.
+    if constexpr (Cqs_mode != 0) {
+        if (params.cqs_route != nullptr && __ldg(params.cqs_route) == 0) { return; }
+    }
     const int m_block = blockIdx.x;
     // The block index for the batch.
     const int bidb = blockIdx.y;

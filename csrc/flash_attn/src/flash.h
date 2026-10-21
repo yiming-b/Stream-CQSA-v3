@@ -7,6 +7,7 @@
 #include "namespace_config.h"
 
 #include <cuda.h>
+#include <vector_types.h>  // int2 (cqs_runs, cqs_bwd_runs)
 #include <vector>
 
 #include <ATen/cuda/CUDAGeneratorImpl.h> // For at::Generator and at::PhiloxCudaState
@@ -178,6 +179,19 @@ struct Flash_fwd_params : public Qkv_params {
     // Null disables it and the kernel reads a pre-gathered buffer as before.
     int * __restrict__ cqs_block_base;
     int cqs_seg_align;
+    // next/ v12f: routing between the two CQS-on forward instantiations.
+    // Null route: the host sent this call to LEGACY (v11's loop with the
+    // per-element path) without a census. Otherwise the census kernel
+    // (cqs_census.cu) has written *cqs_route (0: every visited tile is fully
+    // live or fully masked, so ALIGNED computes the call; nonzero: a mixed
+    // tile or a run-table overflow, so LEGACY does) and, per row block of the
+    // ALIGNED tile shape, the live column tiles as runs {hi, lo} in
+    // descending n, kCqsRunSlots slots per row block, closed by {-1, -1}.
+    int * __restrict__ cqs_route;
+    const int2 * __restrict__ cqs_runs;
+    // ALIGNED only: visit row blocks in descending order (heaviest causal
+    // rows first). Each CTA's result does not depend on the order.
+    bool cqs_reverse_m;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -229,13 +243,38 @@ struct Flash_bwd_params : public Flash_fwd_params {
 
     bool deterministic;
     index_t dq_accum_split_stride;
+
+    // next/ v12b: routing between the two CQS-on backward instantiations.
+    // Null route: no census ran (a CQS-off call, or a CQS-on call the host
+    // sent to LEGACY), and the one kernel launched computes the call.
+    // Otherwise the census (cqs_census_bwd.cu) has written *cqs_bwd_route
+    // (0: every visited tile is fully live or fully masked, so the ALIGNED
+    // backward computes the call; nonzero: a mixed tile or a run-table
+    // overflow, so LEGACY -- v11's CQS backward -- does) and, per column
+    // block of the backward's tile shape, the live m blocks as runs {hi, lo}
+    // in descending m, kCqsBwdRunSlots slots per column block, closed by
+    // {-1, -1}. Both kernels are launched on the stream; the CTAs of the one
+    // not chosen return at once, so no host sync is needed.
+    int * __restrict__ cqs_bwd_route;
+    const int2 * __restrict__ cqs_bwd_runs;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+// next/ v12f: with CQS off, the plain forward; with CQS on, the census and
+// the ALIGNED forward (the host calls it only when it allocated the census).
 template<typename T, int Headdim, bool Is_causal> void run_mha_fwd_(Flash_fwd_params &params, cudaStream_t stream);
+// next/ v12f: v11's CQS-on forward (per-element mask path), in its own
+// translation units so its long ptxas run is paid only when it changes.
+template<typename T, int Headdim, bool Is_causal> void run_mha_fwd_legacy_(Flash_fwd_params &params, cudaStream_t stream);
 template<typename T, int Headdim, bool Is_causal> void run_mha_fwd_splitkv_dispatch(Flash_fwd_params &params, cudaStream_t stream);
 
+// next/ v12b: the whole backward (preprocess, census + ALIGNED or plain loop,
+// LEGACY when needed, convert_dQ); flash_bwd_hdim*_sm80.cu.
 template<typename T, int Headdim, bool Is_causal> void run_mha_bwd_(Flash_bwd_params &params, cudaStream_t stream);
+// next/ v12b: only v11's dq/dk/dv kernel (LEGACY), in its own translation
+// units (flash_bwd_hdim*_legacy_sm80.cu) so its long compile is paid only
+// when it changes. Called by run_mha_bwd_ between its other launches.
+template<typename T, int Headdim, bool Is_causal> void run_mha_bwd_legacy_(Flash_bwd_params &params, cudaStream_t stream);
 
 }  // namespace FLASH_NAMESPACE

@@ -129,6 +129,12 @@ instantiation, and the same non-causal code with a runtime flag (v9) is fine
 source-level ncu pass. Variants were built with the fp16/hdim 64+128 kernel
 set; a release build needs the `common` set (bf16 included).
 
+*Resolved in v3 (the v13 module, `docs/ultimate/03_kernels_report.md` 4.1):* the
+non-causal CQS-on code compiles correctly once it sits in its own translation unit
+(the LEGACY unit), and aligned non-causal tasks run on the ALIGNED run-table kernel
+(1.46-1.75x faster than v9), so one module serves both modes and the interface no
+longer loads a second one.
+
 ## 6. Profiling method (for the paper's methodology section)
 
 * Kernel timing: CUDA events around 10 launches after 3 warm-ups, one

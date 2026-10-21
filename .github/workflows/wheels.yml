@@ -41,7 +41,7 @@ jobs:
         with: { name: pure, path: dist/*, retention-days: 3 }
 
   # CUDA wheels, two per (python, torch, CUDA, arch) cell: `core` is stream-cqsa with the
-  # classic extensions (cqsa_cuda, cqsa_cuda_nc); `native` is the companion wheel
+  # classic extension (cqsa_cuda, the v13 module); `native` is the companion wheel
   # stream-cqsa-native with the multi-subproblem wave kernel (cqsa_native). They are
   # separate wheels because each is a ~2 h compile on a 4-core hosted runner against the
   # 6 h limit; installed together, the package uses the wave kernel automatically.

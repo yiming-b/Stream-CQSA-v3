@@ -579,10 +579,12 @@ dt = getattr(torch, %r)
 rel = lambda a, b: ((a.double() - b.double()).norm() / b.double().norm()).item()
 for causal in (True, False):
     torch.manual_seed(0)
-    q, k, v = (torch.randn(1, 4, 8192, 64, device="cuda", dtype=dt, requires_grad=True) for _ in range(3))
-    dout = torch.randn(1, 4, 8192, 64, device="cuda", dtype=dt)
+    # N=4096: the float64 SDPA reference holds the H x N x N scores (512 MiB) -- the shared vis1 GPU's share
+    q, k, v = (torch.randn(1, 4, 4096, 64, device="cuda", dtype=dt, requires_grad=True) for _ in range(3))
+    dout = torch.randn(1, 4, 4096, 64, device="cuda", dtype=dt)
     out, info = stream_cqsa.attention(q, k, v, is_causal=causal, kernel="cuda", itr=1, c=7, bwd_itr=1, return_info=True)
-    assert info["engine"] == "classic" and info["n_subproblems"] == 7, info
+    # the backward-direction info names the engine, kernel, itr and c (not the subproblem count)
+    assert (info["engine"], info["kernel"], info["itr"], info["c"]) == ("classic", "cuda", 1, 7), info
     g = torch.autograd.grad(out, (q, k, v), dout)
     q2, k2, v2 = (t.detach().double().requires_grad_(True) for t in (q, k, v))
     o2 = F.scaled_dot_product_attention(q2, k2, v2, is_causal=causal)

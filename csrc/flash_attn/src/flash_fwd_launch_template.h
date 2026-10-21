@@ -51,27 +51,13 @@ DEFINE_FLASH_FORWARD_KERNEL(flash_fwd_splitkv_combine_kernel, int kBlockM, int L
     FLASH_NAMESPACE::combine_attn_seqk_parallel<Kernel_traits, kBlockM, Log_max_splits, Is_even_K>(params);
 }
 
-// Mode 1 (compile-time CQS on) exists only for causal kernels: the non-causal
-// mode-1 instantiation mis-compiles (2.3x the instructions at hdim64) and
-// ptxas does not finish it at hdim128, so it is never even instantiated.
-#define CQS_MODE_SWITCH(MODE, IS_CAUSAL, CONST_NAME, ...)   \
-    [&] {                                                  \
-        if (MODE == 0) {                                   \
-            constexpr static int CONST_NAME = 0;           \
-            return __VA_ARGS__();                          \
-        } else {                                           \
-            if constexpr (IS_CAUSAL) {                     \
-                constexpr static int CONST_NAME = 1;       \
-                return __VA_ARGS__();                      \
-            } else {                                       \
-                constexpr static int CONST_NAME = 2;       \
-                return __VA_ARGS__();                      \
-            }                                              \
-        }                                                  \
-    }()
-
-template<typename Kernel_traits, bool Is_dropout, bool Is_causal>
+// next/ v12f: Cqs_on selects the instantiations a translation unit holds.
+// false: CQS off (upstream's loop), the plain half of flash_fwd_hdim*_sm80.cu.
+// true: v11's CQS-on forward (LEGACY), only in flash_fwd_hdim*_legacy_sm80.cu.
+// The ALIGNED CQS-on forward has its own launcher (flash_fwd_aligned.h).
+template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Cqs_on = false>
 void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
+    TORCH_CHECK(params.cqs_enabled == Cqs_on, "cqsa v12f: a CQS-on call reached the CQS-off forward (or the reverse)");
     // next/ v2: one tile's worth of CQS column group-bits, staged in smem.
     constexpr size_t smem_size = Kernel_traits::kSmemSize + Kernel_traits::kBlockN * sizeof(int64_t);
     // printf("smem_size = %d\n", smem_size);
@@ -92,8 +78,7 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     // next/ v10: 0 = CQS off (compile time), 1 = on (compile time, causal only),
     // 2 = runtime flag (non-causal CQS-on; its compile-time-on instantiation
     // generates 2.3x the instructions, see LOG.md).
-    const int cqs_mode = !params.cqs_enabled ? 0 : (Is_causal ? 1 : 2);
-    CQS_MODE_SWITCH(cqs_mode, Is_causal, CqsModeConst, [&] {
+    constexpr static int CqsModeConst = !Cqs_on ? 0 : (Is_causal ? 1 : 2);
     BOOL_SWITCH(is_even_MN, IsEvenMNConst, [&] {
         EVENK_SWITCH(is_even_K, IsEvenKConst, [&] {
             LOCAL_SWITCH((params.window_size_left >= 0 || params.window_size_right >= 0) && !Is_causal, Is_local, [&] {
@@ -124,7 +109,6 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
                 });
             });
         });
-    });
     });
 }
 
@@ -207,7 +191,7 @@ void run_mha_fwd_hdim32(Flash_fwd_params &params, cudaStream_t stream) {
     });
 }
 
-template<typename T, bool Is_causal>
+template<typename T, bool Is_causal, bool Cqs_on = false>
 void run_mha_fwd_hdim64(Flash_fwd_params &params, cudaStream_t stream) {
     constexpr static int Headdim = 64;
     DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
@@ -215,11 +199,11 @@ void run_mha_fwd_hdim64(Flash_fwd_params &params, cudaStream_t stream) {
             // Using 8 warps is 18% slower for seqlen=2k, 2 warps is 5% slower
             // Using block size (64 x 256) is 27% slower for seqlen=2k
             // Using block size (256 x 64) is 85% slower for seqlen=2k, because of register spilling
-            run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 128, 4, false, false, T>, Is_dropout, Is_causal>(params, stream);
+            run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 128, 4, false, false, T>, Is_dropout, Is_causal, Cqs_on>(params, stream);
             // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 4, true, false, T>, Is_dropout, Is_causal>(params, stream);
             // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 4, true, true, T>, Is_dropout, Is_causal>(params, stream);
         } else {
-            run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 4, false, false, T>, Is_dropout, Is_causal>(params, stream);
+            run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 4, false, false, T>, Is_dropout, Is_causal, Cqs_on>(params, stream);
             // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 4, true, true, T>, Is_dropout, Is_causal>(params, stream);
             // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 4, true, false, T>, Is_dropout, Is_causal>(params, stream);
             // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 128, 4, false, false, T>, Is_dropout, Is_causal>(params, stream);
@@ -251,7 +235,7 @@ void run_mha_fwd_hdim96(Flash_fwd_params &params, cudaStream_t stream) {
     });
 }
 
-template<typename T, bool Is_causal>
+template<typename T, bool Is_causal, bool Cqs_on = false>
 void run_mha_fwd_hdim128(Flash_fwd_params &params, cudaStream_t stream) {
     constexpr static int Headdim = 128;
     auto [cc_major, cc_minor] = get_compute_capability(get_current_device());
@@ -262,12 +246,12 @@ void run_mha_fwd_hdim128(Flash_fwd_params &params, cudaStream_t stream) {
             // and 128 x 32 (48 KB smem) is the fastest for non-causal since we get 2 CTAs per SM.
             if (is_sm8x) {
                 if constexpr(!Is_causal) {
-                    run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 32, 4, false, false, T>, Is_dropout, Is_causal>(params, stream);
+                    run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 32, 4, false, false, T>, Is_dropout, Is_causal, Cqs_on>(params, stream);
                 } else {
-                    run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 64, 64, 4, false, false, T>, Is_dropout, Is_causal>(params, stream);
+                    run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 64, 64, 4, false, false, T>, Is_dropout, Is_causal, Cqs_on>(params, stream);
                 }
             } else {
-                run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 4, false, false, T>, Is_dropout, Is_causal>(params, stream);
+                run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 4, false, false, T>, Is_dropout, Is_causal, Cqs_on>(params, stream);
             }
             // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 4, true, false, T>, Is_dropout, Is_causal>(params, stream);
             // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 4, true, true, T>, Is_dropout, Is_causal>(params, stream);
@@ -278,7 +262,7 @@ void run_mha_fwd_hdim128(Flash_fwd_params &params, cudaStream_t stream) {
             // 1st ones are good for H100, A100
             // 2nd one is good for A6000 bc we get slightly better occupancy
         } else {
-            run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 32, 4, false, false, T>, Is_dropout, Is_causal>(params, stream);
+            run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 32, 4, false, false, T>, Is_dropout, Is_causal, Cqs_on>(params, stream);
             // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 64, 64, 4, false, false, T>, Is_dropout, Is_causal>(params, stream);
             // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 32, 4, true, false, T>, Is_dropout, Is_causal>(params, stream);
             // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 32, 4, true, true, T>, Is_dropout, Is_causal>(params, stream);

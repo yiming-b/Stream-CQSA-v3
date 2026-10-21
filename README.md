@@ -89,7 +89,7 @@ tag; publishing to PyPI is the `pypi` job, enabled by the repository variable `P
 with trusted publishing.
 
 From source, for any GPU: `pip install -e . --no-build-isolation` in a checkout compiles the
-classic extensions for the card present (40-75 min of nvcc; `CQSA_KERNEL_SET=common` covers
+classic extension for the card present (40-75 min of nvcc; `CQSA_KERNEL_SET=common` covers
 fp16/bf16 and head dims 64/128); `CQSA_BUILD_NATIVE=1` adds the wave kernel.
 
 ## Use
@@ -139,7 +139,9 @@ Stream-CQSA continues, exact.
 ## Layout
 
     stream_cqsa/      the package (engine, planner, devkit, adapters, distributed, autograd)
-    csrc/, csrc_nc/   the classic CUDA kernel's causal and non-causal builds (FlashAttention-2 + CQS)
+    csrc/             the classic CUDA kernel (FlashAttention-2 + CQS: a census routes every call to the ALIGNED
+                      run-table kernel or the LEGACY per-element path, forward and backward, causal and non-causal);
+                      = kernels/v13. csrc_nc/ (v2's separate non-causal build) is retired and no longer built
     native/           the multi-subproblem "wave" kernel (cqsa_native): sources, build, tests, benchmark
     benchmarks/profile_sweep.py   one-parameter profiles (c; N x {itr, acc}) with quadratic/linear fits: results/profile_sweep/
     tests/            pytest suite (engine, planner, devkit, adapters)

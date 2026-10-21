@@ -6,6 +6,7 @@
 #include <torch/python.h>
 #include <torch/nn/functional.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>  // C10_CUDA_CHECK (next/ v12b census entry)
 #include <c10/cuda/CUDAStream.h>
 #include <ATen/cuda/CUDAGeneratorImpl.h>  // For at::Generator and at::PhiloxCudaState
 #include "philox_unpack.cuh"  // For at::cuda::philox::unpack
@@ -16,6 +17,8 @@
 #include "namespace_config.h"
 #include "hardware_info.h"
 #include "flash.h"
+#include "cqs_census.h"
+#include "cqs_census_bwd.h"
 #include "static_switch.h"
 #include <array>
 #include <algorithm>
@@ -458,7 +461,23 @@ void set_params_dgrad(Flash_bwd_params &params,
     params.cqsa_ext_dpsum = false;
 
     params.deterministic = deterministic;
+
+    // next/ v12b: no census unless mha_bwd allocates one (LEGACY alone).
+    params.cqs_bwd_route = nullptr;
+    params.cqs_bwd_runs = nullptr;
 }
+
+// next/ v12f: cqs_fwd_flags of fwd_cqs_group_bits.
+constexpr int kCqsFwdForceLegacy = 1;   // skip the census: v11's CQS forward (A/B and tests)
+constexpr int kCqsFwdReverseM = 2;      // ALIGNED visits row blocks in descending order
+constexpr int kCqsFwdAscendingM = 4;    // ALIGNED visits row blocks in ascending order
+// Neither order flag: descending for causal calls, ascending for non-causal ones. On an
+// A100-SXM4-80GB (job 14319938, results/ultimate/fwd_ab.md) descending order cut the causal
+// ALIGNED forward by 1.5-6.1% (heaviest row blocks first, no drain tail) and was neutral to
+// +1.0% non-causal, where every row block has the same work. Outputs are bit-identical.
+
+// next/ v12b: cqs_bwd_flags of bwd.
+constexpr int kCqsBwdForceLegacy = 1;   // skip the census: v11's CQS backward (A/B and tests)
 
 void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split_kernel=false) {
 #ifdef CQSA_MINIMAL_FWD_KERNELS
@@ -476,28 +495,37 @@ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split
     TORCH_CHECK(params.d == 64 || params.d == 128,
                 "this CQSA build only supports head_dim=64 or 128; rebuild with "
                 "CQSA_KERNEL_SET=full for other head dims.");
+    // next/ v12f: CQS off -> the plain forward. CQS on -> the census and the
+    // ALIGNED forward when mha_fwd_impl allocated the census (params.cqs_route),
+    // then LEGACY, whose CTAs return at once unless the census found a mixed
+    // tile; without a census LEGACY alone computes the call. Both launches go
+    // to the same stream, so the route is decided without a host sync.
+    // F23 review fix: the ALIGNED launch dereferences the census buffers with
+    // no null check of its own, so a route implies the summaries it was built
+    // from (mha_fwd_impl sets them together).
+    TORCH_CHECK(params.cqs_route == nullptr
+                    || (params.cqs_enabled && params.cqs_group_bits != nullptr && params.cqs_blk_or != nullptr
+                        && params.cqs_blk_and != nullptr && params.cqs_runs != nullptr),
+                "v12f: census route set without group bits / summaries");
     FP16_SWITCH(!params.is_bf16, [&] {
         BOOL_SWITCH(params.is_causal, Is_causal, [&] {
             if (params.d == 64) {
-                run_mha_fwd_<elem_type, 64, Is_causal>(params, stream);
+                if (!params.cqs_enabled || params.cqs_route != nullptr) { run_mha_fwd_<elem_type, 64, Is_causal>(params, stream); }
+                if (params.cqs_enabled) { run_mha_fwd_legacy_<elem_type, 64, Is_causal>(params, stream); }
             } else {
-                run_mha_fwd_<elem_type, 128, Is_causal>(params, stream);
+                if (!params.cqs_enabled || params.cqs_route != nullptr) { run_mha_fwd_<elem_type, 128, Is_causal>(params, stream); }
+                if (params.cqs_enabled) { run_mha_fwd_legacy_<elem_type, 128, Is_causal>(params, stream); }
             }
         });
     });
 #endif
 #else
-    FP16_SWITCH(!params.is_bf16, [&] {
-        HEADDIM_SWITCH(params.d, [&] {
-            BOOL_SWITCH(params.is_causal, Is_causal, [&] {
-                if (params.num_splits <= 1 && !force_split_kernel) {  // If we don't set it num_splits == 0
-                    run_mha_fwd_<elem_type, kHeadDim, Is_causal>(params, stream);
-                } else {
-                    run_mha_fwd_splitkv_dispatch<elem_type, kHeadDim, Is_causal>(params, stream);
-                }
-            });
-        });
-    });
+    // F23 review fix: v12f's CQS-on routing (census -> ALIGNED -> LEGACY, and
+    // LEGACY alone for a call without a census) exists only in the branch
+    // above. This upstream dispatch would send every CQS call through
+    // run_mha_fwd_ -> the ALIGNED launcher with null census buffers, and
+    // split-kv calls past both. setup.py always defines the macro.
+#error "v12f requires CQSA_MINIMAL_FWD_KERNELS: the CQS-on ALIGNED/LEGACY routing exists only in that branch"
 #endif
 }
 
@@ -616,7 +644,8 @@ mha_fwd_impl(at::Tensor &q,         // batch_size x seqlen_q x num_heads x round
         std::optional<int64_t> cqs_blk_size_ = std::nullopt,
         std::optional<at::Tensor> cqs_out_acc_ = std::nullopt,
         std::optional<at::Tensor> cqs_block_base_ = std::nullopt,
-        std::optional<int64_t> cqs_seg_align_ = std::nullopt) {
+        std::optional<int64_t> cqs_seg_align_ = std::nullopt,
+        const int64_t cqs_fwd_flags = 0) {
 
     // Otherwise the kernel will be launched from cuda:0 device
     at::cuda::CUDAGuard device_guard{q.device()};
@@ -842,6 +871,35 @@ mha_fwd_impl(at::Tensor &q,         // batch_size x seqlen_q x num_heads x round
 
     set_params_alibi(params, alibi_slopes_, batch_size, num_heads);
 
+    // next/ v12f: the census and the ALIGNED forward serve the group-bits mode
+    // with summaries in the production configuration; anything else (and a
+    // forced LEGACY call) keeps params.cqs_route null and runs v11's forward.
+    // F23 review fix (blocker): the gate reads the parameters set_params_fprop
+    // actually set, not the is_causal argument. A causal call with a sliding
+    // window (window_size_left >= 0) has params.is_causal == false; gating on
+    // the argument sent it to the NON-causal ALIGNED kernel, which applies
+    // neither the window nor the causal mask (silently wrong). Any local /
+    // windowed call -- causal or not -- is LEGACY; ALIGNED serves exactly
+    // Is_local == false (upstream's LOCAL_SWITCH condition).
+    const bool cqs_is_local = !params.is_causal
+        && (params.window_size_left >= 0 || params.window_size_right >= 0);
+    at::Tensor cqs_census;
+    if (params.cqs_enabled && params.cqs_group_bits != nullptr && params.cqs_blk_or != nullptr
+        && params.cqs_blk_and != nullptr
+        && (cqs_fwd_flags & kCqsFwdForceLegacy) == 0
+        && p_dropout == 0.f && !return_softmax && softcap == 0.f && params.alibi_slopes_ptr == nullptr
+        && !cqs_is_local
+        && (head_size == 64 || head_size == 128) && !seqlenq_ngroups_swapped) {
+        // Sized for any row-block height >= 64; the route word is padded to 8
+        // bytes so the int2 runs that follow it are aligned.
+        const int max_m_blocks = (seqlen_q + 63) / 64;
+        cqs_census = torch::empty({2 + max_m_blocks * kCqsRunSlots * 2}, opts.dtype(torch::kInt32));
+        params.cqs_route = cqs_census.data_ptr<int>();
+        params.cqs_runs = reinterpret_cast<const int2 *>(params.cqs_route + 2);
+        params.cqs_reverse_m = (cqs_fwd_flags & kCqsFwdReverseM) != 0
+            || (params.is_causal && (cqs_fwd_flags & kCqsFwdAscendingM) == 0);
+    }
+
     if (seqlen_k > 0) {
         auto stream = at::cuda::getCurrentCUDAStream().stream();
         run_mha_fwd(params, stream);
@@ -949,7 +1007,8 @@ mha_fwd_cqs_group_bits(at::Tensor &q,         // batch_size x seqlen_q x num_hea
                        std::optional<int64_t> cqs_blk_size_ = std::nullopt,
                        std::optional<at::Tensor> cqs_out_acc_ = std::nullopt,
                        std::optional<at::Tensor> cqs_block_base_ = std::nullopt,
-                       std::optional<int64_t> cqs_seg_align_ = std::nullopt) {
+                       std::optional<int64_t> cqs_seg_align_ = std::nullopt,
+                       const int64_t cqs_fwd_flags = 0) {
     auto cqs_group_bits_opt = std::optional<at::Tensor>(cqs_group_bits);
     return mha_fwd_impl(
         q,
@@ -973,7 +1032,42 @@ mha_fwd_cqs_group_bits(at::Tensor &q,         // batch_size x seqlen_q x num_hea
         cqs_blk_size_,
         cqs_out_acc_,
         cqs_block_base_,
-        cqs_seg_align_);
+        cqs_seg_align_,
+        cqs_fwd_flags);
+}
+
+// next/ v12f: the census the CQS forward runs, exposed for tests. Returns the
+// route word (int32 [1]: 0 = ALIGNED, else kCqsRoute* bits), the run table
+// (int32 [ceil(L / kBlockM), kCqsRunSlots, 2], {hi, lo} runs in descending n
+// closed by {-1, -1}) and the ALIGNED tile shape (int32 [2] on the CPU).
+std::vector<at::Tensor>
+mha_fwd_cqs_census(const at::Tensor &cqs_group_bits, const at::Tensor &cqs_blk_or, const at::Tensor &cqs_blk_and,
+                   const bool is_causal, const int64_t head_size) {
+    at::cuda::CUDAGuard device_guard{cqs_group_bits.device()};
+    for (const at::Tensor *t : {&cqs_group_bits, &cqs_blk_or, &cqs_blk_and}) {
+        CHECK_DEVICE((*t)); CHECK_CONTIGUOUS((*t));
+        TORCH_CHECK(t->dtype() == torch::kInt64, "cqs group bits and summaries must be int64");
+    }
+    const int L = static_cast<int>(cqs_group_bits.numel());
+    TORCH_CHECK(L > 0, "empty group bits");
+    TORCH_CHECK(cqs_blk_or.numel() == cqs_blk_and.numel() && cqs_blk_or.numel() >= (L + 63) / 64,
+                "cqs block summaries (64 tokens each) too short");
+    TORCH_CHECK(head_size == 64 || head_size == 128, "the ALIGNED forward exists for head dims 64 and 128");
+    const int block_m = head_size == 64 ? CqsAlignedTile<64>::kBlockM : CqsAlignedTile<128>::kBlockM;
+    const int block_n = head_size == 64 ? CqsAlignedTile<64>::kBlockN : CqsAlignedTile<128>::kBlockN;
+    const int num_m = (L + block_m - 1) / block_m;
+    auto census = torch::empty({2 + num_m * kCqsRunSlots * 2}, cqs_group_bits.options().dtype(torch::kInt32));
+    Flash_fwd_params params = {};
+    params.seqlen_q = params.seqlen_k = L;
+    params.is_causal = is_causal;
+    params.cqs_group_bits = cqs_group_bits.data_ptr<int64_t>();
+    params.cqs_blk_or = cqs_blk_or.data_ptr<int64_t>();
+    params.cqs_blk_and = cqs_blk_and.data_ptr<int64_t>();
+    params.cqs_route = census.data_ptr<int>();
+    params.cqs_runs = reinterpret_cast<const int2 *>(params.cqs_route + 2);
+    run_cqs_fwd_census(params, block_m, block_n, at::cuda::getCurrentCUDAStream().stream());
+    return {census.slice(0, 0, 1), census.slice(0, 2).view({num_m, kCqsRunSlots, 2}),
+            torch::tensor({block_m, block_n}, torch::dtype(torch::kInt32))};
 }
 
 void run_mha_bwd(Flash_bwd_params &params, cudaStream_t stream);
@@ -1690,7 +1784,9 @@ mha_bwd(const at::Tensor &dout,  // batch_size x seqlen_q x num_heads, x multipl
         std::optional<int64_t> cqs_blk_size_ = std::nullopt,
         // Precomputed rowsum(dO * O), [batch, heads, seqlen_q]. When given, the
         // preprocess pass is skipped and `out` is never read.
-        std::optional<at::Tensor> dsoftmax_sum_ = std::nullopt){
+        std::optional<at::Tensor> dsoftmax_sum_ = std::nullopt,
+        // next/ v12b: kCqsBwdForceLegacy runs v11's CQS backward without a census.
+        const int64_t cqs_bwd_flags = 0){
 
     #ifdef FLASHATTENTION_DISABLE_BACKWARD
         TORCH_CHECK(false, "This flash attention build does not support backward.");
@@ -1905,6 +2001,30 @@ mha_bwd(const at::Tensor &dout,  // batch_size x seqlen_q x num_heads, x multipl
     }
     params.dq_accum_split_stride = !deterministic ? 0 : dq_accum.stride(0);
 
+    // next/ v12b: the census and the ALIGNED backward serve the group-bits mode
+    // with summaries in the production configuration (the same conditions as
+    // cqs_bwd_aligned_eligible in flash_bwd_aligned.h, which the launcher
+    // re-checks); anything else, and a forced LEGACY call, keeps
+    // params.cqs_bwd_route null and runs v11's backward.
+    at::Tensor cqs_census;
+    if (params.cqs_enabled && params.cqs_group_bits != nullptr && params.cqs_blk_or != nullptr
+        && params.cqs_blk_and != nullptr && !params.cqsa_numden_mode
+        && (cqs_bwd_flags & kCqsBwdForceLegacy) == 0
+        && p_dropout == 0.f && softcap == 0.f && !alibi_slopes_.has_value()
+        // F23 review fix: the post-set_params values, as cqs_bwd_aligned_eligible
+        // tests them (a causal call with a window has params.is_causal == false:
+        // local, LEGACY; gating on the is_causal argument allocated a census the
+        // launcher then discarded).
+        && (params.is_causal || (params.window_size_left < 0 && params.window_size_right < 0))
+        && (head_size == 64 || head_size == 128)) {
+        // Sized for any column-block width >= 64; the route word is padded to
+        // 8 bytes so the int2 runs that follow it are aligned.
+        const int max_n_blocks = (seqlen_k + 63) / 64;
+        cqs_census = torch::empty({2 + max_n_blocks * kCqsBwdRunSlots * 2}, opts.dtype(torch::kInt32));
+        params.cqs_bwd_route = cqs_census.data_ptr<int>();
+        params.cqs_bwd_runs = reinterpret_cast<const int2 *>(params.cqs_bwd_route + 2);
+    }
+
     auto launch = &run_mha_bwd;
 
     auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
@@ -1942,6 +2062,48 @@ mha_bwd(const at::Tensor &dout,  // batch_size x seqlen_q x num_heads, x multipl
     }
 
     return { dq, dk, dv, softmax_d };
+}
+
+// next/ v12b: the census the CQS backward runs, exposed for tests. Returns the
+// route word (int32 [1]: 0 = ALIGNED, else kCqsBwdRoute* bits), the run table
+// (int32 [ceil(L / block_n), kCqsBwdRunSlots, 2], {hi, lo} runs of m blocks in
+// descending m closed by {-1, -1}) for tiles of block_m x block_n, the
+// backward's tile shape on this device (run_mha_bwd_hdim64/128 in
+// flash_bwd_launch_template.h: 128x128 / 64x128 with >= 144 KB of smem per
+// block, else 64x128 / 64x64), given as int32 [2] on the CPU.
+std::vector<at::Tensor>
+mha_bwd_cqs_census(const at::Tensor &cqs_group_bits, const at::Tensor &cqs_blk_or, const at::Tensor &cqs_blk_and,
+                   const bool is_causal, const int64_t head_size) {
+    at::cuda::CUDAGuard device_guard{cqs_group_bits.device()};
+    for (const at::Tensor *t : {&cqs_group_bits, &cqs_blk_or, &cqs_blk_and}) {
+        CHECK_DEVICE((*t)); CHECK_CONTIGUOUS((*t));
+        TORCH_CHECK(t->dtype() == torch::kInt64, "cqs group bits and summaries must be int64");
+    }
+    const int L = static_cast<int>(cqs_group_bits.numel());
+    TORCH_CHECK(L > 0, "empty group bits");
+    TORCH_CHECK(cqs_blk_or.numel() == cqs_blk_and.numel() && cqs_blk_or.numel() >= (L + 63) / 64,
+                "cqs block summaries (64 tokens each) too short");
+    TORCH_CHECK(head_size == 64 || head_size == 128, "the ALIGNED backward exists for head dims 64 and 128");
+    int device;
+    C10_CUDA_CHECK(cudaGetDevice(&device));
+    int max_smem_per_block;
+    C10_CUDA_CHECK(cudaDeviceGetAttribute(&max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
+    const bool big = max_smem_per_block >= 144 * 1024;
+    const int block_m = head_size == 64 ? (big ? 128 : 64) : 64;
+    const int block_n = head_size == 64 ? 128 : (big ? 128 : 64);
+    const int num_n = (L + block_n - 1) / block_n;
+    auto census = torch::empty({2 + num_n * kCqsBwdRunSlots * 2}, cqs_group_bits.options().dtype(torch::kInt32));
+    Flash_bwd_params params = {};
+    params.seqlen_q = params.seqlen_k = L;
+    params.is_causal = is_causal;
+    params.cqs_group_bits = cqs_group_bits.data_ptr<int64_t>();
+    params.cqs_blk_or = cqs_blk_or.data_ptr<int64_t>();
+    params.cqs_blk_and = cqs_blk_and.data_ptr<int64_t>();
+    params.cqs_bwd_route = census.data_ptr<int>();
+    params.cqs_bwd_runs = reinterpret_cast<const int2 *>(params.cqs_bwd_route + 2);
+    run_cqs_bwd_census(params, block_m, block_n, at::cuda::getCurrentCUDAStream().stream());
+    return {census.slice(0, 0, 1), census.slice(0, 2).view({num_n, kCqsBwdRunSlots, 2}),
+            torch::tensor({block_m, block_n}, torch::dtype(torch::kInt32))};
 }
 
 std::vector<at::Tensor>
@@ -2465,7 +2627,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           pybind11::arg("cqs_blk_size") = pybind11::none(),
           pybind11::arg("cqs_out_acc") = pybind11::none(),
           pybind11::arg("cqs_block_base") = pybind11::none(),
-          pybind11::arg("cqs_seg_align") = pybind11::none());
+          pybind11::arg("cqs_seg_align") = pybind11::none(),
+          pybind11::arg("cqs_fwd_flags") = 0);
+    m.def("fwd_cqs_census", &FLASH_NAMESPACE::mha_fwd_cqs_census,
+          "The CQS forward's tile census (route word, run table, tile shape); for tests",
+          pybind11::arg("cqs_group_bits"), pybind11::arg("cqs_blk_or"), pybind11::arg("cqs_blk_and"),
+          pybind11::arg("is_causal"), pybind11::arg("head_size"));
+    m.attr("CQS_FWD_FORCE_LEGACY") = FLASH_NAMESPACE::kCqsFwdForceLegacy;
+    m.attr("CQS_FWD_REVERSE_M") = FLASH_NAMESPACE::kCqsFwdReverseM;
     m.def("bwd_cqs_group_bits", &FLASH_NAMESPACE::mha_bwd_cqs_group_bits, "Backward pass with per-token CQS group-bit mask");
     m.def("fwd_cqsa", &FLASH_NAMESPACE::mha_fwd_cqsa, "Forward pass with fused CQSA (num_chunk=7, interest=(0,1,3), configurable num_itr)");
     m.def("fwd_cqsa_profile", &FLASH_NAMESPACE::mha_fwd_cqsa_profile, "Forward pass with fused CQSA + host timing + configurable num_itr");
@@ -2484,7 +2653,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           pybind11::arg("cqs_blk_or") = pybind11::none(),
           pybind11::arg("cqs_blk_and") = pybind11::none(),
           pybind11::arg("cqs_blk_size") = pybind11::none(),
-          pybind11::arg("dsoftmax_sum") = pybind11::none());
+          pybind11::arg("dsoftmax_sum") = pybind11::none(),
+          pybind11::arg("cqs_bwd_flags") = 0);
+    m.def("bwd_cqs_census", &FLASH_NAMESPACE::mha_bwd_cqs_census,
+          "The CQS backward's tile census (route word, run table, tile shape); for tests",
+          pybind11::arg("cqs_group_bits"), pybind11::arg("cqs_blk_or"), pybind11::arg("cqs_blk_and"),
+          pybind11::arg("is_causal"), pybind11::arg("head_size"));
+    m.attr("CQS_BWD_FORCE_LEGACY") = FLASH_NAMESPACE::kCqsBwdForceLegacy;
+    m.attr("CQS_BWD_RUN_SLOTS") = FLASH_NAMESPACE::kCqsBwdRunSlots;
     m.def("varlen_bwd", &FLASH_NAMESPACE::mha_varlen_bwd, "Backward pass (variable length)");
 #endif
     m.def("fwd_kvcache", &FLASH_NAMESPACE::mha_fwd_kvcache, "Forward pass, with KV-cache");

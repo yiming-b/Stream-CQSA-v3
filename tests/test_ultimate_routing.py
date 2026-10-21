@@ -382,7 +382,9 @@ def test_pinned_depth_is_what_plan_only_reports_and_the_backward_reports_the_gat
     assert info["itr"] == 2 and info["max_wave_tokens"] == p.wave_tokens
     q, k, v = (t.contiguous().requires_grad_() for t in _qkv(100003))
     out, info = stream_cqsa.attention(q, k, v, is_causal=True, itr=1, gather=False, return_info=True)
-    assert info["engine"] == "wave" and info["gather"] is True          # in place is impossible at a ragged causal N
+    from stream_cqsa.native_wave import in_place_possible
+    # in place is impossible at a ragged causal N on the first wave module; cqsa_native_v2 (lens) reads any N in place
+    assert info["engine"] == "wave" and info["gather"] is (not in_place_possible(q.shape[2], True))
     out.float().sum().backward()
     assert torch.isfinite(q.grad).all()
 

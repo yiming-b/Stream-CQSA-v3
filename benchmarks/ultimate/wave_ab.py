@@ -7,7 +7,8 @@ flash_attn / SDPA-flash, ONE process on ONE GPU (A100-SXM4-80GB in slurm/ultimat
 Configs (causal, D=64, fp16, H=8): N=131072 c=7 (W=7, one launch) and c=73 (W=73, one launch); N=1048576 c=7
 with the waves the engine's default budget plans (default_wave_tokens(N) = 1M packed tokens: 2 subproblems of
 L~450K per launch). Kernel-level arms run on prepared inputs (the gathered wave, the block map, the per-task
-copies), so every timed region is launches only:
+copies), so every timed region is launches only; a wave arm's time is the sum over the planned waves of the
+per-wave median (one wave's inputs are prepared at a time: the 1M backward's four waves would hold ~50 GiB):
 
   fwd  v2_wave (gathered) / v2_wave_inplace (block map into the original [N, H, D]) / old_wave (cqsa_native,
        gathered) / old_wave_inplace / v12f_loop (one fwd_cqs_group_bits per task) / v2_w1 and v12f_w1 (the
@@ -178,16 +179,21 @@ def part_fwd(res, N, c, iters):
     torch.manual_seed(0)
     q, k, v = (torch.randn(1, H, N, D, device=DEV, dtype=DT) for _ in range(3))
     qt, kt, vt = (x[0].transpose(0, 1) for x in (q, k, v))
-    preps = [Prepared(w, qt, kt, vt) for w in waves]
     items = task_inputs(tasks, q, k, v)
     r = dict(gpu=GPU, part="fwd", N=N, c=c, W=len(tasks), n_waves=len(waves), wave_sizes=[len(w) for w in waves],
-             S=[int(p.tb.S) for p in preps], L_min=min(int(t.local_size) for t in tasks), L_max=max(int(t.local_size) for t in tasks),
+             S=[], L_min=min(int(t.local_size) for t in tasks), L_max=max(int(t.local_size) for t in tasks),
              sum_L=sum(int(t.local_size) for t in tasks), causal=True, D=D, H=H)
     v2, old, v12f = NATIVE["v2"], NATIVE["old"], FA.MODS["v12f"]
-    # identity first (NaN-filled buffers), then the timings
     refs = fwd_loop(v12f, items, fill=NAN)
-    eq_v12f, eq_old, maxd = True, True, 0.0
-    for p in preps:
+    wave_arms = [("v2_wave", lambda p: fwd_v2(v2, p, False)), ("v2_wave_inplace", lambda p: fwd_v2(v2, p, True)),
+                 ("old_wave", lambda p: fwd_old(old, p, False)), ("old_wave_inplace", lambda p: fwd_old(old, p, True))]
+    for name, _ in wave_arms:
+        r[f"{name}_ms"], r[f"{name}_min_ms"] = 0.0, 0.0
+    eq_v12f, eq_old, maxd, routes, ktot = True, True, 0.0, set(), {}
+    for wave in waves:
+        p = Prepared(wave, qt, kt, vt)
+        r["S"].append(int(p.tb.S))
+        # identity (NaN-filled buffers), then the timings
         w0 = first_index(tasks, p.tb.tasks[0])
         out, lse = fwd_v2(v2, p, False, fill=NAN)
         e, d = equal_wave_vs_tasks(p, out, lse, refs[w0:w0 + p.tb.W]); eq_v12f &= e; maxd = max(maxd, d)
@@ -196,19 +202,22 @@ def part_fwd(res, N, c, iters):
         out_o, lse_o = fwd_old(old, p, False, fill=NAN)
         eq_old &= bool(torch.equal(out_o[p.pos], out[p.pos]) and torch.equal(lse_rows(lse_o)[p.pos], lse_rows(lse)[p.pos]))
         del out, lse, out_i, lse_i, out_o, lse_o
+        routes |= {int(x) for x in v2.fwd_cqs_census(p.tb.bits, p.tb.blk_or, p.tb.blk_and, True, D, p.tb.lens, int(p.tb.S))[0].tolist()}
+        for name, fn in wave_arms:
+            ms, mn = timed(lambda: fn(p), iters)
+            r[f"{name}_ms"] += ms; r[f"{name}_min_ms"] += mn
+        for kk, vv in FA.kernel_times(lambda: fwd_v2(v2, p, False)).items():
+            if isinstance(vv, float):
+                ktot[kk] = ktot.get(kk, 0.0) + vv
+        del p
+        torch.cuda.empty_cache()
     r["v2_equal_v12f_all_tasks"], r["v2_maxdiff_vs_v12f"], r["v2_equal_old_wave"] = eq_v12f, maxd, eq_old
-    r["census_routes"] = sorted({int(x) for p in preps for x in v2.fwd_cqs_census(p.tb.bits, p.tb.blk_or, p.tb.blk_and, True, D, p.tb.lens, int(p.tb.S))[0].tolist()})
+    r["census_routes"], r["v2_wave_kernel_us"] = sorted(routes), ktot
     del refs
-    arms = [("v2_wave", lambda: [fwd_v2(v2, p, False) for p in preps]),
-            ("v2_wave_inplace", lambda: [fwd_v2(v2, p, True) for p in preps]),
-            ("old_wave", lambda: [fwd_old(old, p, False) for p in preps]),
-            ("old_wave_inplace", lambda: [fwd_old(old, p, True) for p in preps]),
-            ("v12f_loop", lambda: fwd_loop(v12f, items)),
-            ("v11_loop", lambda: fwd_loop(FA.MODS["v11"], items))]
-    for name, fn in arms:
+    for name, fn in (("v12f_loop", lambda: fwd_loop(v12f, items)), ("v11_loop", lambda: fwd_loop(FA.MODS["v11"], items))):
         r[f"{name}_ms"], r[f"{name}_min_ms"] = timed(fn, iters)
+    for name, _ in wave_arms + [("v12f_loop", None), ("v11_loop", None)]:
         print(f"[{key}] {name:18s} {r[name + '_ms']:9.2f} ms", flush=True)
-    r["v2_wave_kernel_us"] = FA.kernel_times(lambda: [fwd_v2(v2, p, False) for p in preps])
     # W=1: the smallest task alone, as a wave and as the classic call
     t0 = tasks[0]
     p1 = Prepared([t0], qt, kt, vt)
@@ -219,7 +228,7 @@ def part_fwd(res, N, c, iters):
     r["old_w1_ms"], _ = timed(lambda: fwd_old(old, p1, False), iters)
     r["v12f_w1_ms"], r["v12f_w1_min_ms"] = timed(lambda: fwd_loop(v12f, i1), iters)
     r["v2_w1_over_v12f_w1"] = r["v2_w1_ms"] / r["v12f_w1_ms"]
-    del p1, items, preps
+    del p1, items
     torch.cuda.empty_cache()
     fa = FA.fa2_arms(N, D, True, iters)
     r.update({f"monolithic_{kk}": vv for kk, vv in fa.items()})
@@ -307,15 +316,19 @@ def part_bwd(res, N, c, iters):
     q, k, v, dout = (torch.randn(1, H, N, D, device=DEV, dtype=DT) for _ in range(4))
     lse, dpsum = global_lse_dpsum(q, k, v, dout)
     qt, kt, vt, dot = (x[0].transpose(0, 1) for x in (q, k, v, dout))
-    preps = [PreparedBwd(w, qt, kt, vt, dot, lse, dpsum) for w in waves]
     items = bwd_task_inputs(tasks, q, k, v, dout, lse, dpsum)
     r = dict(gpu=GPU, part="bwd", N=N, c=c, W=len(tasks), n_waves=len(waves), wave_sizes=[len(w) for w in waves],
-             S=[int(p.tb.S) for p in preps], L_min=min(int(t.local_size) for t in tasks), L_max=max(int(t.local_size) for t in tasks),
+             S=[], L_min=min(int(t.local_size) for t in tasks), L_max=max(int(t.local_size) for t in tasks),
              causal=True, D=D, H=H)
     v2, old, v12b = NATIVE["v2"], NATIVE["old"], BA.MODS["v12b"]
     refs = bwd_loop(v12b, items, fill=NAN)
-    eq, dq_max, eq_old, old_max = True, 0.0, True, 0.0
-    for p in preps:
+    wave_arms = [("v2_bwd_wave", lambda p: bwd_v2(v2, p)), ("old_bwd_wave", lambda p: bwd_old(old, p))]
+    for name, _ in wave_arms:
+        r[f"{name}_ms"], r[f"{name}_min_ms"] = 0.0, 0.0
+    eq, dq_max, eq_old, old_max, routes = True, 0.0, True, 0.0, set()
+    for wave in waves:
+        p = PreparedBwd(wave, qt, kt, vt, dot, lse, dpsum)
+        r["S"].append(int(p.tb.S))
         w0 = first_index(tasks, p.tb.tasks[0])
         dq, dk, dv = bwd_v2(v2, p, fill=NAN)
         for w in range(p.tb.W):
@@ -329,16 +342,19 @@ def part_bwd(res, N, c, iters):
             eq_old &= bool(torch.equal(dk[sl], dko[c0:c0 + L]) and torch.equal(dv[sl], dvo[c0:c0 + L]))
             old_max = max(old_max, BA.maxdiff(dq[sl], dqo[c0:c0 + L]))
         del dq, dk, dv, dqo, dko, dvo
+        routes |= {int(x) for x in v2.bwd_cqs_census(p.tb.bits, p.tb.blk_or, p.tb.blk_and, True, D, p.tb.lens, int(p.tb.S))[0].tolist()}
+        for name, fn in wave_arms:
+            ms, mn = timed(lambda: fn(p), iters)
+            r[f"{name}_ms"] += ms; r[f"{name}_min_ms"] += mn
+        del p
+        torch.cuda.empty_cache()
     r["v2_dkdv_equal_v12b_all_tasks"], r["v2_maxdiff_dq_vs_v12b"] = eq, dq_max
     r["v2_dkdv_equal_old_wave"], r["v2_maxdiff_dq_vs_old_wave"] = eq_old, old_max
-    r["census_routes"] = sorted({int(x) for p in preps for x in v2.bwd_cqs_census(p.tb.bits, p.tb.blk_or, p.tb.blk_and, True, D, p.tb.lens, int(p.tb.S))[0].tolist()})
+    r["census_routes"] = sorted(routes)
     del refs
-    arms = [("v2_bwd_wave", lambda: [bwd_v2(v2, p) for p in preps]),
-            ("old_bwd_wave", lambda: [bwd_old(old, p) for p in preps]),
-            ("v12b_loop", lambda: bwd_loop(v12b, items)),
-            ("v11_loop", lambda: bwd_loop(BA.MODS["v11"], items))]
-    for name, fn in arms:
+    for name, fn in (("v12b_loop", lambda: bwd_loop(v12b, items)), ("v11_loop", lambda: bwd_loop(BA.MODS["v11"], items))):
         r[f"{name}_ms"], r[f"{name}_min_ms"] = timed(fn, iters)
+    for name, _ in wave_arms + [("v12b_loop", None), ("v11_loop", None)]:
         print(f"[{key}] {name:18s} {r[name + '_ms']:9.2f} ms", flush=True)
     t0 = tasks[0]
     p1 = PreparedBwd([t0], qt, kt, vt, dot, lse, dpsum)
@@ -348,7 +364,7 @@ def part_bwd(res, N, c, iters):
     r["old_bwd_w1_ms"], _ = timed(lambda: bwd_old(old, p1), iters)
     r["v12b_w1_ms"], r["v12b_w1_min_ms"] = timed(lambda: bwd_loop(v12b, i1), iters)
     r["v2_bwd_w1_over_v12b_w1"] = r["v2_bwd_w1_ms"] / r["v12b_w1_ms"]
-    del p1, preps, items
+    del p1, items
     torch.cuda.empty_cache()
     fa = BA.fa2_arms(N, D, True, iters)
     r.update({f"monolithic_{kk}": vv for kk, vv in fa.items()})

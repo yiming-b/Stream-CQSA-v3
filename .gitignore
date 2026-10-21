@@ -26,3 +26,6 @@ results/ooc_rivals/grad_ref/
 
 # U1: build logs and the nvcc -time csv of the v13 kernel builds (kernels/v13/build/ and *.so are ignored above)
 kernels/v13/logs/
+
+# kernel variant build trees (torch extension objects per kernel set)
+kernels/*/build_*/

@@ -131,6 +131,10 @@ def worker(cfg):
             return out
     out, r["fwd"] = timed(fwd, cfg["reps"], cfg["warmup"])
     if arm not in MONO:
+        # attention()'s backward-direction info carries engine / kernel / itr / c but not the subproblem
+        # count; with a pinned itr and c either engine runs exactly c**itr subproblems
+        if info.get("n_subproblems") is None:
+            info["n_subproblems"] = c ** itr
         r["info"] = info
     r["rel_out_vs_flash_attn"] = rel(out, ref_out)
     bwd = lambda: torch.autograd.grad(out, (q, k, v), dout, retain_graph=True)
@@ -183,6 +187,10 @@ def main():
                     continue
                 done_mono.add((arm, N, dtype))
             cfg = dict(arm=arm, N=N, c=c, itr=itr, dtype=dtype, reps=a.reps, warmup=a.warmup)
+            if arm.startswith("v223") and dtype == "bf16":
+                # v2.2.3 runs on the stable dev v11 module, which is a fp16-only build (the 12 known bf16 suite failures)
+                doc["rows"].append(dict(cfg, status="skipped", reason="v2.2.3's stable v11 module is fp16-only"))
+                continue
             t0 = time.time()
             r = run_worker(cfg, arm_env(arm, a.v3_root, a.v223_root, a.v13_dir), a.v3_root)
             r["wall_s"] = time.time() - t0
@@ -219,7 +227,8 @@ def report(doc, path_md):
             if r["arm"] in MONO and (c, itr) != min((k[1], k[2]) for k in keys if (k[0], k[3]) == (N, dtype)):
                 continue
             if "fwd" not in r:
-                lines.append(f"| {N} | {c} | {itr} | {dtype} | {r['arm']} | ERROR rc={r.get('rc')} | | | | | | |")
+                what = f"skipped: {r['reason']}" if r.get("status") == "skipped" else f"ERROR rc={r.get('rc')}"
+                lines.append(f"| {N} | {c} | {itr} | {dtype} | {r['arm']} | {what} | | | | | | |")
                 continue
             inf = r.get("info", {})
             eng = f"{inf.get('engine', '-')} / {inf.get('n_subproblems', '-')} / {r.get('backward_kernel', '-')}" if r["arm"] not in MONO else "monolithic"

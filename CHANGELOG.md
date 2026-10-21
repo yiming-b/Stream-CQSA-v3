@@ -1,7 +1,14 @@
 # Changelog
 
-## v2.2.3 (2026-09-23)
+## v3.0.0 (unreleased, development in Stream-CQSA-v3)
 
+* 128-aligned chunk layouts for every task (adaptive default `seg_align=None`; children built on the parent's
+  local sequence; refinement refuses parents below c*128 tokens; `max_depth_for(align, l)`): the v11 kernel
+  goes from 1.365x to 1.004x FA-2 at L~56K with no change to the kernel; outputs within rel 1e-4 of the
+  unaligned engine (`results/ultimate/layout_ab.json`, `engine_align_ab.json`, `align_census.json`).
+* Asynchronous host fold for the wave engine's host accumulator (`native_wave._HostMerge`, one worker, two
+  pinned slots, fold order = wave order so sync == async bit-identically): host-streamed wave forward 1M 9.03 s
+  vs classic 9.32 s, 2M 34.2 vs 34.6 s (A100-SXM4-80GB, `wave_merge_ab.json`, `fold_workers_ab.json`).
 * Routing by the memory model (ultimate P0.2): `CQSA_WAVE_MIN_SUBPROBLEMS` is retired. `autoconfig.plan`
   gains an engine axis (`engines=`, `allow_mono=`): the wave engine is the executor of every device-resident,
   device-accumulator call whenever its wave fits (a W=1 wave costs what a classic subproblem costs, measured
@@ -17,6 +24,19 @@
   plan and applies the device-resident preference itself; `return_info` reports `engine`, `max_wave_tokens`,
   `gather`, `n_waves`, `wave_sizes`, `wave_oom_retries`; the verbose plan/ran lines state the wave budget and
   the read mode; `max_wave_tokens=` and `gather=` are call overrides; `estimate(kernel=)`.
+* Multi-device scheduler (`stream_cqsa/scheduler.py`): per-device rates (`DeviceSpec.tile_rate`, calibrated
+  per GPU model), exact live-tile work per task, LPT + descent + child-refinement split, per-rank memory
+  budgets, deterministic across ranks; `dist_stream_cqsa_forward/backward(scheduler=, split=, reduce=
+  "allreduce"|"reduce_scatter", output="replicated"|"sharded")`; per-pair topology link classes in
+  `detect_hardware` (`results/ultimate/dist_sched.md`, 4x A100 PCIe job 14330294).
+* New A100 kernels (sources under `kernels/`, not yet wired into the package): forward v12f and backward v12b
+  = a census kernel that classifies every 128x128 tile on the device, an ALIGNED run-table kernel for tasks
+  without mixed tiles (upstream FA-2's loop, no per-tile verdicts) and v11's code as the LEGACY fallback,
+  launched on one stream without a host sync. A100-SXM4-80GB, 56K-token causal task, head dim 64: forward
+  0.77x flash_attn (2.5x below the v11 all-live tax), backward 0.78x flash_attn (2.48x faster than v11);
+  non-causal 1.46-1.75x faster than the separate v9 kernel; bit-identical to v11 (`docs/ultimate/03_kernels_report.md`).
+
+## v2.2.3 (2026-09-23)
 
 * One entry point: `stream_cqsa.attention` is documented as the function to use (README table, package
   docstring, notebooks rewritten around it with the engine layer in a separate part); it gains `bwd_itr=`;

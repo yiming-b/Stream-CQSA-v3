@@ -1,0 +1,21 @@
+// Copyright (c) 2024, Tri Dao.
+// Splitting the different head dimensions to different files to speed up compilation.
+// next/ v12b: the whole backward of a call (preprocess, census + ALIGNED backward
+// for CQS-on calls, the same loop without a run table for CQS-off calls,
+// convert_dQ); v11's dq/dk/dv kernel (LEGACY) is in flash_bwd_hdim64_bf16_legacy_sm80.cu.
+#include "namespace_config.h"
+#include "flash_bwd_aligned.h"
+
+namespace FLASH_NAMESPACE {
+
+template<>
+void run_mha_bwd_<cutlass::bfloat16_t, 64, false>(Flash_bwd_params &params, cudaStream_t stream) {
+    run_mha_bwd_hdim64<cutlass::bfloat16_t, false, BwdPart::Main>(params, stream);
+}
+
+template<>
+void run_mha_bwd_<cutlass::bfloat16_t, 64, true>(Flash_bwd_params &params, cudaStream_t stream) {
+    run_mha_bwd_hdim64<cutlass::bfloat16_t, true, BwdPart::Main>(params, stream);
+}
+
+} // namespace FLASH_NAMESPACE

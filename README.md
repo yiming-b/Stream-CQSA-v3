@@ -69,20 +69,20 @@ compiling: `CQSA_SKIP_EXT=1 pip install --no-build-isolation git+https://github.
 
 ### CUDA build (GitHub release page)
 
-The [release page](https://github.com/yiming-b/Stream-CQSA-v2/releases/tag/v2.2.2) carries, for
+The [release page](https://github.com/yiming-b/Stream-CQSA-v2/releases/tag/v2.2.3) carries, for
 every python 3.10/3.11/3.12 x torch 2.5.1/2.6.0 x CUDA 12.4 x GPU architecture (sm80 = A100 and
 other 8.x cards, sm90 = H100) cell, two wheels: `stream_cqsa` with the classic CUDA extensions and
 the companion `stream_cqsa_native` with the wave kernel. Install both; they replace the PyPI
 package with the same version plus the extensions:
 
 ```bash
-V=v2.2.2; T=1cu124torch2.6sm80; PY=cp311     # pick your torch / CUDA / GPU / python
-pip install https://github.com/yiming-b/Stream-CQSA-v2/releases/download/$V/stream_cqsa-2.2.2-$T-$PY-$PY-linux_x86_64.whl
-pip install https://github.com/yiming-b/Stream-CQSA-v2/releases/download/$V/stream_cqsa_native-2.2.2-$T-$PY-$PY-linux_x86_64.whl
+V=v2.2.3; T=1cu124torch2.6sm80; PY=cp311     # pick your torch / CUDA / GPU / python
+pip install https://github.com/yiming-b/Stream-CQSA-v2/releases/download/$V/stream_cqsa-2.2.3-$T-$PY-$PY-linux_x86_64.whl
+pip install https://github.com/yiming-b/Stream-CQSA-v2/releases/download/$V/stream_cqsa_native-2.2.3-$T-$PY-$PY-linux_x86_64.whl
 ```
 
 Also on the release page: one wheel with both extensions for torch 2.10 / CUDA 13 / python 3.11
-(`stream_cqsa-2.2.2-1cu130torch210sm8090-...whl`, sm80 + sm90), and the pure wheel and sdist that
+(`stream_cqsa-2.2.3-1cu130torch210sm8090-...whl`, sm80 + sm90), and the pure wheel and sdist that
 PyPI serves. The CUDA wheels are too large for PyPI (100 MB per file), which is why they live on
 GitHub, as PyTorch's own CUDA wheels do. They are built by `.github/workflows/wheels.yml` on every
 tag; publishing to PyPI is the `pypi` job, enabled by the repository variable `PYPI_PUBLISH=true`
@@ -227,6 +227,26 @@ one after another.
 Reproduce: `sbatch slurm/profile_sweep_<kernel>.slurm` for cuda / triton / wave_cuda / wave_triton
 (one gpu-test job each, `--constraint="sxm&gpu80"` so that all four land on the same GPU model),
 then `python benchmarks/profile_sweep.py fit --out results/profile_sweep`.
+
+## Paper re-run (A100 80GB PCIe, `results/paper_rerun/`)
+
+The paper's single-GPU experiments re-run with the v2 engine (B=1 H=8 D=64, causal, fp16 / bf16, 262K-16.8M
+tokens, automatic depth with a floor of 1, every measurement in its own process). Baselines run on
+device-resident Q/K/V; Stream-CQSA streams Q/K/V from host memory (acc=GPU / acc=CPU = where the fp32
+accumulator lives). Native CUDA kernel, fp16 (time / peak device memory; ratio = Stream-CQSA's faster arm
+over FlashAttention-2):
+
+| N | FA-2 fwd | Stream-CQSA fwd | ratio | FA-2 fwd+bwd | Stream-CQSA fwd+bwd | ratio |
+|---|---|---|---|---|---|---|
+| 1.0M | 7.7 s / 5.0 GiB | 11.2 s / 6.5 GiB | 1.45x | 24.9 s / 10.1 GiB | 52.1 s / 13.6 GiB | 2.10x |
+| 4.2M | 128.4 s / 20.1 GiB | 153.2 s / 25.9 GiB | 1.19x | 405.1 s / 40.3 GiB | 799.2 s / 46.5 GiB | 1.97x |
+| 8.4M | 534.2 s / 40.3 GiB | 595.6 s / 51.8 GiB | 1.12x | not run (> 79.3 GiB) | 3189.8 s / 44.8 GiB (acc=CPU) | only Stream-CQSA |
+| 16.8M | not run (> 79.3 GiB) | 2536.2 s / 32.0 GiB (acc=CPU) | only Stream-CQSA | not run | 14353.0 s / 38.4 GiB (acc=CPU) | only Stream-CQSA |
+
+Full tables (both dtypes, SDPA mem-efficient, accuracy against float64, the Triton kernel set as its own
+table, not-run reasons): `results/paper_rerun/tables_native.md`, `tables_triton.md`; regenerate with
+`python results/paper_rerun/make_tables.py`. The forward+backward cost (~2x) is the v11 backward kernel
+this release ships; the Triton backward is already faster (732 s at 4.2M).
 
 ## License
 

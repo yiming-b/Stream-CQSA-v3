@@ -1,6 +1,7 @@
-"""D1: the multi-device scheduler (stream_cqsa/scheduler.py) and the driver's reductions
-(stream_cqsa/distributed.py). CPU only: the scheduler is pure; the collectives run on a 2-process gloo
-group, and the full driver runs the engine's pure-torch path on CPU tensors."""
+"""D1/D2: the multi-device scheduler (stream_cqsa/scheduler.py), its cost model refitted from the 4-GPU job
+14330294 and the cost-aware split rule, and the driver's reductions (stream_cqsa/distributed.py). CPU only:
+the scheduler is pure; the collectives run on a 2-process gloo group, and the full driver runs the engine's
+pure-torch path on CPU tensors."""
 import json
 import os
 import subprocess
@@ -13,7 +14,7 @@ import torch
 from stream_cqsa import scheduler as S
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-P0 = S.CostParams(BH=1, task_s=0.0, tok_s=0.0)          # pure work: ratios are exact
+P0 = S.CostParams(BH=1, task_s=0.0)                     # pure work (device path: no per-token or per-call cost)
 
 
 def _ranks(rates, budgets=None):
@@ -57,7 +58,7 @@ def test_children_split_reaches_tolerance(rates):
 
 def test_memory_budgets_respected():
     units = S.synthetic_units([1.0] * 7, L=1000)
-    p = S.CostParams(BH=1, task_s=0.0, tok_s=0.0, base_bytes=100, depth_bytes=50, unit_bytes_per_tok=1, n_par=1)
+    p = S.CostParams(BH=1, task_s=0.0, base_bytes=100, depth_bytes=50, unit_bytes_per_tok=1, n_par=1)
     # rank 3 cannot hold a whole task (100 + 1000 > 700) but can hold children (L=428: 100 + 50 + 428)
     ranks = _ranks([1] * 4, [10_000, 10_000, 10_000, 700])
     for split in ("none", "children"):
@@ -76,7 +77,7 @@ def test_memory_budgets_respected():
 def test_memory_forces_a_split():
     """A unit no rank can hold is refined until its children fit."""
     units = S.synthetic_units([1.0] * 3, L=1000)
-    p = S.CostParams(BH=1, task_s=0.0, tok_s=0.0, unit_bytes_per_tok=1, n_par=1)
+    p = S.CostParams(BH=1, task_s=0.0, unit_bytes_per_tok=1, n_par=1)
     a = S.schedule(units, _ranks([1, 1], [600, 600]), params=p, split="children", work=S.SyntheticWork())
     assert all(u.depth == 2 for pr in a.per_rank for u in pr) and a.n_splits >= 3
 
@@ -104,11 +105,106 @@ def test_descent_beats_plain_lpt_on_unequal_tasks():
     assert best.ratio <= 1.01
 
 
-def test_equal_task_share():
-    assert S.equal_task_share(7, (1.0,) * 4, split="none") == pytest.approx(2 / 7)
-    assert S.equal_task_share(7, (1.0,) * 4) <= 1.05 / 4
-    assert S.equal_task_share(49, (1.0,) * 8, split="none") == pytest.approx(7 / 49)
-    assert S.equal_task_share(7, (1.0, 1.0, 0.67, 0.67)) <= 1.05 / 3.34
+def test_dist_local_time_pure_share():
+    """With the costs at zero the planner helper is the pure work share of the slowest rank."""
+    assert S.dist_local_time(7, (1.0,) * 4, split="none") / 7 == pytest.approx(2 / 7)
+    assert S.dist_local_time(7, (1.0,) * 4) / 7 <= 1.05 / 4
+    assert S.dist_local_time(49, (1.0,) * 8, split="none") / 49 == pytest.approx(7 / 49)
+    assert S.dist_local_time(7, (1.0, 1.0, 0.67, 0.67)) / 7 <= 1.05 / 3.34
+
+
+# ------------------------------------------------------------------ the refit (job 14330294) and the split rule -----
+
+def _job_rows():
+    path = os.path.join(ROOT, "results", "ultimate", "dist_sched_homog.json")
+    if not os.path.exists(path):
+        pytest.skip("results/ultimate/dist_sched_homog.json not present")
+    return json.load(open(path))["rows"]
+
+
+def _row_params(row: dict) -> S.CostParams:
+    """The driver's cost parameters for a measured row (the job: H=8, D=64, host-streamed forward with the
+    shared chunk pool at itr=1, device-resident backward)."""
+    if row["direction"] == "bwd":
+        paths, d = ("dev", "dev"), S.BWD_FACTOR
+    else:
+        paths, d = (("pool" if row["shared_chunks"] else "host"), "host"), 1.0
+    return S.CostParams(BH=8, d_factor=d, N=row["N"], base_depth=row["itr"],
+                        path_base=S.PATH_COSTS[paths[0]], path_deeper=S.PATH_COSTS[paths[1]])
+
+
+def test_refit_predicts_every_measured_arm_within_ten_percent():
+    """The per-rank local time of every arm of the 4-GPU job, from the units the rank ran (depth, L,
+    live tiles) and the refit constants (PATH_COSTS, the PCIe-80 rate, BWD_FACTOR): within 10% on the
+    slowest rank (the refit's own residual is 4%) and 15% on every rank (the backward's one-task rank
+    measured 5.37 and 4.83 s in its two rows)."""
+    rate = S.seed_rate("NVIDIA A100 80GB PCIe").tile_rate
+    for row in _job_rows():
+        p = _row_params(row)
+        pred = [p.load([S.Unit(d, (), i, L, t) for d, i, L, t in us], rate) for us in row["units_per_rank"]]
+        meas = row["t_local_per_rank"]
+        worst = max(range(4), key=lambda r: meas[r])
+        assert abs(pred[worst] / meas[worst] - 1) < 0.10, (row["arm"], row["N"], row["itr"], pred, meas)
+        # the loads the driver reports are these same per-rank loads
+        assert all(abs(a / b - 1) < 0.15 for a, b in zip(pred, meas)), (row["arm"], pred, meas)
+
+
+def test_load_counts_one_call_per_depth():
+    p = S.CostParams(BH=1, task_s=0.0, N=1000, base_depth=1, path_base=S.PathCost(0.0, 1e-3), path_deeper=S.PathCost(1e-3, 2e-3))
+    one = S.Unit(1, (0,), 0, 100, 1.0)
+    kid = S.Unit(2, (0, 1), 1, 50, 0.2)
+    assert p.load([one], 1.0) == pytest.approx(1.0 + 1.0)                     # tiles + the depth-1 call
+    assert p.load([one, one], 1.0) == pytest.approx(2.0 + 1.0)                # the call is paid once
+    assert p.load([one, kid], 1.0) == pytest.approx(1.0 + 1.0 + 0.2 + 0.05 + 2.0)   # + the child's tokens + its call
+    assert S.path_overhead_s([one, kid], 1000, "dev") == pytest.approx(2 * S.TASK_S)
+    assert S.path_overhead_s([one], 262144, "pool", task_s=3e-3) == pytest.approx(3e-3 + 262144 * S.PATH_COSTS["pool"].call_tok_s)
+
+
+def test_split_only_net_of_its_cost():
+    """7 equal units on 4 equal ranks: with the chunk pool's call cost and the host gather per child the
+    split's price exceeds the imbalance it removes and whole units (round-robin's partition) stand; on
+    the device path (no gather, no call cost) the split pays and the makespan drops to the ideal."""
+    units = S.synthetic_units([1.3] * 7, L=449408)
+    ranks = _ranks([1] * 4)
+    pool = S.CostParams(BH=1, N=1 << 20, path_base=S.PATH_COSTS["pool"], path_deeper=S.PATH_COSTS["host"])
+    a = S.schedule(units, ranks, params=pool, split="children", work=S.SyntheticWork())
+    rr = S.schedule(units, ranks, params=pool, mode="rr")
+    assert a.n_splits == 0 and a.canonical() == rr.canonical()
+    assert a.loads == pytest.approx(rr.loads)
+    dev = S.CostParams(BH=1, N=1 << 20)
+    b = S.schedule(units, ranks, params=dev, split="children", work=S.SyntheticWork())
+    assert b.n_splits >= 3 and b.makespan < 0.8 * a.makespan and b.ratio <= 1.05
+    # unequal ranks: whole units already balance (the half-speed rank takes one), no split either
+    c = S.schedule(units, _ranks([1, 0.573, 1, 1]), params=pool, split="children", work=S.SyntheticWork())
+    assert c.n_splits == 0 and [len(p) for p in c.per_rank] == [2, 1, 2, 2]
+
+
+def test_split_rule_reproduces_the_measured_winners():
+    """On the real 1M task lists with the driver's parameters: whole tasks (round-robin's assignment) for
+    the host-streamed forward at itr=1 on equal ranks (measured rr 3.55 s vs the split 3.95 s), the
+    children split for the device-resident backward (measured 8.53 vs 10.26 s, the assignment 6 6 6 7),
+    the balanced whole-task LPT at itr=2 (3.96 vs 4.11 s) and whole tasks 2 1 2 2 with the throttled
+    rank's measured rate (3.55 vs 5.48 s): job 14330294."""
+    from stream_cqsa.distributed import plan_distributed
+    from stream_cqsa.stable_stream import task_seg_align_for
+    N, rate = 1 << 20, S.seed_rate("NVIDIA A100 80GB PCIe").tile_rate
+    eq = [dict(rate=rate)] * 4
+    pool_align = lambda d: task_seg_align_for(128, in_place=(d == 1))   # noqa: E731
+    fwd1 = plan_distributed(N, 1, eq, split="children", seg_align_for_depth=pool_align, paths=("pool", "host"), n_par=1)
+    rr1 = plan_distributed(N, 1, eq, scheduler="rr", seg_align_for_depth=pool_align, paths=("pool", "host"), n_par=1)
+    # whole tasks, 2 2 2 1 like round-robin (the seven tasks differ by 0.05% in tiles, so LPT's tie-break puts
+    # the single task on another rank than the shard does; the makespan is the same)
+    assert fwd1.n_splits == 0 and all(u.depth == 1 for p in fwd1.per_rank for u in p)
+    assert sorted(len(p) for p in fwd1.per_rank) == [1, 2, 2, 2] and fwd1.makespan == pytest.approx(rr1.makespan, rel=1e-3)
+    bwd1 = plan_distributed(N, 1, eq, split="children", direction="bwd", paths=("dev", "dev"), n_par=1)
+    assert bwd1.n_splits == 3 and sorted(len(p) for p in bwd1.per_rank) == [6, 6, 6, 7] and bwd1.ratio <= 1.01
+    assert bwd1.makespan < 0.9 * plan_distributed(N, 1, eq, scheduler="rr", direction="bwd", paths=("dev", "dev"), n_par=1).makespan
+    fwd2 = plan_distributed(N, 2, eq, split="children", paths=("host", "host"), n_par=1)
+    rr2 = plan_distributed(N, 2, eq, scheduler="rr", paths=("host", "host"), n_par=1)
+    assert fwd2.n_splits == 0 and fwd2.ratio <= 1.01 < rr2.ratio
+    thr = [dict(rate=rate), dict(rate=0.573 * rate), dict(rate=rate), dict(rate=rate)]
+    het = plan_distributed(N, 1, thr, split="children", seg_align_for_depth=pool_align, paths=("pool", "host"), n_par=1)
+    assert het.n_splits == 0 and [len(p) for p in het.per_rank] == [2, 1, 2, 2] and het.ratio <= 1.05
 
 
 _DET_SCRIPT = r"""
@@ -116,7 +212,7 @@ import json, sys
 from stream_cqsa import scheduler as S
 from stream_cqsa.distributed import plan_distributed
 out = {}
-p0 = S.CostParams(BH=1, task_s=0.0, tok_s=0.0)
+p0 = S.CostParams(BH=1, task_s=0.0)
 for rates in ([1, 1, 1, 1], [1, 1, 0.67, 0.67], [1, 0.5, 1, 0.8, 1]):
     a = S.schedule(S.synthetic_units([1.0 + 0.01 * i for i in range(7)]), [S.RankSpec(r) for r in rates],
                    params=p0, split="children", work=S.SyntheticWork())
@@ -225,7 +321,7 @@ def test_device_rates_seeds_and_cache(tmp_path, monkeypatch):
     pcie = S.device_rate("NVIDIA A100 80GB PCIe")
     h100 = S.device_rate("NVIDIA H100 80GB HBM3")
     assert sxm.source.startswith("measured") and pcie.tile_rate < sxm.tile_rate < h100.tile_rate
-    assert "spec seed" in h100.source and "seed" in pcie.source
+    assert "spec seed" in h100.source and "14330294" in pcie.source
     assert S.device_rate("NVIDIA A100-PCIE-40GB").tile_rate < pcie.tile_rate
     S.save_device_rate(S.DeviceRate(model="NVIDIA A100 80GB PCIe", tile_rate=1.23e7, source="calibrated test"))
     assert S.device_rate("NVIDIA A100 80GB PCIe").tile_rate == 1.23e7
@@ -289,19 +385,22 @@ def _gloo_worker(rank, world, store_path, result_path):
         mine_g = gsets[:2] if rank == 0 else gsets[2:]
         cl = lambda ss: [tuple(x.clone() for x in s) for s in ss]            # noqa: E731
         gar, _ = reduce_gradients(cl(mine_g), N, B=B, H=H, D=D, dev=dev, reduce="allreduce", chunk_tokens=128)
-        grs, gst = reduce_gradients(cl(mine_g), N, B=B, H=H, D=D, dev=dev, reduce="reduce_scatter", chunk_tokens=100)
+        grs, gst = reduce_gradients(cl(mine_g), N, B=B, H=H, D=D, dev=dev, reduce="reduce_scatter", output="sharded",
+                                    chunk_tokens=100)
+        grep, _ = reduce_gradients(cl(mine_g), N, B=B, H=H, D=D, dev=dev, reduce="reduce_scatter", chunk_tokens=100)
         gref = [sum(s[i] for s in gsets) for i in range(3)]
         glo, ghi = gst["token_range"]
         res.update(g_ar_ref=max(rel(a, b) for a, b in zip(gar, gref)),
-                   g_rs_ar=max(rel(a, b[:, :, glo:ghi]) for a, b in zip(grs, gar)))
-        # the full driver on the engine's CPU path: lpt with children forced (tol=0) and rr, both reductions
+                   g_rs_ar=max(rel(a, b[:, :, glo:ghi]) for a, b in zip(grs, gar)),
+                   g_rep_ar=max(rel(a, b) for a, b in zip(grep, gar)), g_rep_shape=list(grep[0].shape))
+        # the full driver on the engine's CPU path: lpt with children forced (tol=0, min_gain=0) and rr, both reductions
         Ne = 4096
         q, k, v = (torch.randn(1, 2, Ne, 16, generator=torch.Generator().manual_seed(s)) for s in (1, 2, 3))
         ref_o, ref_i = stream_cqsa_forward(q, k, v, itr=1, causal=True, allow_escalation=False)
         for sched, red, out_mode in (("rr", "allreduce", "replicated"), ("lpt", "allreduce", "replicated"),
                                      ("lpt", "reduce_scatter", "sharded")):
             o, info = dist_stream_cqsa_forward(q, k, v, itr=1, causal=True, allow_escalation=False, scheduler=sched,
-                                               reduce=red, output=out_mode, tol=0.0, chunk_tokens=1000,
+                                               reduce=red, output=out_mode, tol=0.0, min_gain=0.0, chunk_tokens=1000,
                                                rate=1e3 if rank == 0 else 5e2)   # work >> the 3 ms per-unit overhead
             a, b = info["token_range"]
             r_o = ref_o if out_mode == "replicated" else ref_o[:, :, a:b]
@@ -324,14 +423,15 @@ def test_gloo_reductions_and_driver(tmp_path):
         assert r["ar_ref"] <= 1e-6                          # fp32 merge vs float64
         assert r["rs_ar"] <= 1e-7 and r["sh_ar"] <= 1e-7 and r["arsh_ar"] <= 1e-7 and r["none_ar"] <= 1e-7
         assert r["lse_rs_ar"] <= 1e-6 and r["lse_sh_ar"] <= 1e-6 and r["lse_ref"] <= 1e-5
-        assert r["g_ar_ref"] <= 1e-6 and r["g_rs_ar"] <= 1e-7
+        assert r["g_ar_ref"] <= 1e-6 and r["g_rs_ar"] <= 1e-7 and r["g_rep_ar"] <= 1e-7      # the default: replicated
+        assert r["g_rep_shape"] == [1, 2, 1001, 8]
     assert rs[0]["token_range"] == [0, 500] and rs[1]["token_range"] == [500, 1001]
     assert rs[0]["sh_shape"] == [1, 2, 500, 8] and rs[1]["sh_shape"] == [1, 2, 501, 8]
     for key in ("drv_rr_allreduce", "drv_lpt_allreduce", "drv_lpt_reduce_scatter"):
         a, b = rs[0][key], rs[1][key]
         assert a["digest"] == b["digest"]
         assert a["rel"] <= 1e-5 and b["rel"] <= 1e-5 and a["lse"] <= 1e-4 and b["lse"] <= 1e-4, key
-    # lpt with tol=0 on (1.0, 0.5) rates splits into children: two depths somewhere, the fast rank more work
+    # lpt with tol=0 and min_gain=0 on (1.0, 0.5) rates splits into children: two depths somewhere
     lpt = rs[0]["drv_lpt_allreduce"], rs[1]["drv_lpt_allreduce"]
     assert lpt[0]["split"] == "children"
     assert any(len(x["depths"]) > 1 or 2 in x["depths"] for x in lpt)
@@ -368,7 +468,7 @@ def _gpu_worker(rank, world, store_path, result_path):
                 ("device", dict(), tuple(t.cuda() for t in (q, k, v)))):
             one, i1 = stream_cqsa_forward(*inputs, itr=1, **kw, **extra)
             for red in ("allreduce", "reduce_scatter"):
-                o, info = dist_stream_cqsa_forward(*inputs, itr=1, **kw, **extra, scheduler="lpt", tol=0.0,
+                o, info = dist_stream_cqsa_forward(*inputs, itr=1, **kw, **extra, scheduler="lpt", tol=0.0, min_gain=0.0,
                                                    reduce=red, rate=1e3 if rank == 0 else 5e2)
                 full = o
                 if red == "reduce_scatter":           # replicated by default: the whole output on every rank
@@ -380,14 +480,14 @@ def _gpu_worker(rank, world, store_path, result_path):
         qc, kc, vc, doc = (t.cuda().contiguous() for t in (q, k, v, do))
         out1, i1 = stream_cqsa_forward(qc, kc, vc, itr=1, **kw)
         g1 = stream_cqsa_backward(qc, kc, vc, doc, out1.half(), i1["lse"], itr=1, causal=True, allow_escalation=False)
-        for red in ("allreduce", "reduce_scatter"):
+        for red, out_mode in (("allreduce", "replicated"), ("reduce_scatter", "sharded"), ("reduce_scatter", "replicated")):
             gd, binfo = dist_stream_cqsa_backward(qc, kc, vc, doc, out1.half(), i1["lse"], itr=1, causal=True,
-                                                  allow_escalation=False, scheduler="lpt", tol=0.0, reduce=red,
-                                                  rate=1e3 if rank == 0 else 5e2)
+                                                  allow_escalation=False, scheduler="lpt", tol=0.0, min_gain=0.0,
+                                                  reduce=red, output=out_mode, rate=1e3 if rank == 0 else 5e2)
             lo, hi = binfo["token_range"]
-            sl = (lambda t: t) if red == "allreduce" else (lambda t: t[:, :, lo:hi])
-            res[f"bwd_{red}"] = dict(rel=max(rel(a, sl(b)) for a, b in zip(gd, g1)), units=binfo["units_mine"],
-                                     depths=[c_["depth"] for c_ in binfo["depth_calls"]])
+            sl = (lambda t: t) if out_mode == "replicated" else (lambda t: t[:, :, lo:hi])
+            res[f"bwd_{red}_{out_mode}"] = dict(rel=max(rel(a, sl(b)) for a, b in zip(gd, g1)), units=binfo["units_mine"],
+                                                depths=[c_["depth"] for c_ in binfo["depth_calls"]])
     finally:
         dist.destroy_process_group()
     with open(result_path.replace(".json", f"_{rank}.json"), "w") as f:
@@ -406,7 +506,8 @@ def test_two_ranks_one_gpu_split_units(tmp_path):
             x = r[key]
             assert x["rel_single"] <= 2e-3, (key, x)                       # a different tile packing: fp16 P rounding
             assert x["err64"] <= 1.2 * x["err64_single"] + 1e-4, (key, x)
-        assert r["bwd_allreduce"]["rel"] <= 2e-3 and r["bwd_reduce_scatter"]["rel"] <= 2e-3, r
+        assert all(r[k]["rel"] <= 2e-3 for k in ("bwd_allreduce_replicated", "bwd_reduce_scatter_sharded",
+                                                  "bwd_reduce_scatter_replicated")), r
 
 
 # ------------------------------------------------------------------ planner (autoconfig) -----
@@ -428,18 +529,24 @@ def test_planner_device_rates_and_heterogeneous_worlds(monkeypatch, tmp_path):
     # homogeneous "same" devices share one rate
     hw4 = hardware_from_dict({f"cuda:{i}": "80GiB" for i in range(4)} | {"host": "500GiB"})
     assert len({d.tile_rate for d in hw4.devices}) == 1 and hw4.homogeneous()
-    # the multi-device time follows the driver's scheduler: splitting beats whole tasks at 7 on 4, slower
-    # ranks cost time, and whole tasks on equal ranks are the previous ceil(n/world)/n model
-    args = (1 << 22, 1, 8, 64, 1, True, "gpu", False, 1)
-    whole, split = CostModel(), CostModel(dist_split="children")
-    assert whole.dist_split == "none"                                   # until the residual is refitted
-    t1 = split.cqsa_time(*args, world=1)
-    t_rr, t_lpt = whole.cqsa_time(*args, world=4), split.cqsa_time(*args, world=4)
-    assert t_lpt < t_rr
-    comm_fixed = t_rr - t1 * (2 / 7) * whole.dist_imbalance
-    assert t_lpt - comm_fixed == pytest.approx(t1 * S.equal_task_share(7, (1.0,) * 4) * split.dist_imbalance)
-    t_het = split.cqsa_time(*args, world=4, rates=(1.0, 1.0, 0.67, 0.67))
-    assert t_lpt < t_het < whole.cqsa_time(*args, world=4, rates=(1.0, 1.0, 0.67, 0.67))
+    # the multi-device time follows the driver's scheduler with the refit costs: device-resident at 7 on 4 the
+    # split pays (no gather cost) and beats whole tasks' 2/7 share; host-streamed at itr=1 it does not (the
+    # children's gathered tokens and the second call) and the time is the whole-task one; slower ranks cost time
+    cm = CostModel()
+    assert cm.dist_split == "children"
+    dev = (1 << 22, 1, 8, 64, 1, True, "gpu", False, 1)
+    t1 = cm.cqsa_time(*dev, world=1)
+    t_whole, t4 = CostModel(dist_split="none").cqsa_time(*dev, world=4), cm.cqsa_time(*dev, world=4)
+    assert t1 / 4 < t4 < t_whole < t1 * (2 / 7) + 2.0
+    host = (1 << 22, 1, 8, 64, 1, True, "gpu", True, 1)
+    assert cm.cqsa_time(*host, world=4) == pytest.approx(CostModel(dist_split="none").cqsa_time(*host, world=4))
+    t_het = cm.cqsa_time(*dev, world=4, rates=(1.0, 1.0, 0.67, 0.67))
+    assert t4 < t_het < CostModel(dist_split="none").cqsa_time(*dev, world=4, rates=(1.0, 1.0, 0.67, 0.67))
+    # the merge: reduce_scatter with a sharded result is the cheapest, a replicated one adds the all_gather
+    m = lambda **kw: cm.dist_merge_s(1 << 20, 1, 8, 64, 4, hw4, **kw)   # noqa: E731
+    assert m(reduce="reduce_scatter", output="sharded") < m(reduce="allreduce") < m(reduce="reduce_scatter")
+    assert m(direction="bwd") == pytest.approx(3 * m())
+    assert cm.dist_merge_s(1 << 20, 1, 8, 64, 2, hw4) < m()               # a 2-ring moves half the volume
 
 
 _TOPO_PCIE4 = """\x1b[4m\tGPU0\tGPU1\tGPU2\tGPU3\tNIC0\tCPU Affinity\tNUMA Affinity\tGPU NUMA ID\x1b[0m

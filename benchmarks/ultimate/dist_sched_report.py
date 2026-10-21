@@ -53,9 +53,10 @@ def pair_summary(rows: list[dict]) -> list[str]:
 
 
 def residual_table(rows: list[dict]) -> list[str]:
-    """For the planner refit (CostModel.dist_imbalance, dist_split): the measured local share of the single-device
-    time vs the scheduler's modelled share (makespan / total predicted work; equal-rate rows only), and what the
-    distributed call spends outside the slowest rank's local phase (schedule + merge + barriers)."""
+    """The measured local share of the single-device time vs the scheduler's modelled share (makespan / total
+    predicted work; equal-rate rows only) -- the D1 residual the D2 refit removed (benchmarks/ultimate/
+    dist_cost_refit.py) -- and what the distributed call spends outside the slowest rank's local phase
+    (schedule + merge + barriers: the merge terms of CostModel.dist_merge_s)."""
     out = ["| dir | N | itr | arm | local share = max t_local / t_single | model share | residual | t_dist - max t_local s |",
            "|---|---|---|---|---|---|---|---|"]
     for r in rows:

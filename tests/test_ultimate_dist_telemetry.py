@@ -55,10 +55,14 @@ def test_arm_parsing():
     assert [a["name"] for a in arms] == ["rr/allreduce/seed", "rr/reduce_scatter/seed",
                                          "lpt/allreduce/seed", "lpt/reduce_scatter/seed"]
     assert [a["output"] for a in arms] == ["replicated", "sharded", "replicated", "sharded"]
-    arms = dt.parse_arms(["rr/allreduce", "lpt/allreduce/measured"], [], [], "seed")
-    assert [(a["scheduler"], a["rates"]) for a in arms] == [("rr", "seed"), ("lpt", "measured")]
-    with pytest.raises(ValueError):
-        dt.parse_arms(["fifo/allreduce"], [], [], "seed")
+    arms = dt.parse_arms(["rr/allreduce", "lpt/allreduce/measured", "lpt/reduce_scatter/measured/rep",
+                          "lpt/reduce_scatter/seed/shard"], [], [], "seed")
+    assert [(a["scheduler"], a["rates"]) for a in arms] == [("rr", "seed"), ("lpt", "measured"), ("lpt", "measured"), ("lpt", "seed")]
+    assert [a["output"] for a in arms] == ["replicated", "replicated", "replicated", "sharded"]
+    assert arms[2]["name"] == "lpt/reduce_scatter/measured/rep" and arms[3]["name"] == "lpt/reduce_scatter/seed"
+    for bad in ("fifo/allreduce", "lpt/reduce_scatter/seed/full"):
+        with pytest.raises(ValueError):
+            dt.parse_arms([bad], [], [], "seed")
     assert dt.parse_throttle("3:54") == (3, 54) and dt.parse_throttle(None) is None
 
 

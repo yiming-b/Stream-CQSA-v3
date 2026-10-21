@@ -12,7 +12,10 @@ associative and commutative. So:
      table (LPT on exact live-tile work, a local descent, and -- when the
      makespan is still > 5% above the ideal -- splitting the largest unit of the
      most loaded rank into its ``c`` children, which partition its pairs
-     exactly). A digest of the assignment is compared across ranks. The
+     exactly; the split is kept only when the balance it buys exceeds its own
+     launches, gathered tokens and second depth call, costs refitted from the
+     4-GPU job 14330294: equal ranks at itr=1 keep whole tasks, round-robin's
+     assignment). A digest of the assignment is compared across ranks. The
      previous round-robin shard is ``scheduler="rr"``.
   2. Each rank runs the unmodified single-device engine on its units, one call
      per depth (``task_subset``), and ends with one or two normalized partial
@@ -32,17 +35,20 @@ associative and commutative. So:
   3. The reduction is chunked over the token axis so no fp32 [B,H,N,D]
      temporary is ever whole. ``reduce="allreduce"``: one all_reduce(SUM) of the
      packed (w*out, w) per chunk; the result is written in place into the rank's
-     first partial (replicated output). ``reduce="reduce_scatter"``: rank r owns
-     tokens [r*N/world, (r+1)*N/world); per step every rank packs the weighted
-     partials of every rank's next piece, one reduce_scatter(SUM) hands each rank
-     its own piece reduced (ring volume (n-1)/n of the buffer instead of
-     2(n-1)/n), and ``output="sharded"`` returns just that token range;
-     ``output="replicated"`` all_gathers the pieces. The global lse is always
-     returned whole (32 B per token at H=8: the backward needs it on every rank).
+     first partial (replicated output). ``reduce="reduce_scatter"`` (the default:
+     its merge measured 0.64 vs 0.68 s at 2M and never slower, job 14330294):
+     rank r owns tokens [r*N/world, (r+1)*N/world); per step every rank packs the
+     weighted partials of every rank's next piece, one reduce_scatter(SUM) hands
+     each rank its own piece reduced (ring volume (n-1)/n of the buffer instead
+     of 2(n-1)/n), and ``output="sharded"`` returns just that token range;
+     ``output="replicated"`` (the default) all_gathers the pieces. The global lse
+     is always returned whole (32 B per token at H=8: the backward needs it on
+     every rank).
 
 The backward is the same shape: the same scheduler (its work is the same live
-tiles), one engine call per depth, the depth partials summed locally, then one
-chunked all_reduce(SUM) or reduce_scatter(SUM) per gradient.
+tiles, at the backward's cost per tile), one engine call per depth, the depth
+partials summed locally, then one chunked all_reduce(SUM) or reduce_scatter(SUM)
+(+ all_gather for a replicated result) per gradient.
 
 Only standard collectives, NCCL or gloo (CPU tensors run the engine's pure-torch
 path, so a gloo group exercises everything but the CUDA kernel). The result is
@@ -187,13 +193,16 @@ def _cache_put(cache: dict, key, val):
 def plan_distributed(N: int, itr: int, ranks: list, *, B: int = 1, H: int = 8, D: int = 64, itemsize: int = 2,
                      causal: bool = True, c: int = 7, interest_set=(0, 1, 3), sorted_gather: bool = True,
                      seg_align_for_depth=None, scheduler: str = "lpt", split: str = "children",
-                     direction: str = "fwd", tol: float = 0.05, max_extra_depth: int = 2,
+                     direction: str = "fwd", tol: float = 0.05, min_gain: float = 0.02, max_extra_depth: int = 2,
                      n_par: int = 2, base_bytes: int = 0, depth_bytes: int = 0,
-                     tasks=None) -> _sched.Assignment:
+                     paths: tuple[str, str] = ("dev", "dev"), tasks=None) -> _sched.Assignment:
     """
     The assignment of one call's subproblems to ``ranks`` (``scheduler.RankSpec`` or the dicts of
-    ``rank_table``). Deterministic: every rank calls this with the same arguments. ``tasks``: the
-    depth-``itr`` task list if already built (else built here with ``seg_align_for_depth(itr)``).
+    ``rank_table``). Deterministic: every rank calls this with the same arguments. ``paths``: how the
+    engine reads Q/K/V at depth ``itr`` and at the children's depths (``scheduler.PATH_COSTS`` names:
+    ``"pool"`` the shared chunk pool, ``"host"`` the host gather, ``"dev"`` device-resident), which
+    sets the per-unit and per-call costs. ``tasks``: the depth-``itr`` task list if already built (else
+    built here with ``seg_align_for_depth(itr)``).
     """
     ranks = [r if isinstance(r, _sched.RankSpec) else
              _sched.RankSpec(rate=float(r["rate"]), budget_bytes=int(r.get("budget_bytes", 0)),
@@ -201,11 +210,14 @@ def plan_distributed(N: int, itr: int, ranks: list, *, B: int = 1, H: int = 8, D
     align_of = seg_align_for_depth or (lambda d: None)
     aligns = tuple(align_of(d) for d in range(int(itr), int(itr) + max_extra_depth + 1))
     wkey = (int(N), int(c), tuple(interest_set), bool(causal), bool(sorted_gather), int(itr), aligns)
-    p = _sched.CostParams(BH=int(B * H), d_factor=_sched.head_dim_factor(D) * (3.0 if direction == "bwd" else 1.0),
-                          hd_scale=B * H * D / 512.0, base_bytes=int(base_bytes), depth_bytes=int(depth_bytes),
+    p = _sched.CostParams(BH=int(B * H),
+                          d_factor=_sched.head_dim_factor(D) * (_sched.BWD_FACTOR if direction == "bwd" else 1.0),
+                          hd_scale=B * H * D / 512.0, N=int(N), base_depth=int(itr),
+                          path_base=_sched.PATH_COSTS[paths[0]], path_deeper=_sched.PATH_COSTS[paths[1]],
+                          base_bytes=int(base_bytes), depth_bytes=int(depth_bytes),
                           unit_bytes_per_tok=int(estimate_task_bytes(1, B, H, D, itemsize)), n_par=int(n_par))
     pkey = (wkey, tuple((r.rate, r.budget_bytes) for r in ranks), scheduler, split, direction, float(tol),
-            int(max_extra_depth), repr(p))
+            float(min_gain), int(max_extra_depth), repr(p))
     hit = _PLAN_CACHE.get(pkey)
     if hit is not None:
         return hit
@@ -219,7 +231,7 @@ def plan_distributed(N: int, itr: int, ranks: list, *, B: int = 1, H: int = 8, D
         wm.base_units = wm.units_from_tasks(tasks, int(itr))
         _cache_put(_WORK_CACHE, wkey, wm)
     a = _sched.schedule(wm.base_units, ranks, params=p, mode=scheduler, split=split, work=wm, tol=tol,
-                        max_extra_depth=max_extra_depth)
+                        min_gain=min_gain, max_extra_depth=max_extra_depth)
     _cache_put(_PLAN_CACHE, pkey, a)
     return a
 
@@ -238,18 +250,24 @@ def _resolve_split(scheduler: str, split: str) -> str:
     return split
 
 
-def _assign(q, *, itr, causal, group, scheduler, split, tol, max_extra_depth, rate, budget_bytes, engine_kw,
-            direction, dev, n_tasks_hint=None):
+def _assign(q, *, itr, causal, group, scheduler, split, tol, min_gain, max_extra_depth, rate, budget_bytes, engine_kw,
+            direction, dev):
     """(assignment, rank table, digest check time) -- identical on every rank."""
     rank, world = dist.get_rank(group), dist.get_world_size(group)
     B, H, N, D = q.shape
     c = int(engine_kw.get("c", 7))
     interest_set = tuple(engine_kw.get("interest_set", (0, 1, 3)))
     sorted_gather = bool(engine_kw.get("sorted_gather", True))
+    host = _host_resident(q, engine_kw)
     if direction == "fwd":
         align_of = lambda d: _task_seg_align(engine_kw, in_place=_in_place(q, engine_kw, d))  # noqa: E731
+        # the read path of the call's own depth (the shared chunk pool is a host-streamed itr=1 feature) and
+        # of the children's depths (always gathered)
+        paths = ("pool" if host and _in_place(q, engine_kw, int(itr)) else ("host" if host else "dev"),
+                 "host" if host else "dev")
     else:
         align_of = lambda d: _task_seg_align(engine_kw, in_place=False)                     # noqa: E731
+        paths = ("host", "host") if host else ("dev", "dev")
     split = _resolve_split(scheduler, split)
     t0 = time.perf_counter()
     table = rank_table(group, rate=rate, budget_bytes=budget_bytes, dev=dev)
@@ -265,9 +283,9 @@ def _assign(q, *, itr, causal, group, scheduler, split, tol, max_extra_depth, ra
                                pin=pin, c=c, interest_set=interest_set, seg_align=align_of(int(itr)))
     a = plan_distributed(N, int(itr), table, B=B, H=H, D=D, itemsize=q.element_size(), causal=causal, c=c,
                          interest_set=interest_set, sorted_gather=sorted_gather, seg_align_for_depth=align_of,
-                         scheduler=scheduler, split=split, direction=direction, tol=tol,
+                         scheduler=scheduler, split=split, direction=direction, tol=tol, min_gain=min_gain,
                          max_extra_depth=max_extra_depth, n_par=int(mp) if mp else 2,
-                         base_bytes=base, depth_bytes=base, tasks=tasks)
+                         base_bytes=base, depth_bytes=base, paths=paths, tasks=tasks)
     digests = [None] * world
     dist.all_gather_object(digests, a.digest(), group=group)
     if len(set(digests)) != 1:
@@ -406,16 +424,19 @@ def merge_forward(partials: list, N: int, *, B: int, H: int, D: int, group=None,
 
 
 def reduce_gradients(grad_sets: list, N: int, *, B: int, H: int, D: int, group=None, dev: torch.device,
-                     reduce: str = "allreduce", chunk_tokens: int = 1 << 18,
+                     reduce: str = "allreduce", output: str = "replicated", chunk_tokens: int = 1 << 18,
                      result_device: torch.device | None = None) -> tuple[list, dict]:
     """
     Sum this rank's gradient partials ``[(dq, dk, dv), ...]`` (one set per depth call, possibly none)
     over the ranks. ``allreduce``: every rank ends with the full fp32 gradients (reduced in place into
-    its first set). ``reduce_scatter``: rank r ends with its token range ``[r*N/world, (r+1)*N/world)``
-    of each gradient (``[B,H,hi-lo,D]``, fp32).
+    its first set). ``reduce_scatter``: rank r reduces its token range ``[r*N/world, (r+1)*N/world)``
+    of each gradient and, ``output="replicated"``, all_gathers the ranges into the full gradient
+    (in place into its first set); ``output="sharded"`` returns just the range (``[B,H,hi-lo,D]``).
     """
     if reduce not in ("allreduce", "reduce_scatter"):
         raise ValueError(f"reduce must be 'allreduce' or 'reduce_scatter' (got {reduce!r})")
+    if output not in ("replicated", "sharded"):
+        raise ValueError(f"output must be 'replicated' or 'sharded' (got {output!r})")
     rank, world = dist.get_rank(group), dist.get_world_size(group)
     bnd = _bounds(N, world)
     lo, hi = bnd[rank], bnd[rank + 1]
@@ -444,7 +465,11 @@ def reduce_gradients(grad_sets: list, N: int, *, B: int, H: int, D: int, group=N
                 res[:, :, s:e, :].copy_(buf.to(res.device))
                 del buf
         else:
-            res = torch.empty((B, H, hi - lo, D), dtype=torch.float32, device=gdev)
+            if output == "replicated":
+                # in place into the first partial: step j writes every rank's piece j, which no later step reads
+                res = parts[0] if parts else torch.empty((B, H, N, D), dtype=torch.float32, device=gdev)
+            else:
+                res = torch.empty((B, H, hi - lo, D), dtype=torch.float32, device=gdev)
             lens = [bnd[r + 1] - bnd[r] for r in range(world)]
             step = max(1, chunk_tokens // world)
             for j in range(0, max(lens), step):
@@ -458,7 +483,15 @@ def reduce_gradients(grad_sets: list, N: int, *, B: int, H: int, D: int, group=N
                 dist.reduce_scatter_tensor(mine, buf.view(world * B, H, n, D), op=dist.ReduceOp.SUM, group=group)
                 n_coll += 1
                 s0, e0 = spans[rank]
-                if e0 > s0:
+                if output == "replicated":
+                    gath = torch.empty((world, B, H, n, D), dtype=torch.float32, device=dev)
+                    dist.all_gather_into_tensor(gath.view(world * B, H, n, D), mine, group=group)
+                    n_coll += 1
+                    for r, (s, e) in enumerate(spans):
+                        if e > s:
+                            res[:, :, s:e, :].copy_(gath[r, :, :, :e - s, :].to(gdev))
+                    del gath
+                elif e0 > s0:
                     res[:, :, s0 - lo:e0 - lo, :].copy_(mine[:, :, :e0 - s0, :].to(gdev))
                 del buf, mine
         outs.append(res)
@@ -473,9 +506,9 @@ def dist_stream_cqsa_forward(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *,
     itr: int, causal: bool = False, group=None,
     chunk_tokens: int = 1 << 18, output: str = "replicated",
-    scheduler: str = "lpt", split: str = "auto", reduce: str = "allreduce",
+    scheduler: str = "lpt", split: str = "auto", reduce: str = "reduce_scatter",
     rate: float | None = None, budget_bytes: int | None = None,
-    tol: float = 0.05, max_extra_depth: int = 2,
+    tol: float = 0.05, min_gain: float = 0.02, max_extra_depth: int = 2,
     **engine_kw: Any,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """
@@ -485,10 +518,13 @@ def dist_stream_cqsa_forward(
     ``(r*N//world, (r+1)*N//world)``. ``info["lse"]`` is the global [B,H,N] lse on every rank.
 
     ``scheduler``: ``"lpt"`` (cost-aware, the default) or ``"rr"`` (the previous round-robin shard).
-    ``split``: ``"auto"`` (= ``"children"`` under lpt), ``"children"``, ``"none"``. ``reduce``:
-    ``"allreduce"`` or ``"reduce_scatter"``. ``rate``: this rank's live-tile rate (tiles/s,
-    ``scheduler.calibrate_rate``), None = the GPU model's cached calibration or seed. ``budget_bytes``:
-    this rank's device budget for the call (None = 90% of free memory).
+    ``split``: ``"auto"`` (= ``"children"`` under lpt: a split is executed only where its launches,
+    gathered tokens and second depth call cost less than the imbalance they remove), ``"children"``,
+    ``"none"``; ``tol`` is the makespan excess over the ideal above which splits are tried and
+    ``min_gain`` the makespan reduction (net of the split's cost) below which they are dropped.
+    ``reduce``: ``"reduce_scatter"`` (the default) or ``"allreduce"``. ``rate``: this rank's live-tile
+    rate (tiles/s, ``scheduler.calibrate_rate``), None = the GPU model's cached calibration or seed.
+    ``budget_bytes``: this rank's device budget for the call (None = 90% of free memory).
     """
     if not (dist.is_available() and dist.is_initialized()):
         raise RuntimeError("torch.distributed must be initialised (torchrun)")
@@ -498,7 +534,7 @@ def dist_stream_cqsa_forward(
     itr = int(itr)
 
     asg, table, t_sched, n_tasks = _assign(
-        q, itr=itr, causal=causal, group=group, scheduler=scheduler, split=split, tol=tol,
+        q, itr=itr, causal=causal, group=group, scheduler=scheduler, split=split, tol=tol, min_gain=min_gain,
         max_extra_depth=max_extra_depth, rate=rate, budget_bytes=budget_bytes, engine_kw=engine_kw,
         direction="fwd", dev=dev)
     subsets = asg.subsets(rank)
@@ -544,10 +580,10 @@ def dist_stream_cqsa_backward(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     dout: torch.Tensor, out: torch.Tensor, lse: torch.Tensor, *,
     itr: int, causal: bool = False, group=None,
-    chunk_tokens: int = 1 << 18,
-    scheduler: str = "lpt", split: str = "auto", reduce: str = "allreduce",
+    chunk_tokens: int = 1 << 18, output: str = "replicated",
+    scheduler: str = "lpt", split: str = "auto", reduce: str = "reduce_scatter",
     rate: float | None = None, budget_bytes: int | None = None,
-    tol: float = 0.05, max_extra_depth: int = 2,
+    tol: float = 0.05, min_gain: float = 0.02, max_extra_depth: int = 2,
     **engine_kw: Any,
 ) -> tuple[tuple[torch.Tensor, torch.Tensor, torch.Tensor], dict[str, Any]]:
     """
@@ -557,9 +593,10 @@ def dist_stream_cqsa_backward(
     Each rank runs the unmodified single-device backward on its units (one call per depth,
     ``task_subset``) and obtains fp32 partial dq/dk/dv restricted to its pair set. The gradient of
     each token is a plain sum over the subproblems that touch it (split units: over the children,
-    whose pairs partition the parent's), so the cross-rank step is one chunked all_reduce(SUM)
-    (every rank ends with the full fp32 gradients) or reduce_scatter(SUM) (rank r ends with its token
-    range ``info["token_range"]`` of each gradient, ``[B,H,hi-lo,D]``) per gradient.
+    whose pairs partition the parent's), so the cross-rank step is one chunked all_reduce(SUM) or
+    reduce_scatter(SUM) per gradient; ``output="replicated"`` (the default) ends with the full fp32
+    gradients on every rank, ``"sharded"`` with rank r's token range ``info["token_range"]`` of each
+    (``[B,H,hi-lo,D]``).
     """
     if not (dist.is_available() and dist.is_initialized()):
         raise RuntimeError("torch.distributed must be initialised (torchrun)")
@@ -571,7 +608,7 @@ def dist_stream_cqsa_backward(
     # have no backward counterpart (the backward always gathers), so they are not passed on.
     bwd_kw = {k_: v_ for k_, v_ in engine_kw.items() if k_ not in _FORWARD_ONLY_KW}
     asg, table, t_sched, n_tasks = _assign(
-        q, itr=itr, causal=causal, group=group, scheduler=scheduler, split=split, tol=tol,
+        q, itr=itr, causal=causal, group=group, scheduler=scheduler, split=split, tol=tol, min_gain=min_gain,
         max_extra_depth=max_extra_depth, rate=rate, budget_bytes=budget_bytes, engine_kw=bwd_kw,
         direction="bwd", dev=dev)
     subsets = asg.subsets(rank)
@@ -591,7 +628,7 @@ def dist_stream_cqsa_backward(
 
     t1 = time.perf_counter()
     grads, rstats = reduce_gradients(grad_sets, N, B=B, H=H, D=D, group=group, dev=dev, reduce=reduce,
-                                     chunk_tokens=chunk_tokens, result_device=q.device)
+                                     output=output, chunk_tokens=chunk_tokens, result_device=q.device)
     del grad_sets
     _sync(dev)
     t_merge = time.perf_counter() - t1
@@ -599,7 +636,7 @@ def dist_stream_cqsa_backward(
     info = dict(rank=rank, world=world, tasks_mine=base, n_tasks=n_tasks,
                 units_mine=[[d, p] for d, ps in subsets.items() for p in ps], depth_calls=calls,
                 t_local_s=t_local, t_merge_s=t_merge, t_schedule_s=t_sched, scheduler=scheduler, split=asg.split,
-                reduce=reduce, token_range=rstats["token_range"], n_collectives=rstats["n_collectives"],
+                reduce=reduce, output=output, token_range=rstats["token_range"], n_collectives=rstats["n_collectives"],
                 predicted_local_s=asg.loads[rank], predicted_makespan_s=asg.makespan, ideal_s=asg.ideal,
                 predicted_ratio=asg.ratio, assignment=asg.summary(), rank_table=table, gpu=_gpu_name(dev))
     return (grads[0], grads[1], grads[2]), info

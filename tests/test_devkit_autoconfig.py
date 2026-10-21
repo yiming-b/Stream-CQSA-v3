@@ -20,11 +20,16 @@ def test_planner_uses_devices_when_faster(monkeypatch, tmp_path):
     # the expectations are the default cost model's: a model calibrated on this node (plan() loads it from the
     # cache) moves the 2- and 4-device verdicts, so the cache is isolated
     monkeypatch.setenv("CQSA_CACHE_DIR", str(tmp_path))
-    # 2 devices at c=7: the 4/7 shard bound plus merge does not beat one monolithic call (measured 34.6 vs 24.2 s at 2M);
-    # with the quorum-set axis a c=13/21 split (7/6, 11/10 tasks) is predicted to win -- either answer is a valid plan here
+    # 2 devices at c=7: the busiest rank's 4/7 of the itr=1 pair work (9/7 of the monolithic pairs, 78% live, at
+    # 1.4x FA-2's cost per pair) is 0.8x the monolithic time, and device-resident the D2 refit (job 14330294: four
+    # PCIe ranks ran 2M itr=1 at 3.14x one GPU, local times within 4% of the model) adds no gather cost, so the
+    # distributed call is planned (68 vs 95 s at 4M). The pre-D1 driver's host-accumulator measurement (34.6 vs
+    # 24.2 s mono at 2M, LOG.md job 13763575) is not reproduced by the model (20 s predicted) and has not been
+    # re-measured with the D1/D2 driver: a host-accumulator multi-GPU row is the open point.
     hw2 = hardware_from_dict({"cuda:0": "80GiB", "cuda:1": "80GiB", "host": "500GiB", "link_gbs": 200})
-    p2 = plan(N=4194304, hardware=hw2); assert p2.mode in ("mono", "cqsa_dist")
-    assert plan(N=4194304, hardware=hw2, quorum_sets={7: (0, 1, 3)}).mode == "mono"
+    p2 = plan(N=4194304, hardware=hw2); assert p2.mode == "cqsa_dist"
+    p7 = plan(N=4194304, hardware=hw2, quorum_sets={7: (0, 1, 3)})
+    assert p7.mode == "cqsa_dist" and p7.acc == "gpu" and not p7.stream_from_host
     # 4 devices: measured 3.2x at 4M against 1.6x cqsa overhead -> distributed wins
     hw4 = hardware_from_dict({f"cuda:{i}": "80GiB" for i in range(4)} | {"host": "500GiB", "link_gbs": 200})
     p = plan(N=4194304, hardware=hw4)

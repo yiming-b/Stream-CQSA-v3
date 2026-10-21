@@ -8,10 +8,11 @@ reduction arms, per-rank predicted vs measured times, a single-device reference 
 
 Arms. Every (N, itr, layout) row runs the single-device reference once (rank 0; the other ranks wait),
 then every arm ``scheduler x reduce`` (``--scheduler``/``--reduce``, or explicit ``--arms
-sched/reduce/rates`` triples): ``rr`` is the previous round-robin shard, ``lpt`` the cost-aware
-assignment of stream_cqsa/scheduler.py (live-tile work, LPT + descent + child-refinement split);
-``allreduce`` returns the replicated output, ``reduce_scatter`` the sharded one (each rank its token
-range; gathered to rank 0 after the timed region for the error check). ``rates``: ``seed`` = each
+sched/reduce/rates[/output]``): ``rr`` is the previous round-robin shard, ``lpt`` the cost-aware
+assignment of stream_cqsa/scheduler.py (live-tile work, LPT + descent + child-refinement split kept
+only where it pays); ``allreduce`` returns the replicated output, ``reduce_scatter`` the sharded one
+(each rank its token range; gathered to rank 0 after the timed region for the error check) unless the
+arm says ``/rep`` (the driver's default: the reduced pieces all_gathered). ``rates``: ``seed`` = each
 rank's GPU model rate (cache or seed table), ``measured`` = the per-rank ``calibrate_rate()`` taken
 at startup under whatever limits the rank runs with.
 
@@ -80,22 +81,25 @@ def layout_name(seg_align: int, shared_chunks: bool) -> str:
 
 
 def parse_arms(arms: list[str] | None, schedulers: list[str], reduces: list[str], rates: str) -> list[dict]:
-    """``sched/reduce[/rates]`` strings, or the product ``schedulers x reduces`` at ``rates``."""
+    """``sched/reduce[/rates[/rep|shard]]`` strings, or the product ``schedulers x reduces`` at ``rates``.
+    The result is replicated under allreduce and sharded under reduce_scatter unless the arm says ``rep``."""
     out = []
     if arms:
         for a in arms:
             parts = a.split("/")
-            if len(parts) not in (2, 3):
-                raise ValueError(f"arm {a!r}: expected sched/reduce[/rates]")
-            out.append(dict(scheduler=parts[0], reduce=parts[1], rates=parts[2] if len(parts) == 3 else rates))
+            if len(parts) not in (2, 3, 4):
+                raise ValueError(f"arm {a!r}: expected sched/reduce[/rates[/rep|shard]]")
+            out.append(dict(scheduler=parts[0], reduce=parts[1], rates=parts[2] if len(parts) >= 3 else rates,
+                            output=parts[3] if len(parts) == 4 else None))
     else:
-        out = [dict(scheduler=s, reduce=r, rates=rates) for s in schedulers for r in reduces]
+        out = [dict(scheduler=s, reduce=r, rates=rates, output=None) for s in schedulers for r in reduces]
     for a in out:
         if a["scheduler"] not in ("rr", "lpt") or a["reduce"] not in ("allreduce", "reduce_scatter") \
-                or a["rates"] not in ("seed", "measured"):
+                or a["rates"] not in ("seed", "measured") or a["output"] not in (None, "rep", "shard"):
             raise ValueError(f"bad arm {a}")
-        a["output"] = "sharded" if a["reduce"] == "reduce_scatter" else "replicated"
-        a["name"] = f"{a['scheduler']}/{a['reduce']}/{a['rates']}"
+        default = "sharded" if a["reduce"] == "reduce_scatter" else "replicated"
+        a["output"] = {None: default, "rep": "replicated", "shard": "sharded"}[a["output"]]
+        a["name"] = f"{a['scheduler']}/{a['reduce']}/{a['rates']}" + ("/rep" if a["output"] != default else "")
     return out
 
 
@@ -327,7 +331,7 @@ def main(argv=None):
         release_caches()          # before the warm-up: the free memory (the rank's budget) is the timed call's
         # untimed: the assignment (live-tile work model, children, the plan cache) -- a repeated call's state
         _assign(inputs[0], itr=itr, causal=True, group=None, scheduler=arm["scheduler"], split=args.split, tol=0.05,
-                max_extra_depth=2, rate=rate, budget_bytes=None,
+                min_gain=0.02, max_extra_depth=2, rate=rate, budget_bytes=None,
                 engine_kw=akw if direction == "fwd" else {k_: v_ for k_, v_ in akw.items() if k_ not in _FORWARD_ONLY_KW},
                 direction=direction, dev=_comm_device(None))
         release_caches()
@@ -344,8 +348,8 @@ def main(argv=None):
         else:
             q, k, v, do, o_ref, lse_ref = inputs
             grads, info = dist_stream_cqsa_backward(q, k, v, do, o_ref, lse_ref, itr=itr, scheduler=arm["scheduler"],
-                                                    split=args.split, reduce=arm["reduce"], rate=rate,
-                                                    chunk_tokens=args.chunk_tokens, **akw)
+                                                    split=args.split, reduce=arm["reduce"], output=arm["output"],
+                                                    rate=rate, chunk_tokens=args.chunk_tokens, **akw)
         dist.barrier(); torch.cuda.synchronize()
         t_dist = time.perf_counter() - t0
         units = info["assignment"]["units"][rank]
@@ -370,9 +374,9 @@ def main(argv=None):
             del full, out_d
         else:
             if rank == 0 and ref is not None:
-                if arm["reduce"] == "allreduce":
+                if arm["output"] == "replicated":
                     err = dict(rel_err=max(rel(a, b) for a, b in zip(grads, ref)))
-            if arm["reduce"] == "reduce_scatter" and not args.no_ref:
+            if arm["output"] == "sharded" and not args.no_ref:
                 # every rank checks its own range against rank 0's reference, broadcast per gradient
                 lo, hi = info["token_range"]
                 errs = []

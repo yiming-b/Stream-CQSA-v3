@@ -15,10 +15,13 @@ and runs every other one, so the work of a subproblem is its number of LIVE
 tiles, known exactly from the task's block summaries (the census definition of
 benchmarks/align_census.py: a tile is masked iff ``blk_and[i] & blk_and[j] !=
 0``; causal tasks count the lower triangle, diagonal included). A unit on rank r
-costs ``tiles * B * H * d_factor / rate_r + task_s + L * tok_s`` seconds: the
-rate is the device's live-tile throughput (``DeviceRate``, calibrated per GPU
-model and cached, or seeded per known model), the other two terms are the
-per-subproblem launch/merge overhead and the per-gathered-token host cost.
+costs ``tiles * B * H * d_factor / rate_r + task_s + L * tok_s`` seconds, and a
+rank pays ``N * call_tok_s`` once per depth it holds units at (one engine call
+per depth): the rate is the device's live-tile throughput (``DeviceRate``,
+calibrated per GPU model and cached, or seeded per known model); ``task_s`` is
+the per-subproblem launch; ``tok_s`` and ``call_tok_s`` depend on how the call
+reads Q/K/V (``PATH_COSTS``: the shared chunk pool, the host gather path, or
+device-resident inputs) and were fitted on the 4-GPU job 14330294.
 
 Assignment. LPT for related machines: units sorted by their cost on the slowest
 rank, each placed on the rank whose predicted finish ``load_r + cost_r(unit)``
@@ -30,7 +33,12 @@ driver checks a digest).
 Refinement. When the makespan exceeds the ideal ``sum(work)/sum(rate)`` by more
 than ``tol`` (5%), the largest splittable unit on the most loaded rank is split
 and LPT re-run; a split is kept only if it improves the load vector (sorted in descending order,
-compared lexicographically: a lower maximum, or as high a maximum on fewer ranks). Two split kinds:
+compared lexicographically: a lower maximum, or as high a maximum on fewer ranks). The loads carry
+the split's own price -- ``c - 1`` more launches, the children's gathered tokens and the second
+depth call -- so a split is kept only when the balance it buys exceeds that price: 7 equal tasks
+on 4 equal ranks stay whole at itr=1 on the host-streamed path (round-robin's assignment, which
+measured 0.90x faster than the split at 1M), while the device-resident backward (no gather cost)
+and unequal ranks still split. Two split kinds:
 
   * ``"children"`` (executable today): the unit is replaced by its ``c``
     children at the next depth -- the tasks ``refine_task`` builds, whose
@@ -60,6 +68,7 @@ import math
 import os
 import re
 import time
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from typing import Any, Callable, Iterable, Sequence
@@ -240,9 +249,10 @@ KNOWN_DEVICE_RATES: dict[str, tuple[float, str]] = {
     # v11 real pattern, L=56064 causal D64: 17.88 ms for 74,776 live tiles x 8 heads (fwd_ab.md, job 14319938)
     "a100_sxm4_80gb": (3.35e7, "measured: v11 kernel, A100-SXM4-80GB, job 14319938 (results/ultimate/fwd_ab.md)"),
     "a100_sxm4_40gb": (3.35e7, "seed: same SM count and clocks as A100-SXM4-80GB"),
-    # della-gpu-node-types: the SXM4 node is ~15% faster than the PCIe-80GB node on this workload
-    "a100_pcie_80gb": (2.9e7, "seed: A100-SXM4-80GB / 1.15 (SXM ~15% faster on this workload, memory note)"),
-    "a100_80gb_pcie": (2.9e7, "seed: A100-SXM4-80GB / 1.15 (SXM ~15% faster on this workload, memory note)"),
+    # the host-streamed rate of the 4-GPU scheduler job, fitted with the per-call and per-token overheads of
+    # PATH_COSTS over its 136 per-rank observations (benchmarks/ultimate/dist_cost_refit.py; the seed was 2.9e7)
+    "a100_pcie_80gb": (2.91e7, "measured: 4 x A100-80GB-PCIe job 14330294 refit (results/ultimate/dist_cost_refit.json)"),
+    "a100_80gb_pcie": (2.91e7, "measured: 4 x A100-80GB-PCIe job 14330294 refit (results/ultimate/dist_cost_refit.json)"),
     # pair_rate 4.98e11 vs 7.4e11 on the shared interactive node (results/costmodel_a100_pcie40_interactive.json)
     "a100_pcie_40gb": (2.25e7, "seed: shared-node calibration pair_rate ratio 4.98e11/7.4e11 x SXM4 (noisy)"),
     # H100: not reachable from this account; FA-2 (the design this kernel derives from) runs ~1.6x an A100-SXM4 on
@@ -273,11 +283,47 @@ class DeviceRate:
     model: str
     tile_rate: float               # live tiles per second (one head, D=64, fp16)
     source: str                    # "calibrated ...", "measured ...", "seed ...", "spec seed ..."
-    task_s: float = 3.0e-3         # per-subproblem launch + merge overhead (CostModel.task_overhead_s)
-    tok_s: float = 2.5e-8          # per gathered token of H*D = 512 at 8 heads (unhidden host stages)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=1)
+
+
+# ---------------------------------------------------------------------------
+# per-call and per-token costs of the three ways a call reads Q/K/V
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class PathCost:
+    """What a unit and an engine call cost beyond the kernel on one read path, at B*H*D = 512 (scaled by
+    ``CostParams.hd_scale`` for other shapes)."""
+    tok_s: float                   # per gathered token of a unit
+    call_tok_s: float              # per token of N, once per engine call (one call per depth a rank holds)
+
+
+# Fitted on the per-rank local times of the 4 x A100-80GB-PCIe scheduler job 14330294 (della-l02g13; results/
+# ultimate/dist_sched_{homog,hetero,hetero_itr2}.json: 124 (row, rank) observations plus the 12 startup
+# calibrations at N=262144) by benchmarks/ultimate/dist_cost_refit.py: rms residual 2.0%, slowest-rank residual
+# within 4% on every arm (results/ultimate/dist_cost_refit.json). The per-call term is proportional to N on both
+# host paths (a fixed per-call cost fitted to zero); the device path shows nothing beyond the launch.
+PATH_COSTS: dict[str, PathCost] = {
+    # host-streamed itr=1 call with the shared chunk pool: one H2D copy of the whole N per call (0.68 s at 1M),
+    # in-place reads per unit (per-token term fitted to zero)
+    "pool": PathCost(tok_s=0.0, call_tok_s=6.46e-7),
+    # host-streamed gather path (every unit gathers its L tokens on the host; four ranks share one host)
+    "host": PathCost(tok_s=5.24e-7, call_tok_s=1.85e-7),
+    # device-resident inputs (the job's backward rows)
+    "dev": PathCost(tok_s=0.0, call_tok_s=0.0),
+}
+TASK_S = 3.0e-3                    # per-subproblem launch (the single-device fit, held fixed in the refit)
+BWD_FACTOR = 3.64                  # backward seconds per live tile / forward (same refit; D1 assumed 3.0)
+
+
+def path_overhead_s(units: Iterable[Unit], N: int, path: str, *, hd_scale: float = 1.0,
+                    task_s: float = TASK_S) -> float:
+    """Seconds one engine call at depth ``path`` spends beyond the kernel on ``units`` (the launches, the
+    gathered tokens and the per-call term): what a calibration subtracts to recover the kernel rate."""
+    pc = PATH_COSTS[path]
+    return sum(task_s + u.L * pc.tok_s * hd_scale for u in units) + N * pc.call_tok_s * hd_scale
 
 
 def seed_rate(name: str) -> DeviceRate:
@@ -294,7 +340,7 @@ def device_rate(name: str, *, use_cache: bool = True) -> DeviceRate:
         try:
             with open(_rate_cache_path(name)) as f:
                 d = json.load(f)
-            return DeviceRate(**{k: d[k] for k in ("model", "tile_rate", "source", "task_s", "tok_s") if k in d})
+            return DeviceRate(**{k: d[k] for k in ("model", "tile_rate", "source")})
         except (OSError, ValueError, TypeError, KeyError):
             pass
     return seed_rate(name)
@@ -314,15 +360,15 @@ def calibrate_rate(device=None, *, N: int = 262144, H: int = 8, D: int = 64, c: 
     fp16: seven aligned 112K-token subproblems, ~0.5 s on an A100), best of ``reps`` after a warm-up.
     Device-resident inputs by default (the kernel's rate); ``stream_from_host=True`` measures the
     host-streamed production path (token-major host inputs, shared chunk pool, device accumulator),
-    whose effective rate also carries the host stages that do not scale with the SMs. The
-    per-subproblem overhead is subtracted with the seed's ``task_s``. Runs under whatever limits the
-    process has (a green context capping the SMs, a shared GPU), which is the point for a per-rank
-    measurement."""
+    whose effective rate also carries the host stages that do not scale with the SMs. The call's
+    overheads beyond the kernel (``path_overhead_s``: the launches and, host-streamed, the chunk pool's
+    H2D copy) are subtracted, so the rate is comparable to the seeds at any ``N``. Runs under whatever
+    limits the process has (a green context capping the SMs, a shared GPU), which is the point for a
+    per-rank measurement."""
     import torch
     from .stable_stream import build_tasks_cached, stream_cqsa_forward, task_seg_align_for
     dev = torch.device("cuda", torch.cuda.current_device()) if device is None else torch.device(device)
     name = torch.cuda.get_device_name(dev)
-    seed = seed_rate(name)
     g = torch.Generator(device="cpu").manual_seed(0)
     if stream_from_host:
         q, k, v = (torch.randn(1, N, H, D, generator=g, dtype=torch.float32).to(torch.float16).transpose(1, 2)
@@ -336,8 +382,8 @@ def calibrate_rate(device=None, *, N: int = 262144, H: int = 8, D: int = 64, c: 
     tasks = build_tasks_cached(N, 1, B=1, H=H, D=D, itemsize=2, sorted_gather=True, pin=True, c=c,
                                interest_set=tuple(kw.get("interest_set", (0, 1, 3))),
                                seg_align=task_seg_align_for(kw.get("seg_align", 128), in_place=False))
-    wm = WorkModel(N, c=c, causal=True)
-    tiles = sum(u.tiles for u in wm.units_from_tasks(tasks, 1)) * H
+    units = WorkModel(N, c=c, causal=True).units_from_tasks(tasks, 1)
+    tiles = sum(u.tiles for u in units) * H
     stream_cqsa_forward(q, k, v, **kw)
     best = float("inf")
     for _ in range(max(1, reps)):
@@ -346,11 +392,12 @@ def calibrate_rate(device=None, *, N: int = 262144, H: int = 8, D: int = 64, c: 
         stream_cqsa_forward(q, k, v, **kw)
         torch.cuda.synchronize(dev)
         best = min(best, time.perf_counter() - t0)
-    compute = max(best - len(tasks) * seed.task_s, 0.5 * best)
+    ovh = path_overhead_s(units, N, "pool" if stream_from_host else "dev", hd_scale=H * D / 512.0)
+    compute = max(best - ovh, 0.5 * best)
     r = DeviceRate(model=name, tile_rate=tiles * (D / 64.0) / compute,
                    source=(f"calibrated {time.strftime('%Y-%m-%d %H:%M')}: N={N} c={c} itr=1 D={D} "
-                           f"{'host-streamed' if stream_from_host else 'device-resident'}, {best * 1e3:.1f} ms"),
-                   task_s=seed.task_s, tok_s=seed.tok_s)
+                           f"{'host-streamed' if stream_from_host else 'device-resident'}, {best * 1e3:.1f} ms "
+                           f"less {ovh * 1e3:.0f} ms overheads"))
     del q, k, v
     if save:
         save_device_rate(r)
@@ -377,21 +424,36 @@ class RankSpec:
 @dataclass
 class CostParams:
     BH: int = 8                    # B * H
-    d_factor: float = 1.0          # head_dim_factor(D)
-    task_s: float = 3.0e-3
-    tok_s: float = 2.5e-8          # per gathered token at H*D = 512 (scaled by hd_scale)
+    d_factor: float = 1.0          # head_dim_factor(D), x BWD_FACTOR for the backward
+    task_s: float = TASK_S
     hd_scale: float = 1.0          # (B*H*D) / 512
+    N: int = 0                     # tokens of the call (the per-call term of a depth)
+    base_depth: int = 1            # the call's own depth; units deeper than it are split children
+    path_base: PathCost = PATH_COSTS["dev"]      # how the units of the base depth read Q/K/V
+    path_deeper: PathCost = PATH_COSTS["dev"]    # ... and the children (never the chunk pool: itr=1 only)
     # memory (bytes): the rank's fixed call footprint, one more per extra depth, per gathered token in flight
     base_bytes: int = 0
     depth_bytes: int = 0
     unit_bytes_per_tok: int = 0
     n_par: int = 1
 
+    def path(self, depth: int) -> PathCost:
+        return self.path_base if depth <= self.base_depth else self.path_deeper
+
     def cost(self, u: Unit, rate: float) -> float:
-        return u.tiles * self.BH * self.d_factor / rate + self.task_s + u.L * self.tok_s * self.hd_scale
+        return u.tiles * self.BH * self.d_factor / rate + self.task_s + u.L * self.path(u.depth).tok_s * self.hd_scale
+
+    def call_cost(self, depth: int) -> float:
+        """The engine call a rank makes for the units it holds at ``depth``, paid once per depth."""
+        return self.N * self.path(depth).call_tok_s * self.hd_scale
 
     def unit_peak(self, u: Unit) -> int:
         return int(self.n_par * self.unit_bytes_per_tok * u.L)
+
+    def load(self, units: Iterable[Unit], rate: float) -> float:
+        """A rank's predicted local time: its units plus one call per depth."""
+        units = list(units)
+        return sum(self.cost(u, rate) for u in units) + sum(self.call_cost(d) for d in {u.depth for u in units})
 
 
 @dataclass
@@ -445,10 +507,12 @@ class Assignment:
 
 
 def ideal_time(units: Sequence[Unit], ranks: Sequence[RankSpec], p: CostParams) -> float:
-    """Fluid lower bound: the pair work at the summed rate, the per-unit overheads spread over the ranks."""
+    """Fluid lower bound: the pair work at the summed rate, the per-unit overheads spread over the ranks,
+    and the one engine call every rank with work makes at the units' depth."""
     work = sum(u.tiles for u in units) * p.BH * p.d_factor
-    ovh = sum(p.task_s + u.L * p.tok_s * p.hd_scale for u in units)
-    return work / sum(r.rate for r in ranks) + ovh / len(ranks)
+    ovh = sum(p.task_s + u.L * p.path(u.depth).tok_s * p.hd_scale for u in units)
+    depth = min((u.depth for u in units), default=p.base_depth)
+    return work / sum(r.rate for r in ranks) + ovh / len(ranks) + p.call_cost(depth)
 
 
 class _Mem:
@@ -489,7 +553,8 @@ def _lpt(units: Sequence[Unit], ranks: Sequence[RankSpec], p: CostParams) -> tup
         for r, spec in enumerate(ranks):
             if not mem.fits(r, u):
                 continue
-            f = loads[r] + p.cost(u, spec.rate)
+            # a unit at a depth the rank does not hold yet brings that depth's engine call with it
+            f = loads[r] + p.cost(u, spec.rate) + (0.0 if u.depth in mem.depths[r] else p.call_cost(u.depth))
             if f < best_f:
                 best, best_f = r, f
         if best < 0:
@@ -512,26 +577,41 @@ def _improve(per: list, loads: list, ranks: Sequence[RankSpec], p: CostParams, m
     """Local descent after LPT: move one unit off the most loaded rank, or swap one of its units with
     another rank's, whenever that lowers the larger of the two loads below the current maximum. LPT
     alone is limited by its last placements (49 unequal itr=2 tasks on 4 ranks: 1.042x the ideal,
-    round-robin happened to reach 1.037x); the descent removes most of that. Deterministic."""
+    round-robin happened to reach 1.037x); the descent removes most of that. A move that empties a
+    depth on one rank or opens one on the other carries that depth's call cost. Deterministic."""
     per = [list(x) for x in per]
     loads = list(loads)
     R = len(ranks)
+    counts = [Counter(u.depth for u in us) for us in per]
+
+    def taken(r: int, u: Unit) -> float:
+        """Change of rank r's load when u leaves it (its depth's call goes with the last unit)."""
+        return -p.cost(u, ranks[r].rate) - (p.call_cost(u.depth) if counts[r][u.depth] == 1 else 0.0)
+
+    def given(r: int, u: Unit) -> float:
+        """Change of rank r's load when u joins it (a new depth brings its call)."""
+        return p.cost(u, ranks[r].rate) + (p.call_cost(u.depth) if counts[r][u.depth] == 0 else 0.0)
+
+    def swapped(r: int, u: Unit, v: Unit) -> float:
+        """Change of rank r's load when u leaves and v joins (same depth: the call stays)."""
+        if u.depth == v.depth:
+            return p.cost(v, ranks[r].rate) - p.cost(u, ranks[r].rate)
+        return taken(r, u) + given(r, v)
+
     for _ in range(max_iters):
         r = max(range(R), key=lambda i: (loads[i], -i))
         top = loads[r]
         best = None                                   # (new pair max, kind, i, s, j)
         for i, u in enumerate(per[r]):
-            cu_r = p.cost(u, ranks[r].rate)
+            r_less = top + taken(r, u)
             for s in range(R):
                 if s == r:
                     continue
-                cu_s = p.cost(u, ranks[s].rate)
-                m = max(top - cu_r, loads[s] + cu_s)
+                m = max(r_less, loads[s] + given(s, u))
                 if m < top * (1 - 1e-9) and (best is None or m < best[0]) and _set_fits(ranks[s], per[s] + [u], p):
                     best = (m, "move", i, s, -1)
                 for j, v in enumerate(per[s]):
-                    cv_r, cv_s = p.cost(v, ranks[r].rate), p.cost(v, ranks[s].rate)
-                    m = max(top - cu_r + cv_r, loads[s] - cv_s + cu_s)
+                    m = max(top + swapped(r, u, v), loads[s] + swapped(s, v, u))
                     if m < top * (1 - 1e-9) and (best is None or m < best[0]):
                         if _set_fits(ranks[s], per[s][:j] + per[s][j + 1:] + [u], p) and \
                                 _set_fits(ranks[r], per[r][:i] + per[r][i + 1:] + [v], p):
@@ -540,19 +620,23 @@ def _improve(per: list, loads: list, ranks: Sequence[RankSpec], p: CostParams, m
             break
         _, kind, i, s, j = best
         u = per[r].pop(i)
+        counts[r][u.depth] -= 1
         if kind == "swap":
             v = per[s].pop(j)
+            counts[s][v.depth] -= 1
             per[r].append(v)
+            counts[r][v.depth] += 1
         per[s].append(u)
-        loads[r] = sum(p.cost(x, ranks[r].rate) for x in per[r])
-        loads[s] = sum(p.cost(x, ranks[s].rate) for x in per[s])
+        counts[s][u.depth] += 1
+        loads[r] = p.load(per[r], ranks[r].rate)
+        loads[s] = p.load(per[s], ranks[s].rate)
     return per, loads
 
 
 def _round_robin(units: Sequence[Unit], ranks: Sequence[RankSpec], p: CostParams) -> tuple[list, list]:
     """The previous driver's shard: task-list order, unit i -> rank i % world (memory not checked)."""
     per = [list(units[r::len(ranks)]) for r in range(len(ranks))]
-    loads = [sum(p.cost(u, ranks[r].rate) for u in per[r]) for r in range(len(ranks))]
+    loads = [p.load(per[r], ranks[r].rate) for r in range(len(ranks))]
     return per, loads
 
 
@@ -571,14 +655,17 @@ def _better(a: Sequence[float], b: Sequence[float], rel: float = 1e-9) -> bool:
 def schedule(units: Sequence[Unit], ranks: Sequence[RankSpec], *, params: CostParams | None = None,
              mode: str = "lpt", split: str = "none", work: Any = None, tol: float = 0.05,
              max_extra_depth: int = 2, max_iters: int = 64, max_units: int = 4096,
-             improve: bool = True) -> Assignment:
+             improve: bool = True, min_gain: float = 0.02) -> Assignment:
     """
     Assign ``units`` to ``ranks``. ``mode``: ``"lpt"`` (cost-aware, memory-checked) or ``"rr"``
     (round-robin, the previous driver). ``split``: ``"none"``, ``"children"`` (refine the largest unit
     of the most loaded rank into its children, executable), ``"rows"`` (row spans, model only: U1).
     ``work`` provides ``children(u)``, ``refinable(u)`` and ``row_split(u)`` (a ``WorkModel`` for real
     task lists, ``SyntheticWork`` for dry runs). ``improve``: the move/swap descent after every LPT
-    placement. Deterministic: a pure function of its arguments.
+    placement. Splits are kept only when the makespan they reach -- the children's launches and
+    gathered tokens and the extra depth call included -- is below the unsplit one by more than
+    ``min_gain`` (2%: the model's own resolution, its rms residual on job 14330294). Deterministic: a
+    pure function of its arguments.
     """
     p = params or CostParams()
     ranks = list(ranks)
@@ -630,6 +717,7 @@ def schedule(units: Sequence[Unit], ranks: Sequence[RankSpec], *, params: CostPa
             notes.append(f"split depth={e.unit.depth} path_idx={e.unit.path_idx} to fit a memory budget")
     else:
         raise Infeasible("memory refinement did not converge")
+    unsplit = (cur, per, loads, n_splits)
     tried: set = set()
     it = 0
     while split != "none" and max(loads) > (1.0 + tol) * ideal and it < max_iters and len(cur) < max_units:
@@ -659,6 +747,15 @@ def schedule(units: Sequence[Unit], ranks: Sequence[RankSpec], *, params: CostPa
         if _better(loads2, loads) or not _better(loads, loads2, rel=1e-12):
             cur, per, loads = trial, per2, loads2
             n_splits += 1
+    # The steps above may lower a rank below the maximum without lowering the maximum (a split whose
+    # children land on the lightest ranks): that is a path to the splits that do, not a gain by itself,
+    # and with real costs it leaves ranks paying a second depth call for nothing. Splits are kept only
+    # when the makespan they reach is below the unsplit one by more than the model resolves: the gain
+    # net of the launches, gathered tokens and extra calls (all in the loads). Otherwise the whole
+    # units stand (7 equal tasks on 4 equal ranks at itr=1: round-robin's assignment).
+    if n_splits > unsplit[3] and not max(loads) < max(unsplit[2]) * (1.0 - min_gain):
+        cur, per, loads, n_splits = unsplit
+        notes.append(f"splits gained < {min_gain:.0%} of the makespan net of their cost; whole units kept")
     return Assignment("lpt", split, ranks, per, loads, ideal, len(units), n_splits=n_splits, tol=tol, notes=notes)
 
 
@@ -667,21 +764,25 @@ def schedule(units: Sequence[Unit], ranks: Sequence[RankSpec], *, params: CostPa
 # ---------------------------------------------------------------------------
 
 @lru_cache(maxsize=256)
-def equal_task_share(n_tasks: int, rel_rates: tuple, *, split: str = "children", c: int = 7, l: int = 3,
-                     tol: float = 0.05) -> float:
-    """Predicted makespan of ``n_tasks`` equal subproblems on ranks of relative rates ``rel_rates``
-    (1.0 = the device the single-device time describes), as a fraction of that single-device time.
-    ``split="none"`` on equal ranks is round-robin's ``ceil(n / world) / n``."""
-    units = synthetic_units([1.0] * int(n_tasks))
+def dist_local_time(n_tasks: int, rel_rates: tuple, *, unit_s: float = 1.0, L: int = 0, N: int = 0,
+                    path_base: str = "dev", path_deeper: str = "dev", task_s: float = 0.0, hd_scale: float = 1.0,
+                    split: str = "children", c: int = 7, l: int = 3, tol: float = 0.05) -> float:
+    """Predicted local time of the slowest rank when ``n_tasks`` equal subproblems of ``unit_s`` seconds
+    each (on a rank of rate 1.0) and ``L`` gathered tokens are assigned by ``schedule`` to ranks of
+    relative rates ``rel_rates``, with the per-unit and per-call costs of the read paths (``PATH_COSTS``
+    names; a child of a split reads through ``path_deeper``). With the costs at zero this is the pure
+    work share: ``split="none"`` on equal ranks gives round-robin's ``ceil(n / world) / n``."""
+    units = synthetic_units([float(unit_s)] * int(n_tasks), L=int(L))
     ranks = [RankSpec(rate=float(r)) for r in rel_rates]
-    p = CostParams(BH=1, task_s=0.0, tok_s=0.0)
+    p = CostParams(BH=1, task_s=float(task_s), hd_scale=float(hd_scale), N=int(N),
+                   path_base=PATH_COSTS[path_base], path_deeper=PATH_COSTS[path_deeper])
     a = schedule(units, ranks, params=p, mode="lpt", split=split, work=SyntheticWork(c, l), tol=tol)
-    return a.makespan / float(n_tasks)
+    return a.makespan
 
 
 __all__ = [
     "TILE", "row_live_tiles", "live_tiles", "Unit", "WorkModel", "SyntheticWork", "synthetic_units",
     "KNOWN_DEVICE_RATES", "DeviceRate", "gpu_key", "seed_rate", "device_rate", "save_device_rate", "calibrate_rate",
-    "head_dim_factor", "RankSpec", "CostParams", "Assignment", "Infeasible", "ideal_time", "schedule",
-    "equal_task_share",
+    "head_dim_factor", "PathCost", "PATH_COSTS", "TASK_S", "BWD_FACTOR", "path_overhead_s",
+    "RankSpec", "CostParams", "Assignment", "Infeasible", "ideal_time", "schedule", "dist_local_time",
 ]

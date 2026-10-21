@@ -5,7 +5,7 @@
 #SBATCH --nodes=1 --ntasks=1 --cpus-per-task=16 --mem=75G
 #SBATCH --gres=gpu:a100:4 --constraint="gpu80&pcie"
 #SBATCH --time=01:00:00
-#SBATCH --output=/scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/dist_sched_%j.out
+#SBATCH --output=/scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/ultimate/dist_sched_%j.out
 # D1: the multi-device scheduler on 4 x A100-PCIe-80GB (one node, one node type).
 #  part 1 (homogeneous): N in {1M, 2M} x itr in {1, 2}, production layouts (itr=1 aligned + shared chunk
 #    pool, itr=2 aligned gather), arms {rr, lpt} x {allreduce (replicated), reduce_scatter (sharded)},
@@ -20,7 +20,7 @@
 # reference and the backward's gradients stay on the devices. 4 ranks ~50 GiB at 2M -> 75G.
 #   SNAP=$(bash slurm/ultimate/snapshot.sh) && sbatch --export=ALL,CQSA_SRC=$SNAP slurm/ultimate/dist4_sched.slurm
 set -uo pipefail
-OUT=/scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate
+OUT=/scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3
 ROOT=${CQSA_SRC:-$OUT}
 KER=/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel
 cd "$ROOT"

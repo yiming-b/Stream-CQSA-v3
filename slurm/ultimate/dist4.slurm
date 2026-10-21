@@ -5,7 +5,7 @@
 #SBATCH --nodes=1 --ntasks=1 --cpus-per-task=16 --mem=75G
 #SBATCH --gres=gpu:a100:4 --constraint="gpu80&pcie"
 #SBATCH --time=01:30:00
-#SBATCH --output=/scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate/results/ultimate/dist_telemetry_%j.out
+#SBATCH --output=/scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/ultimate/dist_telemetry_%j.out
 # M5: multi-device telemetry baseline (4 x A100-PCIe-80GB, one node), N in {1M, 2M}, itr in {1, 2},
 # acc=gpu, chunk layouts seg_align 0 / 128 (+ aligned shared-chunk arm at itr=1), single-GPU
 # reference on rank 0 in the same job. Host memory: each rank holds fp16 Q/K/V (3 KiB/token, 6 GiB at
@@ -16,7 +16,7 @@
 set -uo pipefail
 # Code comes from a frozen snapshot (CQSA_SRC, a `git archive` of one commit) so edits to the live
 # worktree while this job waits in the queue cannot change what it runs; results go to the worktree.
-OUT=/scratch/gpfs/AKEY/yb2807/Stream-CQSA-ultimate
+OUT=/scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3
 ROOT=${CQSA_SRC:-$OUT}
 cd "$ROOT"
 echo "code: $ROOT"

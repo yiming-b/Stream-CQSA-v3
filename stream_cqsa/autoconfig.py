@@ -47,7 +47,7 @@ from typing import Any, Sequence
 import torch
 
 from .stable_stream import (estimate_monolithic_bytes, estimate_peak_bytes, estimate_peak_bytes_bwd, per_el_floor, effective_free_bytes)
-from .scheduler import device_rate, equal_task_share
+from .scheduler import device_rate, dist_local_time
 
 GIB = float(1 << 30)
 
@@ -294,16 +294,24 @@ class CostModel:
     d2h_s_per_tok: float = 0.25 / 3.1e6        # output d2h per gathered token (host accumulator)
     overlap: float = 0.85            # fraction of the host stages hidden under compute (pipelined engine, n_par=1)
     overlap_npar2: float = 0.92      # with two subproblems in flight
-    dist_merge_bytes_per_tok: int = 16 * 8 * 64  # fp32 out + weights, per token (H*D*4 + ...), all_reduce volume
-    dist_imbalance: float = 1.35     # per-rank straggling + host-stage contention (4 GPUs sharing one host; measured 62 s vs 40 s ideal at 4M)
-    dist_fixed_s: float = 0.4        # per-call cost of the collective path (barriers, NCCL warm-up, task-list build)
-    # The assignment model of the multi-device share (scheduler.equal_task_share): "none" = whole subproblems
-    # by LPT on the ranks' rates (round-robin's ceil(n/world)/n on equal ranks), "children" = the driver's
-    # default lpt + child-refinement splits. "none" until dist_imbalance is refitted: the 1.35 residual was
-    # fitted on round-robin rows, where the model was already optimistic at 2 GPUs (26.2 s predicted vs 34.6 s
-    # measured at 2M, c=7), and with the split share it would flip the measured 2-GPU verdict (monolithic wins
-    # at c=7; tests/test_devkit_autoconfig.py). The D1 job (dist_sched_*.json) is the data for the refit.
-    dist_split: str = "none"
+    # Multi-device terms, refitted from the 4 x A100-80GB-PCIe scheduler job 14330294 (one node, NCCL ring over
+    # two NV12 and two SYS hops; results/ultimate/dist_sched.md, benchmarks/ultimate/dist_cost_refit.py). The
+    # slowest rank's local time comes from the driver's own scheduler (scheduler.dist_local_time) on equal
+    # subproblems of this model's per-subproblem kernel time, with the per-unit and per-call costs of the read
+    # path fitted on that job (scheduler.PATH_COSTS: the chunk pool's H2D copy per call, the host gather per
+    # token, nothing device-resident). That model reproduces every arm's slowest rank within 4%, so the former
+    # imbalance factor (1.35, fitted on round-robin rows of the pre-D1 driver) is gone. The merge is what the
+    # distributed call spends after its slowest rank's local phase (t_dist - max t_local), per token of
+    # B*H*D = 512 and per reduced tensor (the forward's output; three gradients), at world 4:
+    dist_allreduce_tok_s: float = 0.95e-7       # fwd 1M 0.12-0.13 s, 2M 0.21-0.24 s; bwd 1M 0.27-0.28 s over 3 gradients
+    dist_reduce_scatter_tok_s: float = 0.80e-7  # sharded result: fwd 1M 0.09-0.10 s, 2M 0.17-0.20 s; bwd 0.22-0.23 s over 3
+    # a replicated result after a reduce_scatter all_gathers (W-1)/W of the fp32 tensor: seed at the allreduce's
+    # effective bandwidth (3 GiB in 0.125 s = 26 GB/s per rank), not measured in the job (the het job's rs/rep arm)
+    dist_all_gather_tok_s: float = 0.6e-7
+    dist_fixed_s: float = 0.03                  # the assignment (2 ms), barriers and collective latencies per call
+    dist_merge_world: int = 4                   # the merge constants' world: a ring moves (W-1)/W of the buffer
+    dist_merge_link_gbs: float = 25.0           # ... and link: the nominal PCIe value the measured ring's 26 GB/s matches
+    dist_split: str = "children"                # the driver's split mode (the cost-aware rule keeps whole tasks where a split does not pay)
 
     def mono_time(self, N: int, B: int, H: int, causal: bool, direction: str = "fwd") -> float:
         pairs = B * H * N * N * (0.5 if causal else 1.0)
@@ -312,11 +320,13 @@ class CostModel:
     def cqsa_time(self, N: int, B: int, H: int, D: int, itr: int, causal: bool, acc: str,
                   stream_from_host: bool, n_par: int, world: int = 1, hw: HardwareSpec | None = None,
                   c: int = 7, l: int = 3, direction: str = "fwd", engine: str = "classic",
-                  wave_tokens: int = 0, gather: bool = True, rates: Sequence[float] | None = None) -> float:
+                  wave_tokens: int = 0, gather: bool = True, rates: Sequence[float] | None = None,
+                  reduce: str = "reduce_scatter", output: str = "replicated") -> float:
         """``engine="wave"``: waves of ``wave_tokens`` packed tokens (at least one subproblem each) replace the
         per-subproblem launches; ``gather=False`` reads Q/K/V in place at ``inplace_ratio`` the kernel time.
         ``rates``: for ``world > 1``, the ranks' rates relative to the device this model describes (default
-        all 1.0); the share of the slowest rank comes from the driver's scheduler (``equal_task_share``)."""
+        all 1.0); the slowest rank's local time comes from the driver's scheduler (``dist_local_time``) and the
+        merge from ``dist_merge_s`` for ``reduce``/``output`` (the driver's defaults)."""
         L = N * (l / c) ** itr
         n_tasks = c ** itr
         tokens = n_tasks * L                       # gathered tokens over all subproblems
@@ -339,14 +349,42 @@ class CostModel:
         ov = self.overlap_npar2 if (n_par >= 2 or (engine == "wave" and acc == "cpu")) else self.overlap
         t = compute + host * (1 - ov) + max(0.0, host * ov - compute)   # hidden part cannot exceed compute
         if world > 1:
-            # the slowest rank's share of the single-device time: n equal subproblems assigned by the driver's
-            # scheduler to ranks of relative rates `rates` (1.0 = the device this model describes)
+            # the slowest rank's local time: n equal subproblems of this model's kernel time, assigned by the
+            # driver's scheduler to ranks of relative rates `rates` (1.0 = the device this model describes) with
+            # the multi-rank per-unit and per-call costs of the read path (which replace the single-device host
+            # terms above: they were fitted with four ranks sharing one host)
             rel = tuple(float(r) for r in (rates if rates is not None else (1.0,) * world))[:world]
             rel = rel + (1.0,) * (world - len(rel))
-            per_rank = equal_task_share(n_tasks, rel, split=self.dist_split, c=c, l=l)
-            comm = 2 * N * B * H * D * 4 / (max(1.0, (hw.interconnect_gbs if hw else 25.0)) * 1e9) * math.log2(world)
-            t = t * per_rank * self.dist_imbalance + comm + self.dist_fixed_s
+            bwd = self.bwd_ratio if direction == "bwd" else 1.0
+            if stream_from_host:
+                paths = ("pool" if (itr == 1 and direction == "fwd") else "host", "host")   # Plan.engine_kwargs: the pool at itr=1
+            else:
+                paths = ("dev", "dev")
+            hd = B * H * D / 512.0
+            local = dist_local_time(n_tasks, rel, unit_s=kernel * bwd / n_tasks, L=int(L), N=int(N),
+                                    path_base=paths[0], path_deeper=paths[1], task_s=self.task_overhead_s * bwd,
+                                    hd_scale=hd, split=self.dist_split, c=c, l=l)
+            if acc == "cpu":
+                # the host accumulator's stages are per gathered token of the rank's own units: the slowest
+                # rank's share of them (its share of the pure work), unhidden as on one device
+                share = dist_local_time(n_tasks, rel, split=self.dist_split, c=c, l=l) / n_tasks
+                local += (merge + d2h) * share * (1 - ov)
+            t = local + self.dist_merge_s(N, B, H, D, world, hw, direction=direction, reduce=reduce, output=output) \
+                + self.dist_fixed_s
         return t
+
+    def dist_merge_s(self, N: int, B: int, H: int, D: int, world: int, hw: HardwareSpec | None = None, *,
+                     direction: str = "fwd", reduce: str = "reduce_scatter", output: str = "replicated") -> float:
+        """The cross-rank merge on the critical path (after the slowest rank's local phase): per reduced tensor
+        and token, measured at ``dist_merge_world`` ranks and scaled by the ring volume ``(W-1)/W`` and the
+        slowest link of the ring relative to the measured one."""
+        per_tok = self.dist_reduce_scatter_tok_s if reduce == "reduce_scatter" else self.dist_allreduce_tok_s
+        if reduce == "reduce_scatter" and output == "replicated":
+            per_tok += self.dist_all_gather_tok_s
+        n_tensors = 3 if direction == "bwd" else 1
+        ring = ((world - 1) / world) / ((self.dist_merge_world - 1) / self.dist_merge_world)
+        link = self.dist_merge_link_gbs / max(1.0, hw.interconnect_gbs if hw else self.dist_merge_link_gbs)
+        return n_tensors * N * (B * H * D / 512.0) * per_tok * ring * link
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=1)

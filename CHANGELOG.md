@@ -29,6 +29,16 @@
   budgets, deterministic across ranks; `dist_stream_cqsa_forward/backward(scheduler=, split=, reduce=
   "allreduce"|"reduce_scatter", output="replicated"|"sharded")`; per-pair topology link classes in
   `detect_hardware` (`results/ultimate/dist_sched.md`, 4x A100 PCIe job 14330294).
+* Multi-device scheduler, cost-aware by default (D2): the per-rank cost model refitted from job 14330294
+  (`scheduler.PATH_COSTS`: the chunk pool's H2D copy once per engine call, the host gather per token, nothing
+  device-resident; PCIe-80 rate 2.91e7 tiles/s, backward 3.64x the forward per tile; per-rank local times within
+  4%, `benchmarks/ultimate/dist_cost_refit.py`). A split is kept only when it lowers the makespan by more than 2%
+  net of its launches, gathered tokens and second depth call: equal ranks at itr=1 keep whole tasks (round-robin's
+  assignment, measured 0.90x faster than the split), the device-resident backward and unequal ranks split.
+  Defaults `reduce="reduce_scatter"` with `output="replicated"` (the backward gains `output`); `min_gain=` next to
+  `tol=`. The planner's world>1 time is the scheduler's on the refit (`scheduler.dist_local_time`,
+  `CostModel.dist_merge_s` per reduction; the 1.35 imbalance factor retired); `calibrate_rate` subtracts the same
+  overheads. `results/ultimate/dist_sched_dryrun.md`: predicted vs measured for every arm of the job.
 * New classic CUDA module (`csrc/` = `kernels/v13`, built as `cqsa_cuda`; the development build is
   `cqsa_cuda_v13`): forward and backward each run a census kernel that classifies every tile of a call on
   the device, then an ALIGNED run-table kernel for calls without mixed tiles (upstream FA-2's loop over the

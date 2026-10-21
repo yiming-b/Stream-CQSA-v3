@@ -1,0 +1,29 @@
+{
+ "job_id": "14330294",
+ "inputs": [
+  "dist_sched_homog.json",
+  "dist_sched_hetero.json",
+  "dist_sched_hetero_itr2.json"
+ ],
+ "n_obs": 136,
+ "coefficients": {
+  "task_s": 0.003,
+  "call_s": 0.0,
+  "call_tok_s_dev": 0.0,
+  "call_tok_s_host": 1.8467160551158092e-07,
+  "call_tok_s_pool": 6.462775855969811e-07,
+  "inv_rate": 3.4337598076447976e-08,
+  "inv_rate_bwd": 1.2504360172148882e-07,
+  "inv_rate_throttled": 5.989713843870092e-08,
+  "tok_s_dev": 0.0,
+  "tok_s_host": 5.242699586889942e-07,
+  "tok_s_pool": 0.0
+ },
+ "tile_rate": 29122596.1051101,
+ "bwd_factor": 3.6415943084631692,
+ "residual": {
+  "mean": -0.0003486941735248398,
+  "rms": 0.020447047515944002,
+  "max_abs": 0.10698414147422608
+ }
+}

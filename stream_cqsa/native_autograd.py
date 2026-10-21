@@ -62,6 +62,12 @@ class _StreamCQSANative(torch.autograd.Function):
             accumulate_on_gpu=bool(accumulate_on_gpu),
             c=int(c), interest_set=tuple(interest_set),
             stream_from_host=bool(stream_from_host),
+            # Leave the fp32 result where the accumulator lives. The default moved a
+            # host accumulator's output to the device (N*H*D*4 B: 8 GiB at 4M tokens)
+            # and the cast below then made a second fp32 copy there -- the CUDA OOM of
+            # the 10 GiB / 4M backward in the OOC-rivals study. The backward places
+            # every saved operand itself.
+            out_device="acc",
         )
         lse = info["lse"]
 
@@ -90,7 +96,9 @@ class _StreamCQSANative(torch.autograd.Function):
         # autograd op whose output device depends on a scheduling decision is
         # not composable, and the caller's grad_output would arrive on the wrong
         # device.
-        return out32.to(device=q.device, dtype=q.dtype)
+        # Cast where the result sits, then move the half-size tensor: the fp32 copy
+        # never has to fit on the device next to what the caller keeps there.
+        return out32.to(dtype=q.dtype).to(device=q.device)
 
     @staticmethod
     def backward(ctx, dout):

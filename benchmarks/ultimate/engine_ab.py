@@ -13,13 +13,18 @@ Arms (every (arm, row) runs in its own subprocess with its own PYTHONPATH / envi
                 runs the old cqsa_native module -- package U2 ports the census + ALIGNED design into it)
   flash_attn    monolithic flash_attn_func / torch.autograd.grad
   sdpa_flash    monolithic torch SDPA with the FLASH_ATTENTION backend
-Rows: (N, c, itr, dtype) = (131072, 7, 1, fp16), (131072, 73, 1, fp16), (1048576, 7, 1, fp16), (1048576, 7, 2, fp16),
-(131072, 7, 1, bf16); B=1, H=8, D=64, causal; the monolithic arms run once per (N, dtype).
-Per row: forward (1 warm-up + `--reps` timed, wall clock around the call + synchronize, median and min) and
+Rows (N, c, itr, dtype), in the order they run -- the acceptance rows first, the 1M itr=2 row last:
+(1048576, 7, 1, fp16), (131072, 7, 1, fp16), (131072, 73, 1, fp16), (131072, 7, 1, bf16), (1048576, 7, 2, fp16);
+B=1, H=8, D=64, causal; the monolithic arms run once per (N, dtype).
+Per row: forward (`--warmup` + `--reps` timed, wall clock around the call + synchronize, median and min) and
 backward (torch.autograd.grad on the retained graph, same protocol), peak device memory, the engine's info
-(engine, subproblem count, backward kernel), GPU name; every worker also runs the monolithic flash_attn call on
-the same seeded inputs and records the norm-relative error of its output and gradients against it (a sanity check
-next to the bit-level identity of tests/test_v13.py).
+(engine, subproblem count, backward kernel), GPU name; the rows with itr=1 also run the monolithic flash_attn call
+on the same seeded inputs in every worker and record the norm-relative error of the output and gradients against
+it (a sanity check next to the bit-level identity of tests/test_v13.py; the itr=2 row reuses the itr=1 inputs and
+skips it to save its GPU time).
+`--budget-s`: a wall-clock budget for the whole run (the combined gpu-test job gives this part ~25 min): before each
+worker the driver adds the longest wall time seen for the same N and skips the worker (status "skipped") when that
+would exceed the budget, so a slow node cuts the last rows instead of the job.
 Design acceptance (docs/ultimate/01_design_a100.md P2.1 / P3.x rows): engine backward 1M itr=1 <= 24 s
 (v2.2.x: 39.1 s CUDA / 29.0 s Triton); forward 1M c=7 device-resident <= 1.17x monolithic flash_attn.
 
@@ -30,9 +35,10 @@ Design acceptance (docs/ultimate/01_design_a100.md P2.1 / P3.x rows): engine bac
 import argparse, gc, json, os, socket, statistics, subprocess, sys, time
 
 B, H, D = 1, 8, 64
-ROWS = ((131072, 7, 1, "fp16"), (131072, 73, 1, "fp16"), (1 << 20, 7, 1, "fp16"), (1 << 20, 7, 2, "fp16"), (131072, 7, 1, "bf16"))
+ROWS = ((1 << 20, 7, 1, "fp16"), (131072, 7, 1, "fp16"), (131072, 73, 1, "fp16"), (131072, 7, 1, "bf16"), (1 << 20, 7, 2, "fp16"))
 SMOKE_ROWS = ((16384, 7, 1, "fp16"), (16384, 7, 2, "fp16"), (16384, 7, 1, "bf16"))
-ARMS = ("v223_cuda", "v223_triton", "v3_cuda", "v3_auto", "flash_attn", "sdpa_flash")
+# the key comparison (v3 + v13 vs monolithic flash_attn) first within a row, so a budget cut keeps it
+ARMS = ("v3_cuda", "flash_attn", "v223_cuda", "v223_triton", "v3_auto", "sdpa_flash")
 MONO = ("flash_attn", "sdpa_flash")
 KER = "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel"
 NATIVE = "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/native"
@@ -97,14 +103,16 @@ def worker(cfg):
     dout = torch.randn(B, H, N, D, device="cuda", dtype=dt, generator=g)
     r = dict(cfg, **gpu_info())
 
-    # the monolithic flash_attn reference on the same inputs (fp16/bf16 output and gradients)
+    # the monolithic flash_attn reference on the same inputs (fp16/bf16 output and gradients); itr=1 rows only
     from flash_attn import flash_attn_func
-    qf, kf, vf = (t.detach().transpose(1, 2).contiguous().requires_grad_(True) for t in (q, k, v))
-    of = flash_attn_func(qf, kf, vf, causal=True, softmax_scale=D ** -0.5)
-    gf = torch.autograd.grad(of, (qf, kf, vf), dout.transpose(1, 2).contiguous())
-    ref_out, ref_g = of.transpose(1, 2), [x.transpose(1, 2) for x in gf]
-    del qf, kf, vf, of, gf
-    torch.cuda.synchronize(); torch.cuda.empty_cache()
+    ref_out = ref_g = None
+    if itr == 1:
+        qf, kf, vf = (t.detach().transpose(1, 2).contiguous().requires_grad_(True) for t in (q, k, v))
+        of = flash_attn_func(qf, kf, vf, causal=True, softmax_scale=D ** -0.5)
+        gf = torch.autograd.grad(of, (qf, kf, vf), dout.transpose(1, 2).contiguous())
+        ref_out, ref_g = of.transpose(1, 2), [x.transpose(1, 2) for x in gf]
+        del qf, kf, vf, of, gf
+        torch.cuda.synchronize(); torch.cuda.empty_cache()
 
     if arm == "flash_attn":
         fwd = lambda: flash_attn_func(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), causal=True, softmax_scale=D ** -0.5).transpose(1, 2)
@@ -136,10 +144,10 @@ def worker(cfg):
         if info.get("n_subproblems") is None:
             info["n_subproblems"] = c ** itr
         r["info"] = info
-    r["rel_out_vs_flash_attn"] = rel(out, ref_out)
+    r["rel_out_vs_flash_attn"] = rel(out, ref_out) if ref_out is not None else None
     bwd = lambda: torch.autograd.grad(out, (q, k, v), dout, retain_graph=True)
     grads, r["bwd"] = timed(bwd, cfg["reps"], cfg["warmup"])
-    r["rel_grads_vs_flash_attn"] = [rel(a, b) for a, b in zip(grads, ref_g)]
+    r["rel_grads_vs_flash_attn"] = [rel(a, b) for a, b in zip(grads, ref_g)] if ref_g is not None else None
     r["inputs_gib"] = 3 * q.numel() * q.element_size() / 2**30
     return r
 
@@ -158,8 +166,9 @@ def main():
     ap.add_argument("mode", choices=["run", "worker", "report"])
     ap.add_argument("cfg", nargs="?")
     ap.add_argument("--out", default=OUT_DEFAULT)
-    ap.add_argument("--reps", type=int, default=3)
+    ap.add_argument("--reps", type=int, default=2)
     ap.add_argument("--warmup", type=int, default=1)
+    ap.add_argument("--budget-s", type=float, default=0, help="wall-clock budget for the run; 0 = none")
     ap.add_argument("--smoke", action="store_true", help="small rows on a shared GPU (plumbing + correctness only)")
     ap.add_argument("--arms", default=",".join(ARMS))
     ap.add_argument("--v3-root", default=os.environ.get("CQSA_SRC", "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3"))
@@ -180,6 +189,7 @@ def main():
                rows=[])
     print(doc["info"], flush=True)
     done_mono = set()
+    t_start = time.time()
     for N, c, itr, dtype in rows:
         for arm in arms:
             if arm in MONO:
@@ -191,15 +201,23 @@ def main():
                 # v2.2.3 runs on the stable dev v11 module, which is a fp16-only build (the 12 known bf16 suite failures)
                 doc["rows"].append(dict(cfg, status="skipped", reason="v2.2.3's stable v11 module is fp16-only"))
                 continue
+            elapsed = time.time() - t_start
+            est = max((r["wall_s"] for r in doc["rows"] if r["N"] == N and "wall_s" in r), default=0.0)
+            if a.budget_s and elapsed + est > a.budget_s:
+                doc["rows"].append(dict(cfg, status="skipped", reason=f"budget: {elapsed:.0f} s elapsed + {est:.0f} s estimated > {a.budget_s:.0f} s"))
+                print(f"N={N:8d} c={c:3d} itr={itr} {dtype} {arm:12s}: skipped ({doc['rows'][-1]['reason']})", flush=True)
+                json.dump(doc, open(a.out, "w"), indent=1)
+                continue
             t0 = time.time()
             r = run_worker(cfg, arm_env(arm, a.v3_root, a.v223_root, a.v13_dir), a.v3_root)
             r["wall_s"] = time.time() - t0
             doc["rows"].append(r)
             json.dump(doc, open(a.out, "w"), indent=1)
             if "fwd" in r:
+                rel_s = (f"rel out {r['rel_out_vs_flash_attn']:.1e} grads {max(r['rel_grads_vs_flash_attn']):.1e}"
+                         if r.get("rel_out_vs_flash_attn") is not None else "rel -")
                 print(f"N={N:8d} c={c:3d} itr={itr} {dtype} {arm:12s}: fwd {r['fwd']['median_s'] * 1e3:9.1f} ms  bwd "
-                      f"{r['bwd']['median_s'] * 1e3:9.1f} ms  peak {r['fwd']['peak_gib']:.1f}/{r['bwd']['peak_gib']:.1f} GiB  "
-                      f"rel out {r['rel_out_vs_flash_attn']:.1e} grads {max(r['rel_grads_vs_flash_attn']):.1e}  "
+                      f"{r['bwd']['median_s'] * 1e3:9.1f} ms  peak {r['fwd']['peak_gib']:.1f}/{r['bwd']['peak_gib']:.1f} GiB  {rel_s}  "
                       f"engine={r.get('info', {}).get('engine')} n_sub={r.get('info', {}).get('n_subproblems')} "
                       f"bwd_kernel={r.get('backward_kernel')}  ({r['wall_s']:.0f} s)", flush=True)
             else:
@@ -234,9 +252,10 @@ def report(doc, path_md):
             eng = f"{inf.get('engine', '-')} / {inf.get('n_subproblems', '-')} / {r.get('backward_kernel', '-')}" if r["arm"] not in MONO else "monolithic"
             f_ratio = f"{r['fwd']['median_s'] / fa['fwd']['median_s']:.3f}" if fa else "-"
             b_ratio = f"{r['bwd']['median_s'] / fa['bwd']['median_s']:.3f}" if fa else "-"
+            rel_s = (f"{r['rel_out_vs_flash_attn']:.1e} / {max(r['rel_grads_vs_flash_attn']):.1e}"
+                     if r.get("rel_out_vs_flash_attn") is not None else "- (itr=2: not re-checked)")
             lines.append(f"| {N} | {c} | {itr} | {dtype} | {r['arm']} | {eng} | {r['fwd']['median_s'] * 1e3:.1f} | {r['bwd']['median_s'] * 1e3:.1f} | "
-                         f"{r['fwd']['peak_gib']:.1f} / {r['bwd']['peak_gib']:.1f} | {r['rel_out_vs_flash_attn']:.1e} / "
-                         f"{max(r['rel_grads_vs_flash_attn']):.1e} | {f_ratio} | {b_ratio} |")
+                         f"{r['fwd']['peak_gib']:.1f} / {r['bwd']['peak_gib']:.1f} | {rel_s} | {f_ratio} | {b_ratio} |")
     lines.append("")
     # design acceptance rows
     def get(arm, N, c, itr, dtype="fp16"):

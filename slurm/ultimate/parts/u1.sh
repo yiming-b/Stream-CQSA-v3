@@ -1,26 +1,26 @@
 #!/bin/bash
-# U1 part of the combined ultimate job (one A100-SXM4-80GB): the v13 classic module's acceptance.
-#   step 1  the full pytest suite on cqsa_cuda_v13 (CQSA_CUDA_MODULE=cqsa_cuda_v13: one module for both causal
-#           modes, CUDA backward by default); the 12 bf16 cases that failed on the fp16-only dev v11 module
-#           (test_backward_default / test_bf16 / test_bwd_host_stream, dtype1) must pass on the `common` build.
-#           Expected ~25-35 min of GPU time (the vis1 subset of 400 tests took 447 s under load; the full suite
-#           adds the v11x / v12f / v12b / v13 kernel tests and the wave tests); host memory 48G (the suite holds
-#           several host tensors and forks workers; 24G was OOM-killed in job 14231448).
-#   step 2  benchmarks/ultimate/engine_ab.py: engine-level attention() forward + backward, device-resident
-#           inputs, acc=GPU: v2.2.3 (classic engine, CUDA and Triton backward) vs v3 + v13 (kernel="cuda" and
-#           "auto") vs monolithic flash_attn / SDPA-flash at N=131072 (c=7, 73), 1048576 (c=7, itr 1 and 2) and
-#           a bf16 row at 131K; medians of 3 after 1 warm-up. Expected ~25-35 min of GPU time (the 1M backward
-#           rows: ~20-40 s per run x 4 runs x 4 engine arms x 2 rows, plus the flash_attn reference in every
-#           worker); host memory <= 24G (everything lives on the device; the host holds the pinned task lists,
-#           a few hundred MiB at 1M, and the interpreter: engine_align_ab's 1M job ran within 24G).
+# U1 part of the combined ultimate job (one A100-SXM4-80GB, gpu-test: the whole job must fit in 59 min, this part
+# gets ~25 min of it): the v13 classic module's engine-level acceptance.
+#   step 2  benchmarks/ultimate/engine_ab.py: engine-level attention() forward + backward, device-resident inputs,
+#           acc=GPU: v3 + v13 (kernel="cuda" and "auto") vs v2.2.3 (classic engine, CUDA and Triton backward) vs
+#           monolithic flash_attn / SDPA-flash at N=1048576 c=7 itr=1 (the acceptance row, first), 131072 (c=7, 73,
+#           and a bf16 row), 1048576 c=7 itr=2 (last); 2 timed runs after 1 warm-up. Expected <= 25 min of GPU
+#           time: the driver carries a wall-clock budget (U1_BUDGET_S, default 1500 s) and skips the workers that
+#           would exceed it (estimate = the longest worker seen at that N), so the 1M itr=2 row is what a slow node
+#           loses. Host memory <= 24G (everything lives on the device; the host holds the pinned task lists, a few
+#           hundred MiB at 1M, and the interpreter: engine_align_ab's 1M job ran within 24G).
+#   step 1  (OFF by default; U1_RUN_SUITE=1 enables it) the full pytest suite on cqsa_cuda_v13 -- run on vis1 by the
+#           package instead (correctness only; results in docs/ultimate/progress/U1.md). If enabled: ~25-35 min of
+#           GPU time, host 48G (the suite holds several host tensors and forks workers; 24G was OOM-killed in job
+#           14231448).
 # Environment (set by the combined job):
 #   CQSA_SRC          the frozen code root (git archive of one Stream-CQSA-v3 commit; slurm/ultimate/snapshot.sh)
 #   CQSA_V13_SO       the directory holding the frozen cqsa_cuda_v13 .so (next/kernel/v13/frozen/<tag>)
 #   CQSA_SRC_RESULTS  the live repo's results/ultimate/ (default: Stream-CQSA-v3/results/ultimate)
-# Outputs in $CQSA_SRC_RESULTS: u1_test_suite_<job>.out (the pytest log), engine_ab.json + engine_ab.md (+ the
-# job's stdout). Each step runs under `set +e`; its exit code is printed and the next step runs regardless.
-# Knobs: U1_PYTEST_ARGS (extra pytest arguments, e.g. `-k test_v13` for a smoke), ENGINE_AB_ARGS (e.g. `--smoke`
-# on a shared GPU: small rows, plumbing only), ENGINE_AB_NAME (result file stem, default engine_ab).
+# Outputs in $CQSA_SRC_RESULTS: engine_ab.json + engine_ab.md (and u1_test_suite_<job>.out when the suite runs).
+# Each step runs under `set +e`; its exit code is printed and the next step runs regardless.
+# Knobs: U1_RUN_SUITE=1, U1_PYTEST_ARGS (extra pytest arguments), U1_BUDGET_S (engine_ab wall-clock budget, s),
+# ENGINE_AB_ARGS (e.g. `--smoke` on a shared GPU: small rows, plumbing only), ENGINE_AB_NAME (result stem).
 set +e
 set -u
 ROOT=${CQSA_SRC:?set CQSA_SRC to the frozen code root}
@@ -43,7 +43,9 @@ export CQSA_CPU_THREADS=${CQSA_CPU_THREADS:-4} OMP_NUM_THREADS=${OMP_NUM_THREADS
 unset CQSA_CUDA_MODULE CQSA_CUDA_MODULE_NONCAUSAL CQSA_BACKWARD CQSA_FORWARD
 which python
 
-# ---------------------------------------------------------------- step 1: the full suite on v13
+# ---------------------------------------------------------------- step 1: the full suite on v13 (opt-in)
+RC1=skipped
+if [ "${U1_RUN_SUITE:-0}" = 1 ]; then
 echo "== U1 step 1: pytest suite on cqsa_cuda_v13  $(date +%T)"
 SUITE_OUT=$RES/u1_test_suite_$JOB.out
 (
@@ -57,6 +59,9 @@ SUITE_OUT=$RES/u1_test_suite_$JOB.out
 RC1=$?
 echo "U1 step 1 (suite) rc=$RC1  $(date +%T)  log $SUITE_OUT"
 tail -3 "$SUITE_OUT"; grep -c "^FAILED" "$SUITE_OUT" | sed 's/^/failed tests: /'
+else
+echo "== U1 step 1 (suite) skipped: run on vis1 by the package (U1_RUN_SUITE=1 enables it here)"
+fi
 
 # ---------------------------------------------------------------- step 2: engine-level A/B
 echo "== U1 step 2: engine_ab  $(date +%T)"
@@ -67,7 +72,7 @@ PYTHONPATH=$V223_DIR:$KER/stable:${PYTHONPATH:-} CQSA_CUDA_MODULE=cqsa_cuda_next
   python -P -c "import stream_cqsa, stream_cqsa.interface as I; print('v2.2.3 arm:', stream_cqsa.__file__, stream_cqsa.__version__, I.cqsa_cuda.__file__)"
 export CQSA_SRC=$ROOT V223_DIR V13_DIR=$V13
 AB=${ENGINE_AB_NAME:-engine_ab}
-python -P -u "$ROOT/benchmarks/ultimate/engine_ab.py" run --out "$RES/$AB.json" --reps 3 --warmup 1 ${ENGINE_AB_ARGS:-}
+python -P -u "$ROOT/benchmarks/ultimate/engine_ab.py" run --out "$RES/$AB.json" --reps 2 --warmup 1 --budget-s "${U1_BUDGET_S:-1500}" ${ENGINE_AB_ARGS:-}
 RC2=$?
 echo "U1 step 2 (engine_ab) rc=$RC2  $(date +%T)  results $RES/$AB.json / $AB.md"
 

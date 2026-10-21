@@ -570,7 +570,10 @@ def main():
             print(f"!! {part.__name__}{args} failed: {type(e).__name__}: {e}", flush=True)
             traceback.print_exc()
         res["kernel_names"] = FA._KERNEL_NAMES
+        res["elapsed_s"] = time.time() - t0
         json.dump(res, open(a.out, "w"), indent=1)
+        if not a.smoke:      # the report after every part: the combined job's timeout may cut the later parts
+            open(a.out.replace(".json", ".md"), "w").write(report(res))
     res["elapsed_s"] = time.time() - t0
     json.dump(res, open(a.out, "w"), indent=1)
     md = report(res)

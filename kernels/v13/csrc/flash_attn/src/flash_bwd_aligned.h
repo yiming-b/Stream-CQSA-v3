@@ -1006,9 +1006,8 @@ void run_flash_bwd_aligned_kernel(Flash_bwd_params &params, cudaStream_t stream)
 // with a census buffer (flash_api.cpp): census, ALIGNED, then LEGACY, each
 // kernel's CTAs returning at once unless the route picks it. Anything else:
 // LEGACY alone, as v11.
-template<typename Kernel_traits, bool Is_dropout, bool Is_causal>
+template<typename T, typename Kernel_traits, bool Is_dropout, bool Is_causal>
 void run_flash_bwd_main(Flash_bwd_params &params, cudaStream_t stream) {
-    using T = typename Kernel_traits::Element;
     run_flash_bwd_preprocess<Kernel_traits>(params, stream);
     bool aligned = false;
     if constexpr (!Is_dropout) {

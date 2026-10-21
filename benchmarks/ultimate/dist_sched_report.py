@@ -74,8 +74,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("inputs", nargs="+")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--title", default="D1 multi-device scheduler: job results")
     args = ap.parse_args(argv)
-    lines = ["# D1 multi-device scheduler: job results", ""]
+    lines = [f"# {args.title}", ""]
     for path in args.inputs:
         if not os.path.exists(path):
             lines += [f"## {os.path.basename(path)}: missing", ""]

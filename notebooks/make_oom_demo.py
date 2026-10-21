@@ -56,7 +56,7 @@ md("## Sweep N")
 code("""
 Ns = [16_384, 65_536, 131_072, 262_144, 524_288, 1_048_576]
 rows = []
-print(f"{'N':>9} | {'SDPA/FA-2':>22} | {'Stream-CQSA':>50} | {'err vs fp64':>19}")
+print(f"{'N':>9} | {'SDPA/FA-2':>22} | {'Stream-CQSA [plan; what ran]':>50} | {'err vs fp64':>19}")
 for N in Ns:
     g = torch.Generator().manual_seed(0)
     q, k, v = (torch.randn(B, H, N, D, generator=g, dtype=torch.float32).to(torch.float16) for _ in range(3))   # host-resident
@@ -65,24 +65,33 @@ for N in Ns:
     def baseline():
         qd, kd, vd = (t.to(dev) for t in (q, k, v)); return F.scaled_dot_product_attention(qd, kd, vd, is_causal=True)
     ob, tb, mb, eb = run(baseline)
-    # Stream-CQSA: planner on the capped budget, inputs streamed from the host when it decides so
+    # Stream-CQSA: planner on the capped budget, inputs streamed from the host when it decides so. The row is
+    # labelled with what RAN (return_info: engine, subproblems), not only with the plan: below the boundary the
+    # engine is "monolithic" and the error column is SDPA's own; past it the result is the decomposition's.
     plan = {}
     def cqsa():
-        out, p = stream_cqsa.attention(q, k, v, is_causal=True, hardware=hw, return_plan=True); plan["p"] = p; return out
+        out, p, info = stream_cqsa.attention(q, k, v, is_causal=True, hardware=hw, return_plan=True, return_info=True)
+        plan["p"], plan["info"] = p, info; return out
     oc, tc, mc, ec = run(cqsa)
+    if eb and oc is not None:                       # the baseline could not run: the result must come from a decomposition
+        assert plan["info"]["engine"] != "monolithic" and plan["info"]["n_subproblems"] > 1, plan["info"]
     errb = accuracy_vs_fp64(ob, q, k, v, causal=True, scale=D**-0.5, rows=rows_idx, ref_rows=ref)["rel_fro"] if ob is not None else float("nan")
     errc = accuracy_vs_fp64(oc, q, k, v, causal=True, scale=D**-0.5, rows=rows_idx, ref_rows=ref)["rel_fro"] if oc is not None else float("nan")
     sb = f"OOM after {tb:.1f}s" if eb else f"{tb:6.2f} s, {mb:4.2f} GiB"
-    sc = (f"OOM" if ec else f"{tc:6.2f} s, {mc:4.2f} GiB") + f"  [{plan['p'].name() if 'p' in plan else '-'}]"
+    ran = (f"ran {plan['info']['engine']}, {plan['info'].get('n_subproblems', 1)} subproblems" if "info" in plan else "-")
+    sc = (f"OOM" if ec else f"{tc:6.2f} s, {mc:4.2f} GiB") + f"  [{plan['p'].name() if 'p' in plan else '-'}; {ran}]"
     print(f"{N:>9} | {sb:>22} | {sc:>50} | {errb:8.1e} / {errc:8.1e}")
-    rows.append(dict(N=N, baseline_s=tb, baseline_gib=mb, baseline=eb or "ok", cqsa_s=tc, cqsa_gib=mc, cqsa=ec or "ok", plan=plan["p"].name() if "p" in plan else None, err_baseline=errb, err_cqsa=errc))
+    rows.append(dict(N=N, baseline_s=tb, baseline_gib=mb, baseline=eb or "ok", cqsa_s=tc, cqsa_gib=mc, cqsa=ec or "ok", plan=plan["p"].name() if "p" in plan else None,
+                     engine=plan["info"].get("engine") if "info" in plan else None, n_subproblems=plan["info"].get("n_subproblems") if "info" in plan else None,
+                     err_baseline=errb, err_cqsa=errc))
     del q, k, v, ob, oc; gc.collect(); torch.cuda.empty_cache()
 """)
 md("""
 ## Reading the table
 
 * **Small N** (16K–512K under this cap): both run. The planner sees that the monolithic call fits the
-  capped budget and uses it, so Stream-CQSA's time, memory and error are the baseline's (the ~0.25 GiB
+  capped budget and uses it (the row says `ran monolithic, 1 subproblems`), so Stream-CQSA's time, memory
+  and error are the baseline's: those rows say nothing about the decomposition's accuracy (the ~0.25 GiB
   extra peak is the fp32 output it returns). Forced to decompose below the boundary (`itr=1`), it costs
   1.3–1.6x the monolithic time on this hardware and is slightly closer to float64 (fp32 merge).
 * **Large N** (1M, past the cap): SDPA raises `OutOfMemoryError`; the planner picks `c=13, itr=2`,

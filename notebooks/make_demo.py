@@ -65,14 +65,19 @@ import torch, stream_cqsa
 print("stream_cqsa", stream_cqsa.__version__, "| kernels:", stream_cqsa.kernels_available())
 q, k, v = (torch.randn(1, 8, 262_144, 64, dtype=torch.float16) for _ in range(3))   # created in host memory: safe on any GPU
 q, k, v = stream_cqsa.place_inputs(q, k, v, verbose=True)                         # onto the GPU if they fit, else stay on the host
-out = stream_cqsa.attention(q, k, v, is_causal=True, verbose=True)                 # drop-in for F.scaled_dot_product_attention
+out, info = stream_cqsa.attention(q, k, v, is_causal=True, verbose=True, return_info=True)   # drop-in for F.scaled_dot_product_attention
 ref = torch.nn.functional.scaled_dot_product_attention(q.cuda(), k.cuda(), v.cuda(), is_causal=True)
-print(tuple(out.shape), out.dtype, "| max |out - SDPA| =", (out.float().cuda() - ref.float()).abs().max().item())
+# the call fits here, so what ran IS the SDPA kernel (engine "monolithic"): a difference of 0 is the pass-through,
+# not evidence about the decomposition -- the next cell forces one and compares that
+print(tuple(out.shape), out.dtype, "| ran:", info["engine"], "| max |out - SDPA| =", (out.float().cuda() - ref.float()).abs().max().item())
 """)
 code("""
 # The same call when the device is too small: describe the budget (or let it be detected), and watch it plan.
-out_small, plan = stream_cqsa.attention(q, k, v, is_causal=True, hardware={"cuda:0": "1GiB", "host": "64GiB"}, verbose=True, return_plan=True)
-print("plan:", plan.name(), "| max |out - SDPA| =", (out_small.float().cuda() - ref.float()).abs().max().item())
+out_small, plan, info = stream_cqsa.attention(q, k, v, is_causal=True, hardware={"cuda:0": "1GiB", "host": "64GiB"}, verbose=True,
+                                              return_plan=True, return_info=True)
+assert info["engine"] != "monolithic" and info["n_subproblems"] > 1, info     # the comparison is only meaningful for a decomposed run
+print("plan:", plan.name(), "| ran:", info["engine"], f"({info['n_subproblems']} subproblems)",
+      "| max |out - SDPA| =", (out_small.float().cuda() - ref.float()).abs().max().item())
 # Two more one-liners: route an existing model's attention through it, and ask before running a huge one.
 stream_cqsa.patch_sdpa(); stream_cqsa.unpatch_sdpa()                 # F.scaled_dot_product_attention -> stream_cqsa.attention
 _ = stream_cqsa.estimate(N=16_777_216, B=1, H=8, D=64, dtype=torch.float16, causal=True)   # prints the plan table
@@ -135,6 +140,7 @@ held.clear(); cap(3.0); torch.cuda.reset_peak_memory_stats()
 t0 = time.perf_counter()
 out, info = stream_cqsa.attention(q, k, v, is_causal=True, hardware=SMALL, return_info=True)
 torch.cuda.synchronize()
+assert info["engine"] != "monolithic" and info["n_subproblems"] > 1, info     # the fp64 error below is the decomposition's
 print(f"stream_cqsa.attention: {time.perf_counter()-t0:.1f} s, peak {torch.cuda.max_memory_allocated()/2**30:.2f} GiB, "
       f"out {tuple(out.shape)} {out.dtype} on {out.device}, rel.err vs float64 {fp64_error(out, q, k, v):.1e}")
 print("what ran:", {k_: info.get(k_) for k_ in ("engine", "kernel", "itr", "c", "n_subproblems", "oom_retries")})
@@ -160,9 +166,10 @@ ref = F.scaled_dot_product_attention(q, k, v, is_causal=True)
 out, info = stream_cqsa.attention(q, k, v, is_causal=True, hardware={"cuda:0": "1.2GiB", "host": "64GiB"},
                                   return_info=True, verbose=True)
 print()
+assert info["engine"] != "monolithic" and info["n_subproblems"] > 1, info     # the SDPA comparison below is the decomposition's
 print("evicted:", info["inputs_evicted"], "| released on the GPU:", info["evict_released_gib"], "GiB",
       "| output on", out.device, "| Q/K/V restored:", info["inputs_restored"], "-> q on", q.device)
-print(f"max |out - SDPA| relative: {((out.float()-ref.float()).norm()/ref.float().norm()).item():.1e}")
+print(f"ran: {info['engine']} ({info['n_subproblems']} subproblems) | max |out - SDPA| relative: {((out.float()-ref.float()).norm()/ref.float().norm()).item():.1e}")
 del out, ref, q, k, v
 """)
 
@@ -189,9 +196,9 @@ cap(40.0)
 N = 262_144
 q, k, v = make_qkv(N)
 rows = sample_rows(N, 128); ref = reference_rows(q, k, v, rows, causal=True, scale=D**-0.5)
-print(f"{'attention(q, k, v, is_causal=True, ...)':>58} {'time s':>7} {'peak GiB':>9} {'subproblems':>11} {'rel.err':>8}")
+print(f"{'attention(q, k, v, is_causal=True, ...)':>58} {'time s':>7} {'peak GiB':>9} {'engine':>10} {'subproblems':>11} {'rel.err':>8}")
 for label, host, kw in [
-    ("(nothing: planned; monolithic fits here)",         False, dict()),
+    ("(nothing: planned; monolithic fits here)",         False, dict()),       # INTENTIONALLY monolithic: SDPA's own error
     ("itr=1",                                            False, dict(itr=1)),
     ("itr=1, max_parallel=4",                            False, dict(itr=1, max_parallel=4)),
     ("itr=2",                                            False, dict(itr=2)),
@@ -202,8 +209,10 @@ for label, host, kw in [
     qq, kk, vv = (q, k, v) if host else (q.to(dev), k.to(dev), v.to(dev))
     gc.collect(); torch.cuda.empty_cache(); torch.cuda.reset_peak_memory_stats(); torch.cuda.synchronize()
     t0 = time.perf_counter(); out, info = stream_cqsa.attention(qq, kk, vv, is_causal=True, return_info=True, **kw); torch.cuda.synchronize()
+    if kw:                                                     # a pinned row's error is only the decomposition's if one ran
+        assert info["engine"] != "monolithic" and info["n_subproblems"] > 1, (label, info)
     err = accuracy_vs_fp64(out.to(dev), q, k, v, causal=True, scale=D**-0.5, rows=rows, ref_rows=ref)["rel_fro"]
-    print(f"{label:>58} {time.perf_counter()-t0:7.3f} {torch.cuda.max_memory_allocated()/2**30:9.2f} {info.get('n_subproblems', 1):11d} {err:8.1e}")
+    print(f"{label:>58} {time.perf_counter()-t0:7.3f} {torch.cuda.max_memory_allocated()/2**30:9.2f} {info['engine']:>10} {info.get('n_subproblems', 1):11d} {err:8.1e}")
     del out, qq, kk, vv
 """)
 
@@ -268,7 +277,7 @@ cap(40.0)
 N = 262_144
 q, k, v = make_qkv(N); rows = sample_rows(N, 128); ref = reference_rows(q, k, v, rows, causal=True, scale=D**-0.5)
 qd, kd, vd = (t.to(dev) for t in (q, k, v))
-print(f"{'engine / kernel / configuration':>52} {'time s':>7} {'peak GiB':>9} {'rel.err':>8}")
+print(f"{'engine / kernel / configuration':>52} {'time s':>7} {'peak GiB':>9} {'ran':>8} {'rel.err':>8}")
 for label, kernel, kw in [
     ("classic, CUDA, c=7 itr=1",                    "cuda",        dict(itr=1)),
     ("classic, Triton, c=7 itr=1",                  "triton",      dict(itr=1)),
@@ -285,9 +294,10 @@ for label, kernel, kw in [
 ]:
     attention(qd, kd, vd, is_causal=True, kernel=kernel, **kw)                     # warm-up (Triton compiles on first use)
     gc.collect(); torch.cuda.empty_cache(); torch.cuda.reset_peak_memory_stats(); torch.cuda.synchronize()
-    t0 = time.perf_counter(); out = attention(qd, kd, vd, is_causal=True, kernel=kernel, **kw); torch.cuda.synchronize()
+    t0 = time.perf_counter(); out, info = attention(qd, kd, vd, is_causal=True, kernel=kernel, return_info=True, **kw); torch.cuda.synchronize()
+    assert info["engine"] in ("classic", "wave") and info.get("n_subproblems", 2) > 1, (label, info)   # itr is pinned: every row is a decomposition
     err = accuracy_vs_fp64(out.to(dev), q, k, v, causal=True, scale=D**-0.5, rows=rows, ref_rows=ref)["rel_fro"]
-    print(f"{label:>52} {time.perf_counter()-t0:7.3f} {torch.cuda.max_memory_allocated()/2**30:9.2f} {err:8.1e}")
+    print(f"{label:>52} {time.perf_counter()-t0:7.3f} {torch.cuda.max_memory_allocated()/2**30:9.2f} {info['engine']:>8} {err:8.1e}")
     del out
 """)
 code("""

@@ -4,6 +4,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from _decomp import attention_decomposed
+
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
 
 try:
@@ -66,12 +68,12 @@ def test_triton_wave_c133_and_deterministic():
 
 @pytest.mark.skipif(not HAVE_TRITON, reason="needs triton")
 def test_api_kernel_wave_triton():
-    from stream_cqsa.api import attention
     dev = torch.device("cuda"); H, D = 8, 64; N = 8192
     g = torch.Generator().manual_seed(2)
     q, k, v = (torch.randn(1, H, N, D, dtype=torch.float16, generator=g).to(dev) for _ in range(3))
     ref = F.scaled_dot_product_attention(q.double(), k.double(), v.double(), is_causal=True)
     e_sdpa = _rel(F.scaled_dot_product_attention(q, k, v, is_causal=True), ref)
     for acc in (True, False):
-        o = attention(q, k, v, is_causal=True, itr=1, kernel="wave-triton", accumulate_on_gpu=acc)
+        o, info = attention_decomposed(q, k, v, is_causal=True, itr=1, kernel="wave-triton", accumulate_on_gpu=acc, engine="wave")
+        assert info["kernel"] == "triton"
         assert o.device == q.device and _rel(o, ref) <= 1.2 * e_sdpa + 1e-6

@@ -87,7 +87,12 @@ def test_itr0_returns_lse_and_backward_works(causal):
     q, k, v = (torch.randn(b, h, n, d, device="cuda", dtype=torch.float16) for _ in range(3))
     dout = torch.randn(b, h, n, d, device="cuda", dtype=torch.float16)
 
+    # INTENTIONALLY monolithic: the subject is the lse contract of the engine's monolithic branch and the
+    # itr=0 backward that follows it (one task of all N tokens); the fp64 gradient comparison below guards that
+    # backward, it is no decomposition test (the decomposed backward is test_host_matches_device, itr in {1, 2})
+    from _decomp import assert_monolithic
     out, info = stream_cqsa_forward(q, k, v, itr=0, causal=causal)
+    assert_monolithic(info)
     assert "lse" in info, "itr=0 must return the global lse"
     assert tuple(info["lse"].shape) == (b, h, n)
 

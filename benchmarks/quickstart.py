@@ -31,12 +31,14 @@ for N in (1 << 17, 1 << 20, 1 << 22, 1 << 24):
     estimate(N, B=1, H=H, D=D, causal=True)
     print()
 
-# 2. below the boundary: the call IS the monolithic kernel
+# 2. below the boundary: the call IS the monolithic kernel (INTENTIONALLY monolithic: identical to SDPA is the
+#    pass-through, not a statement about the decomposition; sections 3 and 5 force one and say what ran)
 N = 1 << 17
 q, k, v = (torch.randn(1, H, N, D, device=dev, dtype=torch.float16) for _ in range(3))
-out, t = timed(lambda: attention(q, k, v, is_causal=True, verbose=True))
+(out, info), t = timed(lambda: attention(q, k, v, is_causal=True, verbose=True, return_info=True))
+assert info["engine"] == "monolithic", info
 ref, t_ref = timed(lambda: F.scaled_dot_product_attention(q, k, v, is_causal=True))
-print(f"N={N}: attention {t*1e3:.1f} ms, SDPA {t_ref*1e3:.1f} ms, identical={torch.equal(out, ref)}\n", flush=True)
+print(f"N={N}: attention {t*1e3:.1f} ms (ran: {info['engine']}), SDPA {t_ref*1e3:.1f} ms, identical={torch.equal(out, ref)}\n", flush=True)
 
 # 3. above the boundary (simulated with a memory cap): exact decomposition with progress
 N = 1 << 20
@@ -44,8 +46,10 @@ CAP = 6.0
 torch.cuda.set_per_process_memory_fraction(CAP / total_gib)
 hw = {"cuda:0": f"{CAP * 0.8:.1f}GiB", "host": "200GiB"}
 q, k, v = (torch.randn(1, H, N, D, device=dev, dtype=torch.float16) for _ in range(3))
-out, t = timed(lambda: attention(q, k, v, is_causal=True, verbose=True, hardware=hw))
-print(f"N={N} under a {CAP:.0f} GiB cap: {t:.2f} s, peak {torch.cuda.max_memory_allocated() / 2**30:.2f} GiB", flush=True)
+(out, info), t = timed(lambda: attention(q, k, v, is_causal=True, verbose=True, hardware=hw, return_info=True))
+assert info["engine"] != "monolithic" and info["n_subproblems"] > 1, info      # the difference below is the decomposition's
+print(f"N={N} under a {CAP:.0f} GiB cap: {t:.2f} s, peak {torch.cuda.max_memory_allocated() / 2**30:.2f} GiB, "
+      f"ran: {info['engine']}, {info['n_subproblems']} subproblems", flush=True)
 torch.cuda.set_per_process_memory_fraction(1.0)
 ref = F.scaled_dot_product_attention(q, k, v, is_causal=True)
 print(f"  result on {out.device}; rel. difference to the monolithic fp16 kernel: {rel(out.to(dev), ref):.1e}\n", flush=True)
@@ -65,7 +69,8 @@ del qh, kh, vh, out; torch.cuda.empty_cache()
 N = 1 << 18
 q, k, v = (torch.randn(1, H, N, D, device=dev, dtype=torch.float16, requires_grad=True) for _ in range(3))
 torch.cuda.set_per_process_memory_fraction(6.0 / total_gib)
-out = attention(q, k, v, is_causal=True, verbose=True, hardware={"cuda:0": "2GiB", "host": "200GiB"})   # forward+backward must decompose
+out, info = attention(q, k, v, is_causal=True, verbose=True, hardware={"cuda:0": "2GiB", "host": "200GiB"}, return_info=True)   # forward+backward must decompose
+assert info["engine"] != "monolithic" and info["itr"] >= 1, info     # the gradient comparison below is the decomposition's (bwd-direction info: engine / itr / c)
 out.sum().backward()
 torch.cuda.set_per_process_memory_fraction(1.0)
 q2, k2, v2 = (t_.detach().clone().requires_grad_(True) for t_ in (q, k, v))

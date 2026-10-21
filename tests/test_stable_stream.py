@@ -390,15 +390,27 @@ def test_plan_decomposition_decomposes_under_pressure():
 
 @pytest.mark.skipif(not CUDA, reason="needs CUDA")
 def test_auto_itr_matches_flash_attention():
-    """itr='auto' must return the same answer whichever branch it picks."""
+    """itr='auto' must return the same answer whichever branch it picks -- so both branches run: at this N
+    the planner picks the monolithic flash call (that arm IS flash against SDPA: asserted monolithic, no
+    decomposition test), and the auto* floor (min_itr=1: the planner still picks the depth, never the
+    monolithic call) is the decomposed arm, asserted decomposed."""
     from stream_cqsa.reference import sdpa_reference
+    from _decomp import assert_decomposed, assert_monolithic
 
     q, k, v = _qkv(1, 4, 2048, 64, seed=9, device="cuda", dtype=torch.float16)
-    out, info = stream_cqsa_forward(q, k, v, itr="auto", causal=False)
     ref = sdpa_reference(q.float(), k.float(), v.float(), causal=False)
+    # INTENTIONALLY monolithic arm: itr="auto" below the OOM boundary takes the engine's monolithic flash branch
+    out, info = stream_cqsa_forward(q, k, v, itr="auto", causal=False)
+    assert_monolithic(info)
     rel = ((out - ref).abs().max() / ref.abs().max()).item()
     assert rel < 2e-2, (rel, info["plan_reason"])
-    assert info["itr"] >= 0
+    assert info["itr"] == 0 and info["n_subproblems"] == 0
+    # the decomposed arm: the planner's depth with a floor of one (auto*) against the same reference
+    out, info = stream_cqsa_forward(q, k, v, itr="auto", min_itr=1, causal=False)
+    assert_decomposed(info)
+    rel = ((out - ref).abs().max() / ref.abs().max()).item()
+    assert rel < 2e-2, (rel, info["plan_reason"])
+    assert info["itr"] >= 1 and "auto*" in info["plan_reason"]
 
 
 # ---------------------------------------------------------------------------

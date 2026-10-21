@@ -31,7 +31,7 @@ V13=${CQSA_V13_SO:?set CQSA_V13_SO to the frozen cqsa_cuda_v13 directory}
 RES=${CQSA_SRC_RESULTS:-/scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/ultimate}
 JOB=${SLURM_JOB_ID:-nojob}
 KER=/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel
-SUITE_KERNELS=${SUITE_KERNELS:-$KER/frozen_suite/2026-09-23}      # v11x / v12f / v12b modules for their own tests
+SUITE_KERNELS=${SUITE_KERNELS:-$KER/frozen_suite/2026-10-21}      # v11x / v12f / v12b modules for their own tests
 V223_DIR=${V223_DIR:-/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/v2-v2.2.3}
 mkdir -p "$RES"
 echo "== U1 part: $(date)  job $JOB  host $(hostname)"

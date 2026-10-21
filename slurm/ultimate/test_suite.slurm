@@ -20,7 +20,7 @@ ROOT=${CQSA_SRC:-$OUT}          # frozen snapshot (a `git archive` of one commit
 cd "$ROOT"
 echo "code: $ROOT"
 source /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/env_next.sh
-SUITE_KERNELS=${SUITE_KERNELS:-/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/frozen_suite/2026-09-23}
+SUITE_KERNELS=${SUITE_KERNELS:-/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/frozen_suite/2026-10-21}
 V13_DIR=${V13_DIR:-$OUT/kernels/v13}
 export PYTHONPATH=$ROOT:/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/stable:${PYTHONPATH:-}:/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/native:$SUITE_KERNELS:$V13_DIR
 export CQSA_CUDA_MODULE=cqsa_cuda_v13 CQSA_CPU_THREADS=4 OMP_NUM_THREADS=4

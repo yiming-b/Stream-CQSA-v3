@@ -569,7 +569,10 @@ print("OK", I.cqsa_cuda.__file__)
 @pytest.mark.parametrize("dtype", DTYPES)
 def test_engine_attention_forward_backward_on_v13(dtype):
     """stream_cqsa.attention on the v13 module (classic engine, kernel="cuda", pinned itr=1 c=7, CUDA backward by
-    default): forward and gradients within 1.5x SDPA's error of the float64 reference, causal and non-causal."""
+    default): forward and gradients within 1.5x SDPA's error of the float64 reference, causal and non-causal.
+    The comparison is only meaningful if the call was decomposed (a monolithic call IS SDPA): the pinned depth is
+    asserted from return_info on both the forward-direction call (engine, n_subproblems > 1) and the autograd call
+    (engine, itr, c; its backward-direction info names the depth, not the count)."""
     _need(dtype)
     env = _v13_env()
     out = _run_py("""
@@ -582,9 +585,11 @@ for causal in (True, False):
     # N=4096: the float64 SDPA reference holds the H x N x N scores (512 MiB) -- the shared vis1 GPU's share
     q, k, v = (torch.randn(1, 4, 4096, 64, device="cuda", dtype=dt, requires_grad=True) for _ in range(3))
     dout = torch.randn(1, 4, 4096, 64, device="cuda", dtype=dt)
+    out_f, info_f = stream_cqsa.attention(q.detach(), k.detach(), v.detach(), is_causal=causal, kernel="cuda", itr=1, c=7, return_info=True)
+    assert info_f["engine"] in ("classic", "wave") and info_f["n_subproblems"] > 1, info_f
     out, info = stream_cqsa.attention(q, k, v, is_causal=causal, kernel="cuda", itr=1, c=7, bwd_itr=1, return_info=True)
-    # the backward-direction info names the engine, kernel, itr and c (not the subproblem count)
-    assert (info["engine"], info["kernel"], info["itr"], info["c"]) == ("classic", "cuda", 1, 7), info
+    assert info["engine"] in ("classic", "wave") and (info["kernel"], info["itr"], info["c"]) == ("cuda", 1, 7), info
+    assert rel(out, out_f) <= 1e-6, (causal, rel(out, out_f))         # the same decomposition in both directions
     g = torch.autograd.grad(out, (q, k, v), dout)
     q2, k2, v2 = (t.detach().double().requires_grad_(True) for t in (q, k, v))
     o2 = F.scaled_dot_product_attention(q2, k2, v2, is_causal=causal)

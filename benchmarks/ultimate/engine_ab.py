@@ -7,10 +7,15 @@ Arms (every (arm, row) runs in its own subprocess with its own PYTHONPATH / envi
   v223_cuda     v2.2.3 (git archive of the tag), CQSA_CUDA_MODULE=cqsa_cuda_next_v11 / NONCAUSAL=v9, CQSA_BACKWARD=cuda,
                 kernel="cuda": the classic engine with v11's CQS backward
   v223_triton   the same with CQSA_BACKWARD=triton (v2.2.3's default backward; the forward is the same v11 kernel)
-  v3_cuda       v3 + cqsa_cuda_v13 (CQSA_CUDA_MODULE unset: the interface picks it), kernel="cuda": the classic
-                engine, census + ALIGNED forward and backward, the CUDA backward by default
-  v3_auto       the same, kernel="auto": the planner's choice (with pinned itr / c: the wave engine, which still
-                runs the old cqsa_native module -- package U2 ports the census + ALIGNED design into it)
+  v3_cuda       v3 + cqsa_cuda_v13 (CQSA_CUDA_MODULE unset: the interface picks it), kernel="cuda", itr and c
+                pinned: the classic engine, census + ALIGNED forward and backward, the CUDA backward by default
+  v3_wave       the same, kernel="wave", itr and c pinned: the wave engine, which still runs the old cqsa_native
+                module (package U2 ports the census + ALIGNED design into it)
+  v3_auto       the same, kernel="auto", NOTHING pinned: what the user gets for this call on this device -- at these
+                N the monolithic SDPA call fits and the planner runs it (the row is SDPA, not the new kernels; the
+                engine label says so)
+The engine arms pin itr and c (bwd_itr=itr) so the decomposition is what is timed; every row records the engine
+that ran (monolithic / classic / wave), itr and the subproblem count.
   flash_attn    monolithic flash_attn_func / torch.autograd.grad
   sdpa_flash    monolithic torch SDPA with the FLASH_ATTENTION backend
 Rows (N, c, itr, dtype), in the order they run -- the acceptance rows first, the 1M itr=2 row last:
@@ -38,7 +43,8 @@ B, H, D = 1, 8, 64
 ROWS = ((1 << 20, 7, 1, "fp16"), (131072, 7, 1, "fp16"), (131072, 73, 1, "fp16"), (131072, 7, 1, "bf16"), (1 << 20, 7, 2, "fp16"))
 SMOKE_ROWS = ((16384, 7, 1, "fp16"), (16384, 7, 2, "fp16"), (16384, 7, 1, "bf16"))
 # the key comparison (v3 + v13 vs monolithic flash_attn) first within a row, so a budget cut keeps it
-ARMS = ("v3_cuda", "flash_attn", "v223_cuda", "v223_triton", "v3_auto", "sdpa_flash")
+ARMS = ("v3_cuda", "flash_attn", "v223_cuda", "v223_triton", "v3_wave", "v3_auto", "sdpa_flash")
+PINNED = {"v3_cuda": "cuda", "v3_wave": "wave", "v223_cuda": "cuda", "v223_triton": "cuda"}   # arm -> kernel=, itr/c pinned
 MONO = ("flash_attn", "sdpa_flash")
 KER = "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel"
 NATIVE = "/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/native"
@@ -130,19 +136,23 @@ def worker(cfg):
                  cuda_module=I.CQSA_CUDA_MODULE, cuda_module_file=getattr(I.cqsa_cuda, "__file__", None),
                  backward_kernel=(I.backward_kernel() if hasattr(I, "backward_kernel")
                                   else os.environ.get("CQSA_BACKWARD", "auto")))
-        kernel = "cuda" if arm.endswith("cuda") or arm.startswith("v223") else "auto"
         info = {}
+        pins = dict(itr=itr, c=c, bwd_itr=itr) if arm in PINNED else {}
 
         def fwd():
-            out, inf = stream_cqsa.attention(q, k, v, is_causal=True, kernel=kernel, itr=itr, c=c, bwd_itr=itr, return_info=True)
+            out, inf = stream_cqsa.attention(q, k, v, is_causal=True, kernel=PINNED.get(arm, "auto"), return_info=True, **pins)
             info.update({k_: v_ for k_, v_ in inf.items() if isinstance(v_, (int, float, str, bool, list, tuple, type(None)))})
             return out
     out, r["fwd"] = timed(fwd, cfg["reps"], cfg["warmup"])
     if arm not in MONO:
         # attention()'s backward-direction info carries engine / kernel / itr / c but not the subproblem
         # count; with a pinned itr and c either engine runs exactly c**itr subproblems
-        if info.get("n_subproblems") is None:
+        if info.get("n_subproblems") is None and arm in PINNED:
             info["n_subproblems"] = c ** itr
+        if arm in PINNED and info.get("engine") not in ("classic", "wave"):
+            r["status"] = "error"; r["error"] = f"pinned arm ran on engine {info.get('engine')!r}: {info}"
+        if info.get("engine") == "monolithic":
+            r["backward_kernel"] = "sdpa"            # the monolithic call's own backward, not the interface's default
         r["info"] = info
     r["rel_out_vs_flash_attn"] = rel(out, ref_out) if ref_out is not None else None
     bwd = lambda: torch.autograd.grad(out, (q, k, v), dout, retain_graph=True)
@@ -235,7 +245,7 @@ def report(doc, path_md):
              "gradient against the monolithic flash_attn call on the same inputs.", ""]
     rows = doc["rows"]
     keys = sorted({(r["N"], r["c"], r["itr"], r["dtype"]) for r in rows}, key=lambda t: (t[3], t[0], t[1], t[2]))
-    lines += ["| N | c | itr | dtype | arm | engine / n_sub / bwd kernel | fwd ms | bwd ms | peak fwd / bwd GiB | rel out / grads | fwd / flash_attn | bwd / flash_attn |",
+    lines += ["| N | c | itr | dtype | arm | engine that ran (itr) / n_sub / bwd kernel | fwd ms | bwd ms | peak fwd / bwd GiB | rel out / grads | fwd / flash_attn | bwd / flash_attn |",
               "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for N, c, itr, dtype in keys:
         fa = next((r for r in rows if r["arm"] == "flash_attn" and r["N"] == N and r["dtype"] == dtype and "fwd" in r), None)
@@ -244,12 +254,14 @@ def report(doc, path_md):
                 continue
             if r["arm"] in MONO and (c, itr) != min((k[1], k[2]) for k in keys if (k[0], k[3]) == (N, dtype)):
                 continue
-            if "fwd" not in r:
-                what = f"skipped: {r['reason']}" if r.get("status") == "skipped" else f"ERROR rc={r.get('rc')}"
+            if "fwd" not in r or r.get("status") == "error":
+                what = (f"skipped: {r['reason']}" if r.get("status") == "skipped"
+                        else f"ERROR {r.get('error') or ('rc=%s' % r.get('rc'))}")
                 lines.append(f"| {N} | {c} | {itr} | {dtype} | {r['arm']} | {what} | | | | | | |")
                 continue
             inf = r.get("info", {})
-            eng = f"{inf.get('engine', '-')} / {inf.get('n_subproblems', '-')} / {r.get('backward_kernel', '-')}" if r["arm"] not in MONO else "monolithic"
+            eng = (f"{inf.get('engine', '-')} itr={inf.get('itr', '-')} / {inf.get('n_subproblems', '-')} / {r.get('backward_kernel', '-')}"
+                   if r["arm"] not in MONO else "monolithic / 1 / -")
             f_ratio = f"{r['fwd']['median_s'] / fa['fwd']['median_s']:.3f}" if fa else "-"
             b_ratio = f"{r['bwd']['median_s'] / fa['bwd']['median_s']:.3f}" if fa else "-"
             rel_s = (f"{r['rel_out_vs_flash_attn']:.1e} / {max(r['rel_grads_vs_flash_attn']):.1e}"
@@ -273,8 +285,12 @@ def report(doc, path_md):
             lines.append(f"| forward 1M c=7 itr=1 device-resident <= 1.17x monolithic flash_attn | {fr:.3f}x "
                          f"({v3['fwd']['median_s'] * 1e3:.0f} vs {fa['fwd']['median_s'] * 1e3:.0f} ms)"
                          + (f"; v2.2.3 {v2['fwd']['median_s'] / fa['fwd']['median_s']:.3f}x" if v2 else "") + f" | {'yes' if fr <= 1.17 else 'NO'} |")
-    lines += ["", "Note: the `v3_auto` arm is the wave engine, which still runs the old `cqsa_native` module (package U2 ports the "
-              "census + ALIGNED design into it); `v3_cuda` is the classic engine on the v13 module.", ""]
+    lines += ["", "Arms: `v3_cuda` = the classic engine on the v13 module (itr, c pinned); `v3_wave` = the wave engine, which still "
+              "runs the old `cqsa_native` module (package U2 ports the census + ALIGNED design into it; itr, c pinned); "
+              "`v3_auto` = `attention()` with nothing pinned, i.e. what the user gets for this call on this device (the engine "
+              "column says what ran: at these N the monolithic SDPA call fits, so that row is not a measurement of the new "
+              "kernels); `v223_*` = the released v2.2.3 package, classic engine, pinned. The engine arms' rows report the "
+              "engine that actually ran, its depth and the subproblem count.", ""]
     open(path_md, "w").write("\n".join(lines))
     print("\n".join(lines))
 

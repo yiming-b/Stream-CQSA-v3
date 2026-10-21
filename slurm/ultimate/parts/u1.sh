@@ -2,9 +2,12 @@
 # U1 part of the combined ultimate job (one A100-SXM4-80GB, gpu-test: the whole job must fit in 59 min, this part
 # gets ~25 min of it): the v13 classic module's engine-level acceptance.
 #   step 2  benchmarks/ultimate/engine_ab.py: engine-level attention() forward + backward, device-resident inputs,
-#           acc=GPU: v3 + v13 (kernel="cuda" and "auto") vs v2.2.3 (classic engine, CUDA and Triton backward) vs
-#           monolithic flash_attn / SDPA-flash at N=1048576 c=7 itr=1 (the acceptance row, first), 131072 (c=7, 73,
-#           and a bf16 row), 1048576 c=7 itr=2 (last); 2 timed runs after 1 warm-up. Expected <= 25 min of GPU
+#           acc=GPU: v3 + v13 classic (kernel="cuda", itr pinned) and wave (kernel="wave", itr pinned, old
+#           cqsa_native) and the unpinned kernel="auto" row (what the user gets: monolithic at these N), v2.2.3
+#           (classic engine, CUDA and Triton backward, pinned), monolithic flash_attn / SDPA-flash, at N=1048576 c=7
+#           itr=1 (the acceptance row, first), 131072 (c=7, 73, and a bf16 row), 1048576 c=7 itr=2 (last); every
+#           row records the engine that ran (monolithic / classic / wave), itr and the subproblem count; 2 timed runs
+#           after 1 warm-up. Expected <= 25 min of GPU
 #           time: the driver carries a wall-clock budget (U1_BUDGET_S, default 1500 s) and skips the workers that
 #           would exceed it (estimate = the longest worker seen at that N), so the 1M itr=2 row is what a slow node
 #           loses. Host memory <= 24G (everything lives on the device; the host holds the pinned task lists, a few

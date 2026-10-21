@@ -6,6 +6,8 @@ import warnings
 import pytest, torch
 import torch.nn.functional as F
 
+from _decomp import attention_decomposed, assert_monolithic
+
 GIB = 2 ** 30
 N, H, D = 262144, 8, 64                       # Q/K/V = 0.75 GiB fp16, O = 0.25 GiB
 TIGHT = {"cuda:0": "1.2GiB", "host": "16GiB"}  # whole allowance: nothing fits next to the resident Q/K/V
@@ -47,7 +49,7 @@ def test_evict_compute_output_on_device_then_restore():
     q, k, v = _qkv()
     ref = F.scaled_dot_product_attention(q, k, v, is_causal=True)
     q0 = q.clone()
-    out, info = stream_cqsa.attention(q, k, v, is_causal=True, hardware=TIGHT, return_info=True)
+    out, info = attention_decomposed(q, k, v, is_causal=True, hardware=TIGHT)      # the budget cannot hold the monolithic call
     assert info["inputs_evicted"] and info["evict_released_gib"] > 0.7        # the device copies were really freed
     assert out.is_cuda and out.dtype == torch.float16 and _rel(out, ref) < 2e-3
     assert info["inputs_restored"] and q.is_cuda and k.is_cuda and v.is_cuda    # room on the real device: they come back
@@ -59,12 +61,12 @@ def test_restore_never_and_evict_never():
     import stream_cqsa
     q, k, v = _qkv()
     ref = F.scaled_dot_product_attention(q, k, v, is_causal=True)
-    out, info = stream_cqsa.attention(q, k, v, is_causal=True, hardware=TIGHT, return_info=True, restore_inputs=False)
+    out, info = attention_decomposed(q, k, v, is_causal=True, hardware=TIGHT, restore_inputs=False)
     assert out.is_cuda and info["inputs_evicted"] and not info["inputs_restored"]
     assert q.device.type == "cpu" and q.is_pinned()                             # still valid tensors, in host memory
     assert _rel(out, ref) < 2e-3
     q, k, v = _qkv()
-    out, info = stream_cqsa.attention(q, k, v, is_causal=True, hardware=TIGHT, return_info=True, evict_inputs=False)
+    out, info = attention_decomposed(q, k, v, is_causal=True, hardware=TIGHT, evict_inputs=False)
     assert not info["inputs_evicted"] and q.is_cuda and _rel(out, ref) < 2e-3
 
 
@@ -77,7 +79,7 @@ def test_views_of_a_live_fused_tensor_are_reported():
     ref = F.scaled_dot_product_attention(q, k, v, is_causal=True)
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        out, info = stream_cqsa.attention(q, k, v, is_causal=True, evict_inputs=True, itr=1, return_info=True)
+        out, info = attention_decomposed(q, k, v, is_causal=True, evict_inputs=True, itr=1)
     assert any("still references their storage" in str(x.message) for x in w)
     assert info["evict_released_gib"] < 0.05 and _rel(out, ref) < 2e-3
 
@@ -88,7 +90,7 @@ def test_training_through_eviction():
     n = 32768
     leaves = [t.requires_grad_(True) for t in _qkv(n)]
     q, k, v = (t * 1.0 for t in leaves)                                         # non-leaf, as inside a model
-    out = stream_cqsa.attention(q, k, v, is_causal=True, evict_inputs=True, itr=1)
+    out, _ = attention_decomposed(q, k, v, is_causal=True, evict_inputs=True, itr=1)
     assert out.is_cuda
     do = torch.randn_like(out)
     out.backward(do)
@@ -106,7 +108,11 @@ def test_forced_eviction_on_the_monolithic_path_returns_to_the_device():
     import stream_cqsa
     q, k, v = _qkv(8192)
     ref = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+    # INTENTIONALLY monolithic: the subject is the forced eviction + restore around a call that fits (nothing is
+    # pinned, so the computation IS SDPA on the staged inputs); the SDPA comparison below only guards the
+    # delivered output and is no decomposition test
     out, info = stream_cqsa.attention(q, k, v, is_causal=True, evict_inputs=True, return_info=True)
+    assert_monolithic(info)
     assert info["engine"] == "monolithic" and info["inputs_evicted"]
     assert out.is_cuda and info["inputs_restored"] and q.is_cuda                # was: output returned in host memory
     assert _rel(out, ref) < 2e-3
@@ -120,7 +126,7 @@ def test_restore_judges_room_under_a_memory_fraction_cap():
     used = torch.cuda.memory_allocated(0)
     torch.cuda.set_per_process_memory_fraction(min(1.0, (used + 3 * GIB) / total), 0)
     try:
-        out, info = stream_cqsa.attention(q, k, v, is_causal=True, hardware=TIGHT, return_info=True)
+        out, info = attention_decomposed(q, k, v, is_causal=True, hardware=TIGHT)
     finally:
         torch.cuda.set_per_process_memory_fraction(1.0, 0)
     # a reserve of 10% of the PHYSICAL device (8 GiB on an 80 GB card) never left room under a 3 GiB cap

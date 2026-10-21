@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 from stream_cqsa.autoconfig import plan as _plan, hardware_from_dict, frontier_pick, CostModel
 from stream_cqsa.native_wave import wave_token_ladder, task_tokens_estimate, estimate_wave_peak_bytes, default_wave_tokens
+from _decomp import attention_decomposed          # every output comparison below asserts that a decomposition ran
 
 E = ("wave", "classic")
 N, H, D = 131072, 8, 64
@@ -189,17 +190,17 @@ def test_auto_routes_to_the_wave_and_matches_the_forced_paths():
     q, k, v = _qkv()
     p = stream_cqsa.attention(q, k, v, is_causal=True, itr=1, plan_only=True)
     assert p.engine == "wave" and p.gather and p.wave_tokens > 0
-    out, info = stream_cqsa.attention(q, k, v, is_causal=True, itr=1, return_info=True)
+    out, info = attention_decomposed(q, k, v, is_causal=True, itr=1)
     assert info["engine"] == "wave" and info["kernel"] == "cuda" and info["gather"] is True
     assert info["max_wave_tokens"] == p.wave_tokens and info["n_waves"] == len(info["wave_sizes"]) and info["wave_oom_retries"] == 0
-    o_cuda, i_cuda = stream_cqsa.attention(q, k, v, is_causal=True, itr=1, kernel="cuda", return_info=True)
-    o_wave, i_wave = stream_cqsa.attention(q, k, v, is_causal=True, itr=1, kernel="wave-cuda", return_info=True)
+    o_cuda, i_cuda = attention_decomposed(q, k, v, is_causal=True, itr=1, kernel="cuda", engine="classic")
+    o_wave, i_wave = attention_decomposed(q, k, v, is_causal=True, itr=1, kernel="wave-cuda", engine="wave")
     assert i_cuda["engine"] == "classic" and i_wave["engine"] == "wave"
     assert _rel(out, o_cuda) < 1e-4 and _rel(out, o_wave) < 1e-4
     assert torch.equal(out, o_wave)                                  # the same plan: bit-identical
     # accuracy against fp64 (the reference materialises H x N^2 doubles: a small call)
     q, k, v = _qkv(4096)
-    out, info = stream_cqsa.attention(q, k, v, is_causal=True, itr=1, return_info=True)
+    out, info = attention_decomposed(q, k, v, is_causal=True, itr=1)
     assert info["engine"] == "wave"
     ref = F.scaled_dot_product_attention(q.double(), k.double(), v.double(), is_causal=True)
     o_s = F.scaled_dot_product_attention(q, k, v, is_causal=True)
@@ -212,18 +213,18 @@ def test_wave_overrides_and_unplanned_combinations():
     if not _native():
         pytest.skip("cqsa_native not built for fp16 hdim64")
     q, k, v = _qkv()
-    base = stream_cqsa.attention(q, k, v, is_causal=True, itr=1, kernel="wave-cuda")
+    base, _ = attention_decomposed(q, k, v, is_causal=True, itr=1, kernel="wave-cuda", engine="wave")
     # in place and a smaller wave budget are honoured and exact
-    o_ip, i_ip = stream_cqsa.attention(q, k, v, is_causal=True, itr=1, gather=False, return_info=True)
+    o_ip, i_ip = attention_decomposed(q, k, v, is_causal=True, itr=1, gather=False)
     assert i_ip["engine"] == "wave" and i_ip["gather"] is False and _rel(o_ip, base) < 1e-4
-    o_w, i_w = stream_cqsa.attention(q, k, v, is_causal=True, itr=1, max_wave_tokens=65536, return_info=True)
+    o_w, i_w = attention_decomposed(q, k, v, is_causal=True, itr=1, max_wave_tokens=65536)
     assert i_w["engine"] == "wave" and i_w["max_wave_tokens"] == 65536 and i_w["n_waves"] == 7 and _rel(o_w, base) < 1e-4
     # a host accumulator on device-resident inputs is not a planned combination: the classic pipeline runs it
-    o_c, i_c = stream_cqsa.attention(q, k, v, is_causal=True, itr=1, accumulate_on_gpu=False, low_memory=True, return_info=True)
+    o_c, i_c = attention_decomposed(q, k, v, is_causal=True, itr=1, accumulate_on_gpu=False, low_memory=True)
     assert i_c["engine"] == "classic" and _rel(o_c, base) < 1e-4
     # every kernel= override still selects its engine
     for kn, eng in (("cuda", "classic"), ("triton", "classic"), ("wave", "wave"), ("wave-triton", "wave")):
-        o, i = stream_cqsa.attention(q, k, v, is_causal=True, itr=1, kernel=kn, return_info=True)
+        o, i = attention_decomposed(q, k, v, is_causal=True, itr=1, kernel=kn)
         assert i["engine"] == eng and _rel(o, base) < 1e-3, kn
     import os
     os.environ.pop("CQSA_FORWARD", None); os.environ.pop("CQSA_BACKWARD", None)
@@ -246,7 +247,7 @@ def test_oom_inside_a_wave_halves_the_budget_before_leaving_the_engine(monkeypat
         return real(*a, max_wave_tokens=max_wave_tokens, gather=gather, **kw)
 
     monkeypatch.setattr(native_wave, "wave_forward", flaky)
-    out, info = stream_cqsa.attention(q, k, v, is_causal=True, itr=1, return_info=True, verbose=True)
+    out, info = attention_decomposed(q, k, v, is_causal=True, itr=1, verbose=True)
     s = capsys.readouterr().out
     assert info["engine"] == "wave" and info["gather"] is False and info["max_wave_tokens"] <= 16384
     budgets = [w for w, _ in seen if w is not None]
@@ -258,7 +259,7 @@ def test_oom_inside_a_wave_halves_the_budget_before_leaving_the_engine(monkeypat
     monkeypatch.setattr(native_wave, "wave_forward", lambda *a, **kw: (_ for _ in ()).throw(torch.cuda.OutOfMemoryError("simulated")))
     with pytest.raises(torch.cuda.OutOfMemoryError):
         stream_cqsa.attention(q, k, v, is_causal=True, itr=1, kernel="wave-cuda")
-    out2, info2 = stream_cqsa.attention(q, k, v, is_causal=True, itr=1, return_info=True)   # auto: the classic pipeline
+    out2, info2 = attention_decomposed(q, k, v, is_causal=True, itr=1)   # auto: the classic pipeline
     assert info2["engine"] == "classic" and _rel(out2, ref) < 1e-3
 
 
@@ -289,7 +290,7 @@ def test_host_resident_backward_under_auto_is_classic_and_exact():
     for kern in ("auto", "wave"):                   # a forced wave kernel cannot run a host-resident backward either
         for t in (q, k, v):
             t.grad = None
-        out, info = stream_cqsa.attention(q, k, v, is_causal=True, itr=1, kernel=kern, return_info=True)
+        out, info = attention_decomposed(q, k, v, is_causal=True, itr=1, kernel=kern)
         assert info["engine"] == "classic" and info["stream_from_host"] and out.device.type == "cpu"
         out.float().sum().backward()
         assert all(t.grad is not None and t.grad.device.type == "cpu" and torch.isfinite(t.grad).all() for t in (q, k, v))
@@ -299,7 +300,7 @@ def test_host_resident_backward_under_auto_is_classic_and_exact():
     # host-resident forward: the plan and the run describe the same configuration
     with torch.no_grad():
         p = stream_cqsa.attention(q, k, v, is_causal=True, itr=1, plan_only=True)
-        out, info = stream_cqsa.attention(q, k, v, is_causal=True, itr=1, return_info=True)
+        out, info = attention_decomposed(q, k, v, is_causal=True, itr=1)
     assert p.stream_from_host and info["engine"] == p.engine and info.get("host_resident", True)
 
 
@@ -328,7 +329,7 @@ def test_oom_in_the_wave_backward_is_recovered(monkeypatch, capsys):
         monkeypatch.setattr(native_wave, "wave_backward", flaky)
         budgets.clear()
         q, k, v = (t.detach().clone().requires_grad_() for t in (q0, k0, v0))
-        out, info = stream_cqsa.attention(q, k, v, is_causal=True, itr=1, kernel=kernel, return_info=True, verbose=True)
+        out, info = attention_decomposed(q, k, v, is_causal=True, itr=1, kernel=kernel, verbose=True)
         assert info["engine"] == "wave" and info["backward"] == {"forward_gather": True}
         out.backward(do)
         return (q, k, v), info["backward"]
@@ -364,7 +365,7 @@ def test_monolithic_oom_replans_among_decompositions(monkeypatch):
     q, k, v = _qkv(65536)
     ref = F.scaled_dot_product_attention(q, k, v, is_causal=True)
     monkeypatch.setattr(api, "_TRUE_SDPA", lambda *a, **kw: (_ for _ in ()).throw(torch.cuda.OutOfMemoryError("simulated")))
-    out, info = stream_cqsa.attention(q, k, v, is_causal=True, return_info=True)
+    out, info = attention_decomposed(q, k, v, is_causal=True)        # forced by the simulated monolithic OOM, not by a pin
     assert info["engine"] == "wave" and info["n_subproblems"] > 1 and _rel(out, ref) < 1e-3
 
 
@@ -378,10 +379,10 @@ def test_pinned_depth_is_what_plan_only_reports_and_the_backward_reports_the_gat
     q, k, v = _qkv(32768)
     p = stream_cqsa.attention(q, k, v, is_causal=True, itr=2, plan_only=True)
     assert p.itr == 2 and p.engine == "wave"
-    out, info = stream_cqsa.attention(q, k, v, is_causal=True, itr=2, return_info=True)
+    out, info = attention_decomposed(q, k, v, is_causal=True, itr=2)
     assert info["itr"] == 2 and info["max_wave_tokens"] == p.wave_tokens
     q, k, v = (t.contiguous().requires_grad_() for t in _qkv(100003))
-    out, info = stream_cqsa.attention(q, k, v, is_causal=True, itr=1, gather=False, return_info=True)
+    out, info = attention_decomposed(q, k, v, is_causal=True, itr=1, gather=False)
     from stream_cqsa.native_wave import in_place_possible
     # in place is impossible at a ragged causal N on the first wave module; cqsa_native_v2 (lens) reads any N in place
     assert info["engine"] == "wave" and info["gather"] is (not in_place_possible(q.shape[2], True))
@@ -401,6 +402,8 @@ def test_inputs_restored_under_a_memory_fraction():
     cap = torch.cuda.memory_reserved() + int(1.5 * GIB)
     try:
         torch.cuda.set_per_process_memory_fraction(cap / total)
+        # routing is incidental here (monolithic when the evicted inputs fit back under the cap, nothing pinned):
+        # the subject is the restore; the SDPA check below only guards the delivered output, it is no decomposition test
         out, info = stream_cqsa.attention(q, k, v, is_causal=True, return_info=True, evict_inputs=True)
     finally:
         torch.cuda.set_per_process_memory_fraction(1.0)

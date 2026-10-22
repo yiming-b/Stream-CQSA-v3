@@ -138,6 +138,9 @@ def main():
     if a.quick:
         os.environ["CITA_QUICK"] = "1"
     os.chdir(HERE)
+    # the kernel's connection files go next to the bundle (a read-only or absent $HOME must not stop the run)
+    os.environ.setdefault("JUPYTER_RUNTIME_DIR", os.path.join(HERE, ".jupyter_runtime"))
+    os.makedirs(os.environ["JUPYTER_RUNTIME_DIR"], exist_ok=True)
     log = open(os.path.join(HERE, "run_cita.log"), "a")
     sys.stdout = _Tee(sys.__stdout__, log)
     sys.stderr = _Tee(sys.__stderr__, log)

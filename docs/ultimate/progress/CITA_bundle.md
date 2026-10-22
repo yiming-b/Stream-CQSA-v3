@@ -87,3 +87,6 @@ E0, E1 fwd, E1 fwd+bwd, E3 fwd, E4, E6, report, results tarball). Spec: the task
   subprocess environment; bench.py's worker_env() strips CQSA_BACKWARD too; the report marks a classic_CUDA bwd row
   whose backward_kernel is not cuda with "[bwd kernel triton]"; the inline table shows the backward kernel.
   The Della slurm results are unaffected (bench.py run never calls attention() in the parent process).
+- Final bundle from 9bbaefe: /scratch/gpfs/AKEY/yb2807/cita_bundle/stream_cqsa_v3_cita_20261022.tar.gz (132 MB,
+  3031 files: src 33 MB, wheels 26 MB, cuda_min 259 MB unpacked). Untarred into cita_bundle/validate3 for the final
+  check (setup_cita.sh + plumbing run 3 with the CUDA modules, nbclient mode) once run 2 has finished.

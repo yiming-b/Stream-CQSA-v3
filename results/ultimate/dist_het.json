@@ -1,0 +1,3692 @@
+{
+ "meta": {
+  "job_id": "15949746",
+  "host": "della-l07g3",
+  "world": 4,
+  "gpus": [
+   "NVIDIA A100-SXM4-80GB",
+   "NVIDIA A100-SXM4-80GB",
+   "NVIDIA A100 80GB PCIe",
+   "NVIDIA A100 80GB PCIe"
+  ],
+  "ranks": [
+   {
+    "rank": 0,
+    "gpu": "NVIDIA A100-SXM4-80GB",
+    "host": "della-l07g3",
+    "local_rank": 0,
+    "n_sm": 108,
+    "sms_used": 108,
+    "rate_seed": 33500000.0,
+    "rate_seed_source": "measured: v11 kernel, A100-SXM4-80GB, job 14319938 (results/ultimate/fwd_ab.md)",
+    "rate_measured": 38719662.9183136,
+    "rate_measured_source": "calibrated 2026-10-22 08:05: N=262144 c=7 itr=1 D=64 host-streamed, 623.9 ms less 190 ms overheads"
+   },
+   {
+    "rank": 1,
+    "gpu": "NVIDIA A100-SXM4-80GB",
+    "host": "della-l07g3",
+    "local_rank": 1,
+    "n_sm": 108,
+    "sms_used": 108,
+    "rate_seed": 33500000.0,
+    "rate_seed_source": "measured: v11 kernel, A100-SXM4-80GB, job 14319938 (results/ultimate/fwd_ab.md)",
+    "rate_measured": 38691444.77715342,
+    "rate_measured_source": "calibrated 2026-10-22 08:05: N=262144 c=7 itr=1 D=64 host-streamed, 624.2 ms less 190 ms overheads"
+   },
+   {
+    "rank": 2,
+    "gpu": "NVIDIA A100 80GB PCIe",
+    "host": "della-l01g14",
+    "local_rank": 0,
+    "n_sm": 108,
+    "sms_used": 108,
+    "rate_seed": 29100000.0,
+    "rate_seed_source": "measured: 4 x A100-80GB-PCIe job 14330294 refit (results/ultimate/dist_cost_refit.json)",
+    "rate_measured": 30988993.138909586,
+    "rate_measured_source": "calibrated 2026-10-22 08:05: N=262144 c=7 itr=1 D=64 host-streamed, 732.0 ms less 190 ms overheads"
+   },
+   {
+    "rank": 3,
+    "gpu": "NVIDIA A100 80GB PCIe",
+    "host": "della-l01g14",
+    "local_rank": 1,
+    "n_sm": 108,
+    "sms_used": 108,
+    "rate_seed": 29100000.0,
+    "rate_seed_source": "measured: 4 x A100-80GB-PCIe job 14330294 refit (results/ultimate/dist_cost_refit.json)",
+    "rate_measured": 32566833.223353256,
+    "rate_measured_source": "calibrated 2026-10-22 08:05: N=262144 c=7 itr=1 D=64 host-streamed, 705.8 ms less 190 ms overheads"
+   }
+  ],
+  "topo": "\t\u001b[4mGPU0\tGPU1\tNIC0\tCPU Affinity\tNUMA Affinity\tGPU NUMA ID\u001b[0m\nGPU0\t X \tNV4\tNODE\t0-3\t0\t\tN/A\nGPU1\tNV4\t X \tSYS\t24-27\t1\t\tN/A\nNIC0\tNODE\tSYS\t X \t\t\t\t\n\nLegend:\n\n  X    = Self\n  SYS  = Connection traversing PCIe as well as the SMP interconnect between NUMA nodes (e.g., QPI/UPI)\n  NODE = Connection traversing PCIe as well as the interconnect between PCIe Host Bridges within a NUMA node\n  PHB  = Connection traversing PCIe as well as a PCIe Host Bridge (typically the CPU)\n  PXB  = Connection traversing multiple PCIe bridges (without traversing the PCIe Host Bridge)\n  PIX  = Connection traversing at most a single PCIe bridge\n  NV#  = Connection traversing a bonded set of # NVLinks\n\nNIC Legend:\n\n  NIC0: mlx5_0\n\n",
+  "tag": "het_sxm2_pcie2",
+  "throttle": null,
+  "arms": [
+   {
+    "scheduler": "rr",
+    "reduce": "allreduce",
+    "rates": "seed",
+    "output": "replicated",
+    "name": "rr/allreduce/seed"
+   },
+   {
+    "scheduler": "lpt",
+    "reduce": "allreduce",
+    "rates": "seed",
+    "output": "replicated",
+    "name": "lpt/allreduce/seed"
+   },
+   {
+    "scheduler": "lpt",
+    "reduce": "allreduce",
+    "rates": "measured",
+    "output": "replicated",
+    "name": "lpt/allreduce/measured"
+   },
+   {
+    "scheduler": "lpt",
+    "reduce": "reduce_scatter",
+    "rates": "measured",
+    "output": "sharded",
+    "name": "lpt/reduce_scatter/measured"
+   },
+   {
+    "scheduler": "lpt",
+    "reduce": "reduce_scatter",
+    "rates": "measured",
+    "output": "replicated",
+    "name": "lpt/reduce_scatter/measured/rep"
+   }
+  ],
+  "split": "auto",
+  "chunk_tokens": 262144,
+  "torch": "2.10.0+cu130",
+  "cuda_module": "cqsa_cuda_next_v11",
+  "engine_kw": {
+   "causal": true,
+   "stream_from_host": true,
+   "low_memory": false,
+   "allow_escalation": false,
+   "max_parallel": 1,
+   "out_device": "acc"
+  },
+  "B": 1,
+  "H": 8,
+  "D": 64,
+  "c": 7,
+  "interest_set": [
+   0,
+   1,
+   3
+  ],
+  "note": "FA-2 not measured here (engine-level multi-device rows; see fwd_ab/bwd_ab for kernel-level FA-2 arms)"
+ },
+ "rows": [
+  {
+   "direction": "fwd",
+   "N": 1048576,
+   "itr": 1,
+   "world": 4,
+   "tag": "het_sxm2_pcie2",
+   "throttle": null,
+   "layout": "aligned_128_shared",
+   "seg_align": 128,
+   "shared_chunks": true,
+   "arm": "rr/allreduce/seed",
+   "scheduler": "rr",
+   "reduce": "allreduce",
+   "output": "replicated",
+   "rates": "seed",
+   "split": "none",
+   "acc": "gpu",
+   "npar": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "gpus": [
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100 80GB PCIe",
+    "NVIDIA A100 80GB PCIe"
+   ],
+   "t_dist_s": 3.7159123359997466,
+   "t_local_per_rank": [
+    3.2455678430014814,
+    3.274645380999573,
+    3.3396404910017736,
+    1.875502465001773
+   ],
+   "t_merge_per_rank": [
+    0.4679512600014277,
+    0.4391041779999796,
+    0.37404846100253053,
+    1.838254638016224
+   ],
+   "t_schedule_s": 0.001647398999921279,
+   "predicted_local_per_rank": [
+    2.9739262452537316,
+    2.973367200477612,
+    3.3186543228041234,
+    1.9976955599175257
+   ],
+   "predicted_over_measured": [
+    0.9163038300575047,
+    0.9079967002625496,
+    0.993716039719187,
+    1.0651521910506458
+   ],
+   "predicted_makespan_s": 3.3186543228041234,
+   "predicted_ideal_s": 2.8269449841789136,
+   "predicted_ratio": 1.1739366494137935,
+   "t_local_max_s": 3.3396404910017736,
+   "t_local_mean_s": 2.9338390450011502,
+   "imbalance": 1.1383175558632135,
+   "effective_rate_per_rank": [
+    23642487.14303181,
+    23426832.24422401,
+    22962495.575982425,
+    20439258.660192568
+   ],
+   "rate_used_per_rank": [
+    33500000.0,
+    33500000.0,
+    29100000.0,
+    29100000.0
+   ],
+   "units_per_rank": [
+    [
+     [
+      1,
+      0,
+      449536,
+      4797587.0
+     ],
+     [
+      1,
+      4,
+      449408,
+      4794075.0
+     ]
+    ],
+    [
+     [
+      1,
+      1,
+      449408,
+      4795246.0
+     ],
+     [
+      1,
+      5,
+      449408,
+      4794075.0
+     ]
+    ],
+    [
+     [
+      1,
+      2,
+      449280,
+      4791735.0
+     ],
+     [
+      1,
+      6,
+      449408,
+      4794075.0
+     ]
+    ],
+    [
+     [
+      1,
+      3,
+      449280,
+      4791735.0
+     ]
+    ]
+   ],
+   "n_units_per_rank": [
+    2,
+    2,
+    2,
+    1
+   ],
+   "n_splits": 0,
+   "digest": "c8192e7e10c9563d",
+   "depth_calls_per_rank": [
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 3.2455485370010138
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 3.274629300001834
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 3.339626008004416
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 1,
+      "t_s": 1.8754834569990635
+     }
+    ]
+   ],
+   "dev_peak_above_start_gib_per_rank": [
+    7.766849517822266,
+    7.765591621398926,
+    7.765591621398926,
+    7.764333724975586
+   ],
+   "dev_start_gib_per_rank": [
+    2.031250476837158,
+    4.76837158203125e-07,
+    4.76837158203125e-07,
+    4.76837158203125e-07
+   ],
+   "host_rss_now_gib_per_rank": [
+    6.001735687255859,
+    5.961090087890625,
+    5.9830322265625,
+    5.945705413818359
+   ],
+   "host_rss_peak_gib_per_rank": [
+    6.360225677490234,
+    5.959728240966797,
+    5.982242584228516,
+    5.944606781005859
+   ],
+   "token_range_per_rank": [
+    [
+     0,
+     262144
+    ],
+    [
+     262144,
+     524288
+    ],
+    [
+     524288,
+     786432
+    ],
+    [
+     786432,
+     1048576
+    ]
+   ],
+   "n_collectives": 8,
+   "collective_bytes": 2214592512,
+   "rel_err": 3.326604414155554e-08,
+   "lse_max_abs_err": 9.5367431640625e-07,
+   "t_single_s": 9.235809972000425,
+   "speedup": 2.4854757423968072
+  },
+  {
+   "direction": "fwd",
+   "N": 1048576,
+   "itr": 1,
+   "world": 4,
+   "tag": "het_sxm2_pcie2",
+   "throttle": null,
+   "layout": "aligned_128_shared",
+   "seg_align": 128,
+   "shared_chunks": true,
+   "arm": "lpt/allreduce/seed",
+   "scheduler": "lpt",
+   "reduce": "allreduce",
+   "output": "replicated",
+   "rates": "seed",
+   "split": "children",
+   "acc": "gpu",
+   "npar": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "gpus": [
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100 80GB PCIe",
+    "NVIDIA A100 80GB PCIe"
+   ],
+   "t_dist_s": 3.6501002090008114,
+   "t_local_per_rank": [
+    3.287878333001572,
+    3.280101473999821,
+    3.3116474179842044,
+    1.8897178640181664
+   ],
+   "t_merge_per_rank": [
+    0.36000641899954644,
+    0.3678129140025703,
+    0.3364123959909193,
+    1.7583649330190383
+   ],
+   "t_schedule_s": 0.0016434520002803765,
+   "predicted_local_per_rank": [
+    2.9739262452537316,
+    2.973367200477612,
+    3.3180110238350515,
+    1.9983388588865978
+   ],
+   "predicted_over_measured": [
+    0.9045122550318864,
+    0.9064863462445962,
+    1.0019215831420607,
+    1.0574800063737912
+   ],
+   "predicted_makespan_s": 3.3180110238350515,
+   "predicted_ideal_s": 2.8269449841789136,
+   "predicted_ratio": 1.1737090896371893,
+   "t_local_max_s": 3.3116474179842044,
+   "t_local_mean_s": 2.942336272250941,
+   "imbalance": 1.1255162943869546,
+   "effective_rate_per_rank": [
+    23338240.72192738,
+    23387864.24995954,
+    23150942.815847095,
+    20295410.61672014
+   ],
+   "rate_used_per_rank": [
+    33500000.0,
+    33500000.0,
+    29100000.0,
+    29100000.0
+   ],
+   "units_per_rank": [
+    [
+     [
+      1,
+      0,
+      449536,
+      4797587.0
+     ],
+     [
+      1,
+      4,
+      449408,
+      4794075.0
+     ]
+    ],
+    [
+     [
+      1,
+      1,
+      449408,
+      4795246.0
+     ],
+     [
+      1,
+      6,
+      449408,
+      4794075.0
+     ]
+    ],
+    [
+     [
+      1,
+      3,
+      449280,
+      4791735.0
+     ],
+     [
+      1,
+      2,
+      449280,
+      4791735.0
+     ]
+    ],
+    [
+     [
+      1,
+      5,
+      449408,
+      4794075.0
+     ]
+    ]
+   ],
+   "n_units_per_rank": [
+    2,
+    2,
+    2,
+    1
+   ],
+   "n_splits": 0,
+   "digest": "c4b01fb37838d067",
+   "depth_calls_per_rank": [
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 3.2878595780020987
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 3.280082688997936
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 3.3116308390162885
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 1,
+      "t_s": 1.8897001820150763
+     }
+    ]
+   ],
+   "dev_peak_above_start_gib_per_rank": [
+    7.766849517822266,
+    7.765591621398926,
+    7.764333724975586,
+    7.765591621398926
+   ],
+   "dev_start_gib_per_rank": [
+    2.031250476837158,
+    4.76837158203125e-07,
+    4.76837158203125e-07,
+    4.76837158203125e-07
+   ],
+   "host_rss_now_gib_per_rank": [
+    6.046985626220703,
+    5.961296081542969,
+    5.98309326171875,
+    5.945766448974609
+   ],
+   "host_rss_peak_gib_per_rank": [
+    6.360225677490234,
+    5.9604644775390625,
+    5.982242584228516,
+    5.944606781005859
+   ],
+   "token_range_per_rank": [
+    [
+     0,
+     262144
+    ],
+    [
+     262144,
+     524288
+    ],
+    [
+     524288,
+     786432
+    ],
+    [
+     786432,
+     1048576
+    ]
+   ],
+   "n_collectives": 8,
+   "collective_bytes": 2214592512,
+   "rel_err": 3.6570362738075346e-08,
+   "lse_max_abs_err": 9.5367431640625e-07,
+   "t_single_s": 9.235809972000425,
+   "speedup": 2.5302894285548017
+  },
+  {
+   "direction": "fwd",
+   "N": 1048576,
+   "itr": 1,
+   "world": 4,
+   "tag": "het_sxm2_pcie2",
+   "throttle": null,
+   "layout": "aligned_128_shared",
+   "seg_align": 128,
+   "shared_chunks": true,
+   "arm": "lpt/allreduce/measured",
+   "scheduler": "lpt",
+   "reduce": "allreduce",
+   "output": "replicated",
+   "rates": "measured",
+   "split": "children",
+   "acc": "gpu",
+   "npar": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "gpus": [
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100 80GB PCIe",
+    "NVIDIA A100 80GB PCIe"
+   ],
+   "t_dist_s": 3.623262404998968,
+   "t_local_per_rank": [
+    3.281256697002391,
+    3.2825691550024203,
+    1.9289791450137272,
+    3.2337596099823713
+   ],
+   "t_merge_per_rank": [
+    0.33994610399895464,
+    0.3386646630024188,
+    1.6923611800011713,
+    0.3876156299957074
+   ],
+   "t_schedule_s": 0.0015467389966943301,
+   "predicted_local_per_rank": [
+    2.665145695609772,
+    2.6661069867078533,
+    1.9180001705885066,
+    3.0375469710593332
+   ],
+   "predicted_over_measured": [
+    0.8122332209011656,
+    0.8122013157422383,
+    0.9943084016985873,
+    0.9393236781369448
+   ],
+   "predicted_makespan_s": 3.0375469710593332,
+   "predicted_ideal_s": 2.587106672684677,
+   "predicted_ratio": 1.1741096736097194,
+   "t_local_max_s": 3.2825691550024203,
+   "t_local_mean_s": 2.9316411517502274,
+   "imbalance": 1.119703601186893,
+   "effective_rate_per_rank": [
+    23385337.718350444,
+    23370282.354323603,
+    19882330.039253518,
+    23708552.65905741
+   ],
+   "rate_used_per_rank": [
+    38719662.9183136,
+    38691444.77715342,
+    30988993.138909586,
+    32566833.223353256
+   ],
+   "units_per_rank": [
+    [
+     [
+      1,
+      0,
+      449536,
+      4797587.0
+     ],
+     [
+      1,
+      6,
+      449408,
+      4794075.0
+     ]
+    ],
+    [
+     [
+      1,
+      1,
+      449408,
+      4795246.0
+     ],
+     [
+      1,
+      4,
+      449408,
+      4794075.0
+     ]
+    ],
+    [
+     [
+      1,
+      5,
+      449408,
+      4794075.0
+     ]
+    ],
+    [
+     [
+      1,
+      3,
+      449280,
+      4791735.0
+     ],
+     [
+      1,
+      2,
+      449280,
+      4791735.0
+     ]
+    ]
+   ],
+   "n_units_per_rank": [
+    2,
+    2,
+    1,
+    2
+   ],
+   "n_splits": 0,
+   "digest": "ab9a8ea25c333702",
+   "depth_calls_per_rank": [
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 3.2812426810014585
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 3.2825549589979346
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 1,
+      "t_s": 1.9289621049829293
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 3.2337461780116428
+     }
+    ]
+   ],
+   "dev_peak_above_start_gib_per_rank": [
+    7.766849517822266,
+    7.765591621398926,
+    7.765591621398926,
+    7.764333724975586
+   ],
+   "dev_start_gib_per_rank": [
+    2.031250476837158,
+    4.76837158203125e-07,
+    4.76837158203125e-07,
+    4.76837158203125e-07
+   ],
+   "host_rss_now_gib_per_rank": [
+    6.047019958496094,
+    5.961368560791016,
+    5.983123779296875,
+    5.945804595947266
+   ],
+   "host_rss_peak_gib_per_rank": [
+    6.360225677490234,
+    5.9604644775390625,
+    5.982242584228516,
+    5.944606781005859
+   ],
+   "token_range_per_rank": [
+    [
+     0,
+     262144
+    ],
+    [
+     262144,
+     524288
+    ],
+    [
+     524288,
+     786432
+    ],
+    [
+     786432,
+     1048576
+    ]
+   ],
+   "n_collectives": 8,
+   "collective_bytes": 2214592512,
+   "rel_err": 3.462809416987511e-08,
+   "lse_max_abs_err": 9.5367431640625e-07,
+   "t_single_s": 9.235809972000425,
+   "speedup": 2.5490314914144494
+  },
+  {
+   "direction": "fwd",
+   "N": 1048576,
+   "itr": 1,
+   "world": 4,
+   "tag": "het_sxm2_pcie2",
+   "throttle": null,
+   "layout": "aligned_128_shared",
+   "seg_align": 128,
+   "shared_chunks": true,
+   "arm": "lpt/reduce_scatter/measured",
+   "scheduler": "lpt",
+   "reduce": "reduce_scatter",
+   "output": "sharded",
+   "rates": "measured",
+   "split": "children",
+   "acc": "gpu",
+   "npar": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "gpus": [
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100 80GB PCIe",
+    "NVIDIA A100 80GB PCIe"
+   ],
+   "t_dist_s": 3.6396335999997973,
+   "t_local_per_rank": [
+    3.293603122001514,
+    3.294313977999991,
+    1.9323408640048,
+    3.242027471016627
+   ],
+   "t_merge_per_rank": [
+    0.3438044520007679,
+    0.34334442600084003,
+    1.705479677009862,
+    0.39540770900202915
+   ],
+   "t_schedule_s": 0.0014959639993321616,
+   "predicted_local_per_rank": [
+    2.665145695609772,
+    2.6661069867078533,
+    1.9180001705885066,
+    3.0375469710593332
+   ],
+   "predicted_over_measured": [
+    0.8091884774478141,
+    0.8093056716853905,
+    0.9925785902045396,
+    0.9369282025567868
+   ],
+   "predicted_makespan_s": 3.0375469710593332,
+   "predicted_ideal_s": 2.587106672684677,
+   "predicted_ratio": 1.1741096736097194,
+   "t_local_max_s": 3.294313977999991,
+   "t_local_mean_s": 2.940571358755733,
+   "imbalance": 1.120297240259437,
+   "effective_rate_per_rank": [
+    23297675.268588334,
+    23286963.086188324,
+    19847740.486382805,
+    23648090.796700966
+   ],
+   "rate_used_per_rank": [
+    38719662.9183136,
+    38691444.77715342,
+    30988993.138909586,
+    32566833.223353256
+   ],
+   "units_per_rank": [
+    [
+     [
+      1,
+      0,
+      449536,
+      4797587.0
+     ],
+     [
+      1,
+      6,
+      449408,
+      4794075.0
+     ]
+    ],
+    [
+     [
+      1,
+      1,
+      449408,
+      4795246.0
+     ],
+     [
+      1,
+      4,
+      449408,
+      4794075.0
+     ]
+    ],
+    [
+     [
+      1,
+      5,
+      449408,
+      4794075.0
+     ]
+    ],
+    [
+     [
+      1,
+      3,
+      449280,
+      4791735.0
+     ],
+     [
+      1,
+      2,
+      449280,
+      4791735.0
+     ]
+    ]
+   ],
+   "n_units_per_rank": [
+    2,
+    2,
+    1,
+    2
+   ],
+   "n_splits": 0,
+   "digest": "ab9a8ea25c333702",
+   "depth_calls_per_rank": [
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 3.2935903780016815
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 3.2942996920028236
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 1,
+      "t_s": 1.9323278839874547
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 3.2420151499973144
+     }
+    ]
+   ],
+   "dev_peak_above_start_gib_per_rank": [
+    7.766849517822266,
+    7.765591621398926,
+    7.765591621398926,
+    7.764333724975586
+   ],
+   "dev_start_gib_per_rank": [
+    2.031250476837158,
+    4.76837158203125e-07,
+    4.76837158203125e-07,
+    4.76837158203125e-07
+   ],
+   "host_rss_now_gib_per_rank": [
+    6.047069549560547,
+    5.961429595947266,
+    5.983154296875,
+    5.945850372314453
+   ],
+   "host_rss_peak_gib_per_rank": [
+    6.360225677490234,
+    5.960468292236328,
+    5.982242584228516,
+    5.944606781005859
+   ],
+   "token_range_per_rank": [
+    [
+     0,
+     262144
+    ],
+    [
+     262144,
+     524288
+    ],
+    [
+     524288,
+     786432
+    ],
+    [
+     786432,
+     1048576
+    ]
+   ],
+   "n_collectives": 12,
+   "collective_bytes": 2214592512,
+   "rel_err": 3.4247726432568015e-08,
+   "lse_max_abs_err": 9.5367431640625e-07,
+   "t_single_s": 9.235809972000425,
+   "speedup": 2.5375658615748957
+  },
+  {
+   "direction": "fwd",
+   "N": 1048576,
+   "itr": 1,
+   "world": 4,
+   "tag": "het_sxm2_pcie2",
+   "throttle": null,
+   "layout": "aligned_128_shared",
+   "seg_align": 128,
+   "shared_chunks": true,
+   "arm": "lpt/reduce_scatter/measured/rep",
+   "scheduler": "lpt",
+   "reduce": "reduce_scatter",
+   "output": "replicated",
+   "rates": "measured",
+   "split": "children",
+   "acc": "gpu",
+   "npar": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "gpus": [
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100 80GB PCIe",
+    "NVIDIA A100 80GB PCIe"
+   ],
+   "t_dist_s": 3.9307126219973725,
+   "t_local_per_rank": [
+    3.2401445629984664,
+    3.2698690760007594,
+    1.9308616199996322,
+    3.242613854992669
+   ],
+   "t_merge_per_rank": [
+    0.6881376180026564,
+    0.658932680998987,
+    1.998021500010509,
+    0.6857291930064093
+   ],
+   "t_schedule_s": 0.001475785975344479,
+   "predicted_local_per_rank": [
+    2.665145695609772,
+    2.6661069867078533,
+    1.9180001705885066,
+    3.0375469710593332
+   ],
+   "predicted_over_measured": [
+    0.8225391317551016,
+    0.8153558826791493,
+    0.993339010275046,
+    0.9367587714406409
+   ],
+   "predicted_makespan_s": 3.0375469710593332,
+   "predicted_ideal_s": 2.587106672684677,
+   "predicted_ratio": 1.1741096736097194,
+   "t_local_max_s": 3.2698690760007594,
+   "t_local_mean_s": 2.920872278497882,
+   "imbalance": 1.1194837583526098,
+   "effective_rate_per_rank": [
+    23682059.398297384,
+    23461051.869950216,
+    19862945.95259877,
+    23643814.35117668
+   ],
+   "rate_used_per_rank": [
+    38719662.9183136,
+    38691444.77715342,
+    30988993.138909586,
+    32566833.223353256
+   ],
+   "units_per_rank": [
+    [
+     [
+      1,
+      0,
+      449536,
+      4797587.0
+     ],
+     [
+      1,
+      6,
+      449408,
+      4794075.0
+     ]
+    ],
+    [
+     [
+      1,
+      1,
+      449408,
+      4795246.0
+     ],
+     [
+      1,
+      4,
+      449408,
+      4794075.0
+     ]
+    ],
+    [
+     [
+      1,
+      5,
+      449408,
+      4794075.0
+     ]
+    ],
+    [
+     [
+      1,
+      3,
+      449280,
+      4791735.0
+     ],
+     [
+      1,
+      2,
+      449280,
+      4791735.0
+     ]
+    ]
+   ],
+   "n_units_per_rank": [
+    2,
+    2,
+    1,
+    2
+   ],
+   "n_splits": 0,
+   "digest": "ab9a8ea25c333702",
+   "depth_calls_per_rank": [
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 3.24013181799819
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 3.269855030001054
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 1,
+      "t_s": 1.9308496140001807
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 3.242601111996919
+     }
+    ]
+   ],
+   "dev_peak_above_start_gib_per_rank": [
+    7.766849517822266,
+    7.765591621398926,
+    7.765591621398926,
+    7.764333724975586
+   ],
+   "dev_start_gib_per_rank": [
+    2.031250476837158,
+    4.76837158203125e-07,
+    4.76837158203125e-07,
+    4.76837158203125e-07
+   ],
+   "host_rss_now_gib_per_rank": [
+    6.053276062011719,
+    5.961483001708984,
+    5.987949371337891,
+    5.950649261474609
+   ],
+   "host_rss_peak_gib_per_rank": [
+    6.360225677490234,
+    5.960472106933594,
+    5.986637115478516,
+    5.949005126953125
+   ],
+   "token_range_per_rank": [
+    [
+     0,
+     262144
+    ],
+    [
+     262144,
+     524288
+    ],
+    [
+     524288,
+     786432
+    ],
+    [
+     786432,
+     1048576
+    ]
+   ],
+   "n_collectives": 16,
+   "collective_bytes": 4362076160,
+   "rel_err": 3.4247726432568015e-08,
+   "lse_max_abs_err": 9.5367431640625e-07,
+   "t_single_s": 9.235809972000425,
+   "speedup": 2.3496528136690116
+  },
+  {
+   "direction": "fwd",
+   "N": 2097152,
+   "itr": 1,
+   "world": 4,
+   "tag": "het_sxm2_pcie2",
+   "throttle": null,
+   "layout": "aligned_128_shared",
+   "seg_align": 128,
+   "shared_chunks": true,
+   "arm": "rr/allreduce/seed",
+   "scheduler": "rr",
+   "reduce": "allreduce",
+   "output": "replicated",
+   "rates": "seed",
+   "split": "none",
+   "acc": "gpu",
+   "npar": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "gpus": [
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100 80GB PCIe",
+    "NVIDIA A100 80GB PCIe"
+   ],
+   "t_dist_s": 12.45017567800096,
+   "t_local_per_rank": [
+    11.073907793001126,
+    11.053907829002128,
+    11.773038126993924,
+    6.273791751009412
+   ],
+   "t_merge_per_rank": [
+    1.3737558089997037,
+    1.3937991949969728,
+    0.6748027960129548,
+    6.174079613992944
+   ],
+   "t_schedule_s": 0.001620637998712482,
+   "predicted_local_per_rank": [
+    10.51959099797015,
+    10.518472908417912,
+    11.904431119835053,
+    6.628630570006873
+   ],
+   "predicted_over_measured": [
+    0.9499438856280424,
+    0.9515614813451406,
+    1.0111605000700594,
+    1.0565589093613714
+   ],
+   "predicted_makespan_s": 11.904431119835053,
+   "predicted_ideal_s": 9.936746294236423,
+   "predicted_ratio": 1.198021039013539,
+   "t_local_max_s": 11.773038126993924,
+   "t_local_mean_s": 10.043661375001648,
+   "imbalance": 1.1721858879369071,
+   "effective_rate_per_rank": [
+    27706645.001497604,
+    27753386.471623432,
+    26061312.355432104,
+    24448106.358538564
+   ],
+   "rate_used_per_rank": [
+    33500000.0,
+    33500000.0,
+    29100000.0,
+    29100000.0
+   ],
+   "units_per_rank": [
+    [
+     [
+      1,
+      0,
+      898944,
+      19182154.0
+     ],
+     [
+      1,
+      4,
+      898688,
+      19170450.0
+     ]
+    ],
+    [
+     [
+      1,
+      1,
+      898816,
+      19177472.0
+     ],
+     [
+      1,
+      5,
+      898688,
+      19170450.0
+     ]
+    ],
+    [
+     [
+      1,
+      2,
+      898816,
+      19177472.0
+     ],
+     [
+      1,
+      6,
+      898816,
+      19175131.0
+     ]
+    ],
+    [
+     [
+      1,
+      3,
+      898688,
+      19172791.0
+     ]
+    ]
+   ],
+   "n_units_per_rank": [
+    2,
+    2,
+    2,
+    1
+   ],
+   "n_splits": 0,
+   "digest": "c8192e7e10c9563d",
+   "depth_calls_per_rank": [
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 11.07389103099922
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 11.05388648799999
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 11.773021798988339
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 1,
+      "t_s": 6.273772817017743
+     }
+    ]
+   ],
+   "dev_peak_above_start_gib_per_rank": [
+    15.531342029571533,
+    15.530084133148193,
+    15.530084133148193,
+    15.528826236724854
+   ],
+   "dev_start_gib_per_rank": [
+    4.062500476837158,
+    4.76837158203125e-07,
+    4.76837158203125e-07,
+    4.76837158203125e-07
+   ],
+   "host_rss_now_gib_per_rank": [
+    12.037948608398438,
+    11.990604400634766,
+    12.020816802978516,
+    11.98343276977539
+   ],
+   "host_rss_peak_gib_per_rank": [
+    12.036277770996094,
+    11.989429473876953,
+    12.019527435302734,
+    11.98135757446289
+   ],
+   "token_range_per_rank": [
+    [
+     0,
+     524288
+    ],
+    [
+     524288,
+     1048576
+    ],
+    [
+     1048576,
+     1572864
+    ],
+    [
+     1572864,
+     2097152
+    ]
+   ],
+   "n_collectives": 16,
+   "collective_bytes": 4429185024,
+   "rel_err": 3.2952730322222124e-08,
+   "lse_max_abs_err": 9.5367431640625e-07,
+   "t_single_s": 34.20586442300191,
+   "speedup": 2.74742022182406
+  },
+  {
+   "direction": "fwd",
+   "N": 2097152,
+   "itr": 1,
+   "world": 4,
+   "tag": "het_sxm2_pcie2",
+   "throttle": null,
+   "layout": "aligned_128_shared",
+   "seg_align": 128,
+   "shared_chunks": true,
+   "arm": "lpt/allreduce/seed",
+   "scheduler": "lpt",
+   "reduce": "allreduce",
+   "output": "replicated",
+   "rates": "seed",
+   "split": "children",
+   "acc": "gpu",
+   "npar": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "gpus": [
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100 80GB PCIe",
+    "NVIDIA A100 80GB PCIe"
+   ],
+   "t_dist_s": 11.747311666000314,
+   "t_local_per_rank": [
+    11.054850582000654,
+    11.033878219001053,
+    10.190045908995671,
+    9.870187347987667
+   ],
+   "t_merge_per_rank": [
+    0.6899872280009731,
+    0.7109453339980973,
+    1.5549357190029696,
+    1.8748536570055876
+   ],
+   "t_schedule_s": 0.001794576000975212,
+   "predicted_local_per_rank": [
+    10.518472908417912,
+    10.51847290841791,
+    10.418084618776634,
+    10.322947994831615
+   ],
+   "predicted_over_measured": [
+    0.9514803325830505,
+    0.9532888345916687,
+    1.0223785753094254,
+    1.0458715352486452
+   ],
+   "predicted_makespan_s": 10.518472908417912,
+   "predicted_ideal_s": 9.936746294236423,
+   "predicted_ratio": 1.0585429673814764,
+   "t_local_max_s": 11.054850582000654,
+   "t_local_mean_s": 10.537240514496261,
+   "imbalance": 1.0491219752260859,
+   "effective_rate_per_rank": [
+    27751019.674521897,
+    27803766.71836917,
+    22426240.081829358,
+    23476372.213668495
+   ],
+   "rate_used_per_rank": [
+    33500000.0,
+    33500000.0,
+    29100000.0,
+    29100000.0
+   ],
+   "units_per_rank": [
+    [
+     [
+      1,
+      5,
+      898688,
+      19170450.0
+     ],
+     [
+      1,
+      1,
+      898816,
+      19177472.0
+     ]
+    ],
+    [
+     [
+      1,
+      3,
+      898688,
+      19172791.0
+     ],
+     [
+      1,
+      6,
+      898816,
+      19175131.0
+     ]
+    ],
+    [
+     [
+      1,
+      2,
+      898816,
+      19177472.0
+     ],
+     [
+      2,
+      28,
+      385152,
+      2012018.0
+     ],
+     [
+      2,
+      33,
+      385152,
+      2012018.0
+     ],
+     [
+      2,
+      29,
+      385152,
+      2682022.0
+     ],
+     [
+      2,
+      34,
+      385152,
+      2682022.0
+     ]
+    ],
+    [
+     [
+      2,
+      30,
+      385152,
+      3465253.0
+     ],
+     [
+      2,
+      31,
+      385152,
+      3186531.0
+     ],
+     [
+      2,
+      32,
+      385152,
+      3130586.0
+     ],
+     [
+      1,
+      0,
+      898944,
+      19182154.0
+     ]
+    ]
+   ],
+   "n_units_per_rank": [
+    2,
+    2,
+    5,
+    4
+   ],
+   "n_splits": 1,
+   "digest": "f8ed843e19985392",
+   "depth_calls_per_rank": [
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 11.054837767998833
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 11.033861608000734
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 1,
+      "t_s": 6.408934114006115
+     },
+     {
+      "depth": 2,
+      "n_units": 4,
+      "t_s": 3.7810952040017582
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 1,
+      "t_s": 6.278068337996956
+     },
+     {
+      "depth": 2,
+      "n_units": 3,
+      "t_s": 3.59210213800543
+     }
+    ]
+   ],
+   "dev_peak_above_start_gib_per_rank": [
+    15.530084133148193,
+    15.530084133148193,
+    15.530084133148193,
+    15.531342029571533
+   ],
+   "dev_start_gib_per_rank": [
+    4.062500476837158,
+    4.76837158203125e-07,
+    4.76837158203125e-07,
+    4.76837158203125e-07
+   ],
+   "host_rss_now_gib_per_rank": [
+    12.041900634765625,
+    11.99066162109375,
+    13.520931243896484,
+    13.483505249023438
+   ],
+   "host_rss_peak_gib_per_rank": [
+    12.040023803710938,
+    11.989551544189453,
+    13.519660949707031,
+    13.48184585571289
+   ],
+   "token_range_per_rank": [
+    [
+     0,
+     524288
+    ],
+    [
+     524288,
+     1048576
+    ],
+    [
+     1048576,
+     1572864
+    ],
+    [
+     1572864,
+     2097152
+    ]
+   ],
+   "n_collectives": 16,
+   "collective_bytes": 4429185024,
+   "rel_err": 6.372426287271082e-05,
+   "lse_max_abs_err": 5.7220458984375e-06,
+   "t_single_s": 34.20586442300191,
+   "speedup": 2.9118036020106897
+  },
+  {
+   "direction": "fwd",
+   "N": 2097152,
+   "itr": 1,
+   "world": 4,
+   "tag": "het_sxm2_pcie2",
+   "throttle": null,
+   "layout": "aligned_128_shared",
+   "seg_align": 128,
+   "shared_chunks": true,
+   "arm": "lpt/allreduce/measured",
+   "scheduler": "lpt",
+   "reduce": "allreduce",
+   "output": "replicated",
+   "rates": "measured",
+   "split": "children",
+   "acc": "gpu",
+   "npar": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "gpus": [
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100 80GB PCIe",
+    "NVIDIA A100 80GB PCIe"
+   ],
+   "t_dist_s": 11.763067628002318,
+   "t_local_per_rank": [
+    11.058705726998596,
+    11.070345604999602,
+    10.01676971098641,
+    10.149852339993231
+   ],
+   "t_merge_per_rank": [
+    0.7019787370008999,
+    0.6903136430009909,
+    1.744108724000398,
+    1.6110384649946354
+   ],
+   "t_schedule_s": 0.0015804439972271211,
+   "predicted_local_per_rank": [
+    9.285888069465647,
+    9.291183926943676,
+    9.704299467868198,
+    9.70488449785296
+   ],
+   "predicted_over_measured": [
+    0.8396903126552312,
+    0.8392858053815032,
+    0.9688052883180999,
+    0.9561601659575899
+   ],
+   "predicted_makespan_s": 9.70488449785296,
+   "predicted_ideal_s": 8.977451595387876,
+   "predicted_ratio": 1.081028886063702,
+   "t_local_max_s": 11.070345604999602,
+   "t_local_mean_s": 10.57391834574446,
+   "imbalance": 1.0469482781144166,
+   "effective_rate_per_rank": [
+    27748118.77404783,
+    27717251.380248215,
+    22720547.099169385,
+    22909007.166911658
+   ],
+   "rate_used_per_rank": [
+    38719662.9183136,
+    38691444.77715342,
+    30988993.138909586,
+    32566833.223353256
+   ],
+   "units_per_rank": [
+    [
+     [
+      1,
+      0,
+      898944,
+      19182154.0
+     ],
+     [
+      1,
+      6,
+      898816,
+      19175131.0
+     ]
+    ],
+    [
+     [
+      1,
+      1,
+      898816,
+      19177472.0
+     ],
+     [
+      1,
+      2,
+      898816,
+      19177472.0
+     ]
+    ],
+    [
+     [
+      2,
+      29,
+      385152,
+      2682022.0
+     ],
+     [
+      2,
+      30,
+      385152,
+      3465253.0
+     ],
+     [
+      2,
+      32,
+      385152,
+      3130586.0
+     ],
+     [
+      1,
+      5,
+      898688,
+      19170450.0
+     ]
+    ],
+    [
+     [
+      2,
+      34,
+      385152,
+      2682022.0
+     ],
+     [
+      2,
+      33,
+      385152,
+      2012018.0
+     ],
+     [
+      2,
+      28,
+      385152,
+      2012018.0
+     ],
+     [
+      2,
+      31,
+      385152,
+      3186531.0
+     ],
+     [
+      1,
+      3,
+      898688,
+      19172791.0
+     ]
+    ]
+   ],
+   "n_units_per_rank": [
+    2,
+    2,
+    4,
+    5
+   ],
+   "n_splits": 1,
+   "digest": "7d98f0b82772d1bc",
+   "depth_calls_per_rank": [
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 11.058693293998658
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 11.070330045000446
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 1,
+      "t_s": 6.473704125004588
+     },
+     {
+      "depth": 2,
+      "n_units": 3,
+      "t_s": 3.543047867977293
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 1,
+      "t_s": 6.299400318006519
+     },
+     {
+      "depth": 2,
+      "n_units": 4,
+      "t_s": 3.850424792006379
+     }
+    ]
+   ],
+   "dev_peak_above_start_gib_per_rank": [
+    15.531342029571533,
+    15.530084133148193,
+    15.528826236724854,
+    15.528826236724854
+   ],
+   "dev_start_gib_per_rank": [
+    4.062500476837158,
+    4.76837158203125e-07,
+    4.76837158203125e-07,
+    4.76837158203125e-07
+   ],
+   "host_rss_now_gib_per_rank": [
+    12.041927337646484,
+    11.990673065185547,
+    13.520942687988281,
+    13.483539581298828
+   ],
+   "host_rss_peak_gib_per_rank": [
+    12.04007339477539,
+    11.989555358886719,
+    13.51971435546875,
+    13.481849670410156
+   ],
+   "token_range_per_rank": [
+    [
+     0,
+     524288
+    ],
+    [
+     524288,
+     1048576
+    ],
+    [
+     1048576,
+     1572864
+    ],
+    [
+     1572864,
+     2097152
+    ]
+   ],
+   "n_collectives": 16,
+   "collective_bytes": 4429185024,
+   "rel_err": 6.372407369781286e-05,
+   "lse_max_abs_err": 5.7220458984375e-06,
+   "t_single_s": 34.20586442300191,
+   "speedup": 2.9079034062147087
+  },
+  {
+   "direction": "fwd",
+   "N": 2097152,
+   "itr": 1,
+   "world": 4,
+   "tag": "het_sxm2_pcie2",
+   "throttle": null,
+   "layout": "aligned_128_shared",
+   "seg_align": 128,
+   "shared_chunks": true,
+   "arm": "lpt/reduce_scatter/measured",
+   "scheduler": "lpt",
+   "reduce": "reduce_scatter",
+   "output": "sharded",
+   "rates": "measured",
+   "split": "children",
+   "acc": "gpu",
+   "npar": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "gpus": [
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100 80GB PCIe",
+    "NVIDIA A100 80GB PCIe"
+   ],
+   "t_dist_s": 11.769077490997006,
+   "t_local_per_rank": [
+    11.057659766996949,
+    11.068148237998685,
+    10.02155470100115,
+    10.160111457982566
+   ],
+   "t_merge_per_rank": [
+    0.7085892430004606,
+    0.6983796569984406,
+    1.7451028549985494,
+    1.606218983011786
+   ],
+   "t_schedule_s": 0.0019505730015225708,
+   "predicted_local_per_rank": [
+    9.285888069465647,
+    9.291183926943676,
+    9.704299467868198,
+    9.70488449785296
+   ],
+   "predicted_over_measured": [
+    0.8397697401741923,
+    0.8394524293635305,
+    0.9683427130222361,
+    0.9551946883641769
+   ],
+   "predicted_makespan_s": 9.70488449785296,
+   "predicted_ideal_s": 8.977451595387876,
+   "predicted_ratio": 1.081028886063702,
+   "t_local_max_s": 11.068148237998685,
+   "t_local_mean_s": 10.576868540994838,
+   "imbalance": 1.0464485017564225,
+   "effective_rate_per_rank": [
+    27750743.50866349,
+    27722754.105024707,
+    22709698.723419048,
+    22885874.919936236
+   ],
+   "rate_used_per_rank": [
+    38719662.9183136,
+    38691444.77715342,
+    30988993.138909586,
+    32566833.223353256
+   ],
+   "units_per_rank": [
+    [
+     [
+      1,
+      0,
+      898944,
+      19182154.0
+     ],
+     [
+      1,
+      6,
+      898816,
+      19175131.0
+     ]
+    ],
+    [
+     [
+      1,
+      1,
+      898816,
+      19177472.0
+     ],
+     [
+      1,
+      2,
+      898816,
+      19177472.0
+     ]
+    ],
+    [
+     [
+      2,
+      29,
+      385152,
+      2682022.0
+     ],
+     [
+      2,
+      30,
+      385152,
+      3465253.0
+     ],
+     [
+      2,
+      32,
+      385152,
+      3130586.0
+     ],
+     [
+      1,
+      5,
+      898688,
+      19170450.0
+     ]
+    ],
+    [
+     [
+      2,
+      34,
+      385152,
+      2682022.0
+     ],
+     [
+      2,
+      33,
+      385152,
+      2012018.0
+     ],
+     [
+      2,
+      28,
+      385152,
+      2012018.0
+     ],
+     [
+      2,
+      31,
+      385152,
+      3186531.0
+     ],
+     [
+      1,
+      3,
+      898688,
+      19172791.0
+     ]
+    ]
+   ],
+   "n_units_per_rank": [
+    2,
+    2,
+    4,
+    5
+   ],
+   "n_splits": 1,
+   "digest": "7d98f0b82772d1bc",
+   "depth_calls_per_rank": [
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 11.057643427000585
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 11.068127538997942
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 1,
+      "t_s": 6.478134334989591
+     },
+     {
+      "depth": 2,
+      "n_units": 3,
+      "t_s": 3.543402794020949
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 1,
+      "t_s": 6.303629616973922
+     },
+     {
+      "depth": 2,
+      "n_units": 4,
+      "t_s": 3.8564646009763237
+     }
+    ]
+   ],
+   "dev_peak_above_start_gib_per_rank": [
+    15.531342029571533,
+    15.530084133148193,
+    15.528826236724854,
+    15.528826236724854
+   ],
+   "dev_start_gib_per_rank": [
+    4.062500476837158,
+    4.76837158203125e-07,
+    4.76837158203125e-07,
+    4.76837158203125e-07
+   ],
+   "host_rss_now_gib_per_rank": [
+    12.04196548461914,
+    11.99068832397461,
+    13.520992279052734,
+    13.48358154296875
+   ],
+   "host_rss_peak_gib_per_rank": [
+    12.04007339477539,
+    11.989559173583984,
+    13.51971435546875,
+    13.481853485107422
+   ],
+   "token_range_per_rank": [
+    [
+     0,
+     524288
+    ],
+    [
+     524288,
+     1048576
+    ],
+    [
+     1048576,
+     1572864
+    ],
+    [
+     1572864,
+     2097152
+    ]
+   ],
+   "n_collectives": 24,
+   "collective_bytes": 4429185024,
+   "rel_err": 6.372406642185524e-05,
+   "lse_max_abs_err": 5.7220458984375e-06,
+   "t_single_s": 34.20586442300191,
+   "speedup": 2.9064184893988827
+  },
+  {
+   "direction": "fwd",
+   "N": 2097152,
+   "itr": 1,
+   "world": 4,
+   "tag": "het_sxm2_pcie2",
+   "throttle": null,
+   "layout": "aligned_128_shared",
+   "seg_align": 128,
+   "shared_chunks": true,
+   "arm": "lpt/reduce_scatter/measured/rep",
+   "scheduler": "lpt",
+   "reduce": "reduce_scatter",
+   "output": "replicated",
+   "rates": "measured",
+   "split": "children",
+   "acc": "gpu",
+   "npar": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "gpus": [
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100 80GB PCIe",
+    "NVIDIA A100 80GB PCIe"
+   ],
+   "t_dist_s": 12.396573150999757,
+   "t_local_per_rank": [
+    11.054146599002706,
+    11.060701179001626,
+    10.03402723299223,
+    10.264302815019619
+   ],
+   "t_merge_per_rank": [
+    1.3398098499965272,
+    1.3337496799977089,
+    2.3605481890263036,
+    2.1297813419951126
+   ],
+   "t_schedule_s": 0.0015703839999332558,
+   "predicted_local_per_rank": [
+    9.285888069465647,
+    9.291183926943676,
+    9.704299467868198,
+    9.70488449785296
+   ],
+   "predicted_over_measured": [
+    0.8400366311681998,
+    0.8400176242517681,
+    0.9671390402410036,
+    0.9454986541951911
+   ],
+   "predicted_makespan_s": 9.70488449785296,
+   "predicted_ideal_s": 8.977451595387876,
+   "predicted_ratio": 1.081028886063702,
+   "t_local_max_s": 11.060701179001626,
+   "t_local_mean_s": 10.603294456504045,
+   "imbalance": 1.0431381703463878,
+   "effective_rate_per_rank": [
+    27759563.097135372,
+    27741419.55688349,
+    22681470.03345653,
+    22653563.928350993
+   ],
+   "rate_used_per_rank": [
+    38719662.9183136,
+    38691444.77715342,
+    30988993.138909586,
+    32566833.223353256
+   ],
+   "units_per_rank": [
+    [
+     [
+      1,
+      0,
+      898944,
+      19182154.0
+     ],
+     [
+      1,
+      6,
+      898816,
+      19175131.0
+     ]
+    ],
+    [
+     [
+      1,
+      1,
+      898816,
+      19177472.0
+     ],
+     [
+      1,
+      2,
+      898816,
+      19177472.0
+     ]
+    ],
+    [
+     [
+      2,
+      29,
+      385152,
+      2682022.0
+     ],
+     [
+      2,
+      30,
+      385152,
+      3465253.0
+     ],
+     [
+      2,
+      32,
+      385152,
+      3130586.0
+     ],
+     [
+      1,
+      5,
+      898688,
+      19170450.0
+     ]
+    ],
+    [
+     [
+      2,
+      34,
+      385152,
+      2682022.0
+     ],
+     [
+      2,
+      33,
+      385152,
+      2012018.0
+     ],
+     [
+      2,
+      28,
+      385152,
+      2012018.0
+     ],
+     [
+      2,
+      31,
+      385152,
+      3186531.0
+     ],
+     [
+      1,
+      3,
+      898688,
+      19172791.0
+     ]
+    ]
+   ],
+   "n_units_per_rank": [
+    2,
+    2,
+    4,
+    5
+   ],
+   "n_splits": 1,
+   "digest": "7d98f0b82772d1bc",
+   "depth_calls_per_rank": [
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 11.054133012999955
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 11.06068544899972
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 1,
+      "t_s": 6.481898165016901
+     },
+     {
+      "depth": 2,
+      "n_units": 3,
+      "t_s": 3.552111994009465
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 1,
+      "t_s": 6.398652291012695
+     },
+     {
+      "depth": 2,
+      "n_units": 4,
+      "t_s": 3.8656342340109404
+     }
+    ]
+   ],
+   "dev_peak_above_start_gib_per_rank": [
+    15.531342029571533,
+    15.530084133148193,
+    15.528826236724854,
+    15.528826236724854
+   ],
+   "dev_start_gib_per_rank": [
+    4.062500476837158,
+    4.76837158203125e-07,
+    4.76837158203125e-07,
+    4.76837158203125e-07
+   ],
+   "host_rss_now_gib_per_rank": [
+    12.042060852050781,
+    11.990768432617188,
+    13.52103042602539,
+    13.483596801757812
+   ],
+   "host_rss_peak_gib_per_rank": [
+    12.04043960571289,
+    11.989566802978516,
+    13.51971435546875,
+    13.481864929199219
+   ],
+   "token_range_per_rank": [
+    [
+     0,
+     524288
+    ],
+    [
+     524288,
+     1048576
+    ],
+    [
+     1048576,
+     1572864
+    ],
+    [
+     1572864,
+     2097152
+    ]
+   ],
+   "n_collectives": 32,
+   "collective_bytes": 8724152320,
+   "rel_err": 6.372406642185524e-05,
+   "lse_max_abs_err": 5.7220458984375e-06,
+   "t_single_s": 34.20586442300191,
+   "speedup": 2.7593000102809286
+  },
+  {
+   "direction": "bwd",
+   "N": 1048576,
+   "itr": 1,
+   "world": 4,
+   "tag": "het_sxm2_pcie2",
+   "throttle": null,
+   "layout": "aligned_128_device",
+   "seg_align": 128,
+   "shared_chunks": false,
+   "arm": "rr/allreduce/seed",
+   "scheduler": "rr",
+   "reduce": "allreduce",
+   "output": "replicated",
+   "rates": "seed",
+   "split": "none",
+   "acc": "gpu",
+   "npar": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "gpus": [
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100 80GB PCIe",
+    "NVIDIA A100 80GB PCIe"
+   ],
+   "t_dist_s": 11.11761331699745,
+   "t_local_per_rank": [
+    8.158635433002928,
+    8.7185123929994,
+    10.169825230987044,
+    5.514638332999311
+   ],
+   "t_merge_per_rank": [
+    2.9565596530010225,
+    2.396765741999843,
+    0.9455243870033883,
+    5.600746438023634
+   ],
+   "t_schedule_s": 0.0016411269971285947,
+   "predicted_local_per_rank": [
+    8.343587983283582,
+    8.341553060298509,
+    9.59839818556701,
+    4.798028288659794
+   ],
+   "predicted_over_measured": [
+    1.0226695446560208,
+    0.956763342677178,
+    0.9438115176572632,
+    0.8700531202470052
+   ],
+   "predicted_makespan_s": 9.59839818556701,
+   "predicted_ideal_s": 7.810556192971246,
+   "predicted_ratio": 1.2289007272240933,
+   "t_local_max_s": 10.169825230987044,
+   "t_local_mean_s": 8.140402847497171,
+   "imbalance": 1.2493024511819872,
+   "effective_rate_per_rank": [
+    9405162.987134108,
+    8799043.293394705,
+    7540589.760219223,
+    6951295.386065853
+   ],
+   "rate_used_per_rank": [
+    33500000.0,
+    33500000.0,
+    29100000.0,
+    29100000.0
+   ],
+   "units_per_rank": [
+    [
+     [
+      1,
+      0,
+      449536,
+      4797587.0
+     ],
+     [
+      1,
+      4,
+      449408,
+      4794075.0
+     ]
+    ],
+    [
+     [
+      1,
+      1,
+      449408,
+      4795246.0
+     ],
+     [
+      1,
+      5,
+      449408,
+      4794075.0
+     ]
+    ],
+    [
+     [
+      1,
+      2,
+      449280,
+      4791735.0
+     ],
+     [
+      1,
+      6,
+      449408,
+      4794075.0
+     ]
+    ],
+    [
+     [
+      1,
+      3,
+      449280,
+      4791735.0
+     ]
+    ]
+   ],
+   "n_units_per_rank": [
+    2,
+    2,
+    2,
+    1
+   ],
+   "n_splits": 0,
+   "digest": "c8192e7e10c9563d",
+   "depth_calls_per_rank": [
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 8.158404058998713
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 8.718437802999688
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 10.169740601006197
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 1,
+      "t_s": 5.514622468006564
+     }
+    ]
+   ],
+   "dev_peak_above_start_gib_per_rank": [
+    12.022048950195312,
+    12.020334243774414,
+    12.020334243774414,
+    12.018619537353516
+   ],
+   "dev_start_gib_per_rank": [
+    11.031250476837158,
+    5.031250476837158,
+    5.031250476837158,
+    5.031250476837158
+   ],
+   "host_rss_now_gib_per_rank": [
+    5.255329132080078,
+    5.164279937744141,
+    5.188262939453125,
+    5.150882720947266
+   ],
+   "host_rss_peak_gib_per_rank": [
+    12.04043960571289,
+    11.989566802978516,
+    13.51971435546875,
+    13.481864929199219
+   ],
+   "token_range_per_rank": [
+    [
+     0,
+     262144
+    ],
+    [
+     262144,
+     524288
+    ],
+    [
+     524288,
+     786432
+    ],
+    [
+     786432,
+     1048576
+    ]
+   ],
+   "n_collectives": 12,
+   "collective_bytes": null,
+   "rel_err": 0.0,
+   "t_single_s": 32.025202046999766,
+   "speedup": 2.8805824716027146
+  },
+  {
+   "direction": "bwd",
+   "N": 1048576,
+   "itr": 1,
+   "world": 4,
+   "tag": "het_sxm2_pcie2",
+   "throttle": null,
+   "layout": "aligned_128_device",
+   "seg_align": 128,
+   "shared_chunks": false,
+   "arm": "lpt/allreduce/seed",
+   "scheduler": "lpt",
+   "reduce": "allreduce",
+   "output": "replicated",
+   "rates": "seed",
+   "split": "children",
+   "acc": "gpu",
+   "npar": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "gpus": [
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100 80GB PCIe",
+    "NVIDIA A100 80GB PCIe"
+   ],
+   "t_dist_s": 8.688240357998438,
+   "t_local_per_rank": [
+    7.7101407640002435,
+    7.698401751000347,
+    7.586439591017552,
+    7.342584006983088
+   ],
+   "t_merge_per_rank": [
+    0.9756368910020683,
+    0.9873528419993818,
+    1.0994201640132815,
+    1.3433070949977264
+   ],
+   "t_schedule_s": 0.001678628999798093,
+   "predicted_local_per_rank": [
+    7.832359159402985,
+    7.831630724776119,
+    7.799215241237114,
+    7.831299337457045
+   ],
+   "predicted_over_measured": [
+    1.0158516425502109,
+    1.017306056254918,
+    1.0280468390562936,
+    1.0665590383452432
+   ],
+   "predicted_makespan_s": 7.832359159402985,
+   "predicted_ideal_s": 7.810556192971246,
+   "predicted_ratio": 1.002791474242431,
+   "t_local_max_s": 7.7101407640002435,
+   "t_local_mean_s": 7.584391528250308,
+   "imbalance": 1.0165800031922858,
+   "effective_rate_per_rank": [
+    9324117.185469031,
+    9337464.362737278,
+    8199757.904044198,
+    8510280.296496704
+   ],
+   "rate_used_per_rank": [
+    33500000.0,
+    33500000.0,
+    29100000.0,
+    29100000.0
+   ],
+   "units_per_rank": [
+    [
+     [
+      2,
+      38,
+      192512,
+      796090.0
+     ],
+     [
+      2,
+      15,
+      192640,
+      769373.0
+     ],
+     [
+      2,
+      29,
+      192640,
+      671174.0
+     ],
+     [
+      2,
+      40,
+      192512,
+      503004.0
+     ],
+     [
+      2,
+      32,
+      192512,
+      781392.0
+     ],
+     [
+      2,
+      34,
+      192640,
+      671174.0
+     ],
+     [
+      1,
+      6,
+      449408,
+      4794075.0
+     ]
+    ],
+    [
+     [
+      1,
+      1,
+      449408,
+      4795246.0
+     ],
+     [
+      2,
+      14,
+      192640,
+      881261.0
+     ],
+     [
+      2,
+      39,
+      192512,
+      781392.0
+     ],
+     [
+      2,
+      33,
+      192512,
+      503004.0
+     ],
+     [
+      2,
+      30,
+      192640,
+      867233.0
+     ],
+     [
+      2,
+      16,
+      192512,
+      655306.0
+     ],
+     [
+      2,
+      17,
+      192384,
+      502002.0
+     ]
+    ],
+    [
+     [
+      2,
+      31,
+      192512,
+      796090.0
+     ],
+     [
+      2,
+      36,
+      192640,
+      671174.0
+     ],
+     [
+      2,
+      35,
+      192768,
+      504008.0
+     ],
+     [
+      2,
+      19,
+      192512,
+      503004.0
+     ],
+     [
+      1,
+      0,
+      449536,
+      4797587.0
+     ],
+     [
+      2,
+      28,
+      192768,
+      504008.0
+     ]
+    ],
+    [
+     [
+      1,
+      3,
+      449280,
+      4791735.0
+     ],
+     [
+      2,
+      37,
+      192640,
+      867233.0
+     ],
+     [
+      2,
+      18,
+      192512,
+      725781.0
+     ],
+     [
+      2,
+      41,
+      192640,
+      671174.0
+     ],
+     [
+      2,
+      20,
+      192640,
+      755008.0
+     ]
+    ]
+   ],
+   "n_units_per_rank": [
+    7,
+    7,
+    6,
+    5
+   ],
+   "n_splits": 3,
+   "digest": "0f5826e740d3efe8",
+   "depth_calls_per_rank": [
+    [
+     {
+      "depth": 1,
+      "n_units": 1,
+      "t_s": 4.130736723000155
+     },
+     {
+      "depth": 2,
+      "n_units": 6,
+      "t_s": 3.5793738149986893
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 1,
+      "t_s": 4.1244979969997075
+     },
+     {
+      "depth": 2,
+      "n_units": 6,
+      "t_s": 3.573838681997586
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 1,
+      "t_s": 4.6643748189962935
+     },
+     {
+      "depth": 2,
+      "n_units": 5,
+      "t_s": 2.922049340006197
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 1,
+      "t_s": 4.561888057010947
+     },
+     {
+      "depth": 2,
+      "n_units": 4,
+      "t_s": 2.780670720996568
+     }
+    ]
+   ],
+   "dev_peak_above_start_gib_per_rank": [
+    14.580633163452148,
+    14.580633163452148,
+    14.582347869873047,
+    14.580633163452148
+   ],
+   "dev_start_gib_per_rank": [
+    11.031250476837158,
+    5.031250476837158,
+    5.031250476837158,
+    5.031250476837158
+   ],
+   "host_rss_now_gib_per_rank": [
+    5.275669097900391,
+    5.185161590576172,
+    5.2089996337890625,
+    5.171535491943359
+   ],
+   "host_rss_peak_gib_per_rank": [
+    12.04043960571289,
+    11.989566802978516,
+    13.51971435546875,
+    13.481864929199219
+   ],
+   "token_range_per_rank": [
+    [
+     0,
+     262144
+    ],
+    [
+     262144,
+     524288
+    ],
+    [
+     524288,
+     786432
+    ],
+    [
+     786432,
+     1048576
+    ]
+   ],
+   "n_collectives": 12,
+   "collective_bytes": null,
+   "rel_err": 9.962773765437305e-05,
+   "t_single_s": 32.025202046999766,
+   "speedup": 3.6860400642020914
+  },
+  {
+   "direction": "bwd",
+   "N": 1048576,
+   "itr": 1,
+   "world": 4,
+   "tag": "het_sxm2_pcie2",
+   "throttle": null,
+   "layout": "aligned_128_device",
+   "seg_align": 128,
+   "shared_chunks": false,
+   "arm": "lpt/allreduce/measured",
+   "scheduler": "lpt",
+   "reduce": "allreduce",
+   "output": "replicated",
+   "rates": "measured",
+   "split": "children",
+   "acc": "gpu",
+   "npar": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "gpus": [
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100 80GB PCIe",
+    "NVIDIA A100 80GB PCIe"
+   ],
+   "t_dist_s": 9.146944443000393,
+   "t_local_per_rank": [
+    8.141258783001831,
+    8.181391111000266,
+    6.682310227013659,
+    7.39050364200375
+   ],
+   "t_merge_per_rank": [
+    1.0031683050001448,
+    0.9629934149998007,
+    2.4621980740048457,
+    1.7540693909977563
+   ],
+   "t_schedule_s": 0.0016456160010420717,
+   "predicted_local_per_rank": [
+    7.219626782579569,
+    7.220483429288387,
+    6.395683509601142,
+    6.7995843261652436
+   ],
+   "predicted_over_measured": [
+    0.886794901748297,
+    0.8825495971681523,
+    0.95710664311067,
+    0.9200434308049006
+   ],
+   "predicted_makespan_s": 7.220483429288387,
+   "predicted_ideal_s": 6.937544739132225,
+   "predicted_ratio": 1.0407836923285274,
+   "t_local_max_s": 8.181391111000266,
+   "t_local_mean_s": 7.598865940754877,
+   "imbalance": 1.0766594877166002,
+   "effective_rate_per_rank": [
+    9425237.306079961,
+    9373281.262264973,
+    8133000.437528012,
+    8213407.223698002
+   ],
+   "rate_used_per_rank": [
+    38719662.9183136,
+    38691444.77715342,
+    30988993.138909586,
+    32566833.223353256
+   ],
+   "units_per_rank": [
+    [
+     [
+      1,
+      0,
+      449536,
+      4797587.0
+     ],
+     [
+      1,
+      6,
+      449408,
+      4794075.0
+     ]
+    ],
+    [
+     [
+      1,
+      3,
+      449280,
+      4791735.0
+     ],
+     [
+      1,
+      5,
+      449408,
+      4794075.0
+     ]
+    ],
+    [
+     [
+      2,
+      15,
+      192640,
+      769373.0
+     ],
+     [
+      2,
+      18,
+      192512,
+      725781.0
+     ],
+     [
+      2,
+      19,
+      192512,
+      503004.0
+     ],
+     [
+      1,
+      1,
+      449408,
+      4795246.0
+     ]
+    ],
+    [
+     [
+      1,
+      4,
+      449408,
+      4794075.0
+     ],
+     [
+      2,
+      14,
+      192640,
+      881261.0
+     ],
+     [
+      2,
+      20,
+      192640,
+      755008.0
+     ],
+     [
+      2,
+      16,
+      192512,
+      655306.0
+     ],
+     [
+      2,
+      17,
+      192384,
+      502002.0
+     ]
+    ]
+   ],
+   "n_units_per_rank": [
+    2,
+    2,
+    4,
+    5
+   ],
+   "n_splits": 1,
+   "digest": "54ffaac270d5865b",
+   "depth_calls_per_rank": [
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 8.141146191999724
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 8.181247881999298
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 1,
+      "t_s": 4.796405338973273
+     },
+     {
+      "depth": 2,
+      "n_units": 3,
+      "t_s": 1.88588052400155
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 1,
+      "t_s": 4.803744865988847
+     },
+     {
+      "depth": 2,
+      "n_units": 4,
+      "t_s": 2.586739441001555
+     }
+    ]
+   ],
+   "dev_peak_above_start_gib_per_rank": [
+    12.022048950195312,
+    12.020334243774414,
+    14.580633163452148,
+    14.580633163452148
+   ],
+   "dev_start_gib_per_rank": [
+    11.031250476837158,
+    5.031250476837158,
+    5.031250476837158,
+    5.031250476837158
+   ],
+   "host_rss_now_gib_per_rank": [
+    5.275703430175781,
+    5.1851654052734375,
+    5.209014892578125,
+    5.171600341796875
+   ],
+   "host_rss_peak_gib_per_rank": [
+    12.04043960571289,
+    11.989566802978516,
+    13.51971435546875,
+    13.481864929199219
+   ],
+   "token_range_per_rank": [
+    [
+     0,
+     262144
+    ],
+    [
+     262144,
+     524288
+    ],
+    [
+     524288,
+     786432
+    ],
+    [
+     786432,
+     1048576
+    ]
+   ],
+   "n_collectives": 12,
+   "collective_bytes": null,
+   "rel_err": 7.763747998978943e-05,
+   "t_single_s": 32.025202046999766,
+   "speedup": 3.501191271748319
+  },
+  {
+   "direction": "bwd",
+   "N": 1048576,
+   "itr": 1,
+   "world": 4,
+   "tag": "het_sxm2_pcie2",
+   "throttle": null,
+   "layout": "aligned_128_device",
+   "seg_align": 128,
+   "shared_chunks": false,
+   "arm": "lpt/reduce_scatter/measured",
+   "scheduler": "lpt",
+   "reduce": "reduce_scatter",
+   "output": "sharded",
+   "rates": "measured",
+   "split": "children",
+   "acc": "gpu",
+   "npar": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "gpus": [
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100 80GB PCIe",
+    "NVIDIA A100 80GB PCIe"
+   ],
+   "t_dist_s": 9.132556085001852,
+   "t_local_per_rank": [
+    8.148666689001402,
+    8.176531600001908,
+    6.713347649987554,
+    7.433295366005041
+   ],
+   "t_merge_per_rank": [
+    0.9816063910002413,
+    0.9539893969995319,
+    2.417252642015228,
+    1.6970212500018533
+   ],
+   "t_schedule_s": 0.0014979379993746988,
+   "predicted_local_per_rank": [
+    7.219626782579569,
+    7.220483429288387,
+    6.395683509601142,
+    6.7995843261652436
+   ],
+   "predicted_over_measured": [
+    0.8859887216057325,
+    0.8830741177942371,
+    0.952681708597796,
+    0.9147469582955131
+   ],
+   "predicted_makespan_s": 7.220483429288387,
+   "predicted_ideal_s": 6.937544739132225,
+   "predicted_ratio": 1.0407836923285274,
+   "t_local_max_s": 8.176531600001908,
+   "t_local_mean_s": 7.617960326248976,
+   "imbalance": 1.0733229433905398,
+   "effective_rate_per_rank": [
+    9416668.877077786,
+    9378852.030606976,
+    8095399.617819696,
+    8166124.580170333
+   ],
+   "rate_used_per_rank": [
+    38719662.9183136,
+    38691444.77715342,
+    30988993.138909586,
+    32566833.223353256
+   ],
+   "units_per_rank": [
+    [
+     [
+      1,
+      0,
+      449536,
+      4797587.0
+     ],
+     [
+      1,
+      6,
+      449408,
+      4794075.0
+     ]
+    ],
+    [
+     [
+      1,
+      3,
+      449280,
+      4791735.0
+     ],
+     [
+      1,
+      5,
+      449408,
+      4794075.0
+     ]
+    ],
+    [
+     [
+      2,
+      15,
+      192640,
+      769373.0
+     ],
+     [
+      2,
+      18,
+      192512,
+      725781.0
+     ],
+     [
+      2,
+      19,
+      192512,
+      503004.0
+     ],
+     [
+      1,
+      1,
+      449408,
+      4795246.0
+     ]
+    ],
+    [
+     [
+      1,
+      4,
+      449408,
+      4794075.0
+     ],
+     [
+      2,
+      14,
+      192640,
+      881261.0
+     ],
+     [
+      2,
+      20,
+      192640,
+      755008.0
+     ],
+     [
+      2,
+      16,
+      192512,
+      655306.0
+     ],
+     [
+      2,
+      17,
+      192384,
+      502002.0
+     ]
+    ]
+   ],
+   "n_units_per_rank": [
+    2,
+    2,
+    4,
+    5
+   ],
+   "n_splits": 1,
+   "digest": "54ffaac270d5865b",
+   "depth_calls_per_rank": [
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 8.148565819003124
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 8.176457149998896
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 1,
+      "t_s": 4.823609050014056
+     },
+     {
+      "depth": 2,
+      "n_units": 3,
+      "t_s": 1.8897136570012663
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 1,
+      "t_s": 4.839699898002436
+     },
+     {
+      "depth": 2,
+      "n_units": 4,
+      "t_s": 2.593580054002814
+     }
+    ]
+   ],
+   "dev_peak_above_start_gib_per_rank": [
+    12.022048950195312,
+    12.020334243774414,
+    14.580633163452148,
+    14.580633163452148
+   ],
+   "dev_start_gib_per_rank": [
+    11.031250476837158,
+    5.031250476837158,
+    5.031250476837158,
+    5.031250476837158
+   ],
+   "host_rss_now_gib_per_rank": [
+    5.275810241699219,
+    5.185184478759766,
+    5.209083557128906,
+    5.171611785888672
+   ],
+   "host_rss_peak_gib_per_rank": [
+    12.04043960571289,
+    11.989566802978516,
+    13.51971435546875,
+    13.481864929199219
+   ],
+   "token_range_per_rank": [
+    [
+     0,
+     262144
+    ],
+    [
+     262144,
+     524288
+    ],
+    [
+     524288,
+     786432
+    ],
+    [
+     786432,
+     1048576
+    ]
+   ],
+   "n_collectives": 12,
+   "collective_bytes": null,
+   "rel_err": 7.763747955224222e-05,
+   "t_single_s": 32.025202046999766,
+   "speedup": 3.5067074046874875
+  },
+  {
+   "direction": "bwd",
+   "N": 1048576,
+   "itr": 1,
+   "world": 4,
+   "tag": "het_sxm2_pcie2",
+   "throttle": null,
+   "layout": "aligned_128_device",
+   "seg_align": 128,
+   "shared_chunks": false,
+   "arm": "lpt/reduce_scatter/measured/rep",
+   "scheduler": "lpt",
+   "reduce": "reduce_scatter",
+   "output": "replicated",
+   "rates": "measured",
+   "split": "children",
+   "acc": "gpu",
+   "npar": 1,
+   "gpu": "NVIDIA A100-SXM4-80GB",
+   "gpus": [
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100-SXM4-80GB",
+    "NVIDIA A100 80GB PCIe",
+    "NVIDIA A100 80GB PCIe"
+   ],
+   "t_dist_s": 10.093129548000434,
+   "t_local_per_rank": [
+    8.147280882003543,
+    8.180779181002436,
+    6.72273081500316,
+    7.44710061699152
+   ],
+   "t_merge_per_rank": [
+    1.9430259649998334,
+    1.910171397998056,
+    3.3683823290048167,
+    2.643278472998645
+   ],
+   "t_schedule_s": 0.0014884100019116886,
+   "predicted_local_per_rank": [
+    7.219626782579569,
+    7.220483429288387,
+    6.395683509601142,
+    6.7995843261652436
+   ],
+   "predicted_over_measured": [
+    0.8861394233414659,
+    0.8826156127103313,
+    0.951352015363735,
+    0.9130512230022937
+   ],
+   "predicted_makespan_s": 7.220483429288387,
+   "predicted_ideal_s": 6.937544739132225,
+   "predicted_ratio": 1.0407836923285274,
+   "t_local_max_s": 8.180779181002436,
+   "t_local_mean_s": 7.624472873750165,
+   "imbalance": 1.0729632482748472,
+   "effective_rate_per_rank": [
+    9418270.599887567,
+    9373982.392543102,
+    8084100.567988375,
+    8150986.4203395285
+   ],
+   "rate_used_per_rank": [
+    38719662.9183136,
+    38691444.77715342,
+    30988993.138909586,
+    32566833.223353256
+   ],
+   "units_per_rank": [
+    [
+     [
+      1,
+      0,
+      449536,
+      4797587.0
+     ],
+     [
+      1,
+      6,
+      449408,
+      4794075.0
+     ]
+    ],
+    [
+     [
+      1,
+      3,
+      449280,
+      4791735.0
+     ],
+     [
+      1,
+      5,
+      449408,
+      4794075.0
+     ]
+    ],
+    [
+     [
+      2,
+      15,
+      192640,
+      769373.0
+     ],
+     [
+      2,
+      18,
+      192512,
+      725781.0
+     ],
+     [
+      2,
+      19,
+      192512,
+      503004.0
+     ],
+     [
+      1,
+      1,
+      449408,
+      4795246.0
+     ]
+    ],
+    [
+     [
+      1,
+      4,
+      449408,
+      4794075.0
+     ],
+     [
+      2,
+      14,
+      192640,
+      881261.0
+     ],
+     [
+      2,
+      20,
+      192640,
+      755008.0
+     ],
+     [
+      2,
+      16,
+      192512,
+      655306.0
+     ],
+     [
+      2,
+      17,
+      192384,
+      502002.0
+     ]
+    ]
+   ],
+   "n_units_per_rank": [
+    2,
+    2,
+    4,
+    5
+   ],
+   "n_splits": 1,
+   "digest": "54ffaac270d5865b",
+   "depth_calls_per_rank": [
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 8.147213996002392
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 2,
+      "t_s": 8.18070658400029
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 1,
+      "t_s": 4.83116497498122
+     },
+     {
+      "depth": 2,
+      "n_units": 3,
+      "t_s": 1.891544635000173
+     }
+    ],
+    [
+     {
+      "depth": 1,
+      "n_units": 1,
+      "t_s": 4.848502834996907
+     },
+     {
+      "depth": 2,
+      "n_units": 4,
+      "t_s": 2.5985737520095427
+     }
+    ]
+   ],
+   "dev_peak_above_start_gib_per_rank": [
+    12.022048950195312,
+    12.020334243774414,
+    14.580633163452148,
+    14.580633163452148
+   ],
+   "dev_start_gib_per_rank": [
+    11.031250476837158,
+    5.031250476837158,
+    5.031250476837158,
+    5.031250476837158
+   ],
+   "host_rss_now_gib_per_rank": [
+    5.304805755615234,
+    5.254238128662109,
+    5.280021667480469,
+    5.239311218261719
+   ],
+   "host_rss_peak_gib_per_rank": [
+    12.04043960571289,
+    11.989566802978516,
+    13.51971435546875,
+    13.481864929199219
+   ],
+   "token_range_per_rank": [
+    [
+     0,
+     262144
+    ],
+    [
+     262144,
+     524288
+    ],
+    [
+     524288,
+     786432
+    ],
+    [
+     786432,
+     1048576
+    ]
+   ],
+   "n_collectives": 24,
+   "collective_bytes": null,
+   "rel_err": 7.763747998978943e-05,
+   "t_single_s": 32.025202046999766,
+   "speedup": 3.1729704740928772
+  }
+ ]
+}

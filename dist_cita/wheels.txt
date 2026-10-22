@@ -1,0 +1,63 @@
+# Wheels the CITA venv (python 3.12, no network) lacks and the bundle needs, with every dependency so the set is
+# closed. Downloaded by make_bundle.sh with
+#   pip download --python-version 3.12 --platform manylinux2014_x86_64 --only-binary=:all: --no-deps -d wheels -r wheels.txt
+# Pure-python (py3-none-any) unless noted; platform wheels (cp312 / abi3 manylinux x86_64) are marked.
+# --- pytest ---
+pytest
+pluggy
+iniconfig
+packaging
+pygments
+# --- nbformat ---
+nbformat
+fastjsonschema
+jsonschema
+jsonschema-specifications
+referencing
+attrs
+rpds-py                 # platform wheel (cp312 manylinux_2_17 x86_64)
+jupyter_core
+platformdirs
+traitlets
+# --- nbclient ---
+nbclient
+jupyter_client
+python-dateutil
+six
+pyzmq                   # platform wheel (cp312 abi3 manylinux x86_64); CITA has it, shipped for closure
+tornado                 # platform wheel (cp39 abi3 manylinux x86_64)
+# --- nbconvert ---
+nbconvert
+beautifulsoup4
+soupsieve
+bleach
+tinycss2
+webencodings
+defusedxml
+jinja2
+markupsafe              # platform wheel (cp312 manylinux x86_64); CITA has it (torch dep), shipped for closure
+jupyterlab_pygments
+mistune
+pandocfilters
+# --- ipykernel (the kernel nbclient executes in) ---
+ipykernel
+comm
+debugpy                 # platform wheel (cp312 manylinux x86_64)
+ipython
+ipython_pygments_lexers  # ipython >= 9 dependency
+jedi
+parso
+prompt_toolkit
+wcwidth
+decorator
+matplotlib-inline
+stack_data
+asttokens
+executing
+pure_eval
+pexpect
+ptyprocess
+nest_asyncio2            # ipykernel >= 7.1 depends on nest-asyncio2 (the maintained fork)
+nest_asyncio
+psutil                  # platform wheel (cp36 abi3 manylinux x86_64); CITA has it, shipped for closure
+typing_extensions

@@ -29,7 +29,8 @@ Metrics per row (PLAN.md): wall_s (median) and wall_min_s of the timed runs; pea
 max_memory_allocated over the call) and workspace_gib (peak minus what was resident before the call);
 peak_host_gib (VmHWM delta over the timed runs); rel_err / rel_err_grads vs the FA-2 reference computed on the
 same inputs in the same worker (untimed; rows whose reference policy is "spot" and rows where FA-2 does not
-fit skip it); fp64_err (output) and fp64_err_dq (gradient) on 128 sampled rows against an fp64 reference
+fit skip it; without flash_attn the reference arm is torch SDPA on its flash backend, recorded and labelled
+"SDPA-flash" in every row and table, never called FA-2; `--ref sdpa` selects it explicitly); fp64_err (output) and fp64_err_dq (gradient) on 128 sampled rows against an fp64 reference
 computed on the device in chunks, next to FA-2's own fp64 error on the same rows (fp64_ratio_fa2); engine,
 kernel, n_subproblems, n_waves, itr_ran from return_info; GPU name (nvidia-smi and torch), module names
 (cqsa_cuda_v13 / cqsa_native_v2), git commit, slurm job id.
@@ -276,8 +277,14 @@ def gpu_info():
     except Exception:                                            # noqa: BLE001
         info["git_commit"] = None
     if not info["git_commit"]:
-        # a frozen snapshot (git archive) has no .git: the snapshot directory name carries the commit
-        info["git_commit"] = os.path.basename(ROOT).split("-")[-1] if "-" in os.path.basename(ROOT) else None
+        # a frozen snapshot (git archive) has no .git: a GIT_COMMIT file (dist_cita/make_bundle.sh writes one) or the
+        # snapshot directory name carries the commit
+        gc_file = os.path.join(ROOT, "GIT_COMMIT")
+        if os.path.exists(gc_file):
+            words = open(gc_file).read().split()
+            info["git_commit"] = words[0] if words else None
+        else:
+            info["git_commit"] = os.path.basename(ROOT).split("-")[-1] if "-" in os.path.basename(ROOT) else None
     info["code_root"] = ROOT
     return info
 
@@ -492,6 +499,64 @@ def rel_full(a, b, chunk=256 * K):
     return math.sqrt(num / den) if den > 0 else float("nan")
 
 
+def flash_attn_importable():
+    try:
+        import flash_attn  # noqa: F401
+        return True
+    except Exception:                                            # noqa: BLE001
+        return False
+
+
+def resolve_ref_arm(policy):
+    """The reference arm of a row's reference policy: "fa2" -> "FA-2" when flash_attn is importable, else
+    "SDPA-flash" (torch SDPA on its flash backend: the same algorithm, a different build; recorded as such in the
+    row, never called FA-2); "sdpa" -> "SDPA-flash"; "spot" / None -> None (the fp64 spot check only)."""
+    if policy == "fa2":
+        return "FA-2" if flash_attn_importable() else "SDPA-flash"
+    if policy == "sdpa":
+        return "SDPA-flash"
+    return None
+
+
+def sdpa_flash_reference(q, k, v, dout, scale, want_grads):
+    """torch SDPA (flash backend) on head-major device copies of the inputs; returns (out [B,H,N,D] on the host,
+    grads on the host or None). The device copies are released before returning."""
+    import torch
+    import torch.nn.functional as F
+    from torch.nn.attention import sdpa_kernel, SDPBackend
+    dev = torch.device("cuda")
+    N, D = q.shape[2], q.shape[3]
+
+    def hm(t):          # head-major contiguous device copy
+        x = torch.empty((B, H, N, D), dtype=t.dtype, device=dev)
+        for s in range(0, N, M):
+            e = min(N, s + M)
+            x[:, :, s:e].copy_(_chunk_to(t.detach(), s, e, dev, t.dtype))
+        return x
+    qf, kf, vf = (hm(t).requires_grad_(want_grads) for t in (q, k, v))
+    with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+        of = F.scaled_dot_product_attention(qf, kf, vf, is_causal=True, scale=scale)
+    grads = None
+    if want_grads:
+        df = hm(dout)
+        gf = torch.autograd.grad(of, (qf, kf, vf), df)
+        grads = [x.detach().cpu() for x in gf]
+        del gf, df
+    out = of.detach().cpu()
+    del qf, kf, vf, of
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+    return out, grads
+
+
+def arm_reference(q, k, v, dout, scale, want_grads, ref_arm):
+    if ref_arm == "FA-2":
+        return fa2_reference(q, k, v, dout, scale, want_grads)
+    if ref_arm == "SDPA-flash":
+        return sdpa_flash_reference(q, k, v, dout, scale, want_grads)
+    raise ValueError(f"unknown reference arm {ref_arm!r}")
+
+
 def fa2_reference(q, k, v, dout, scale, want_grads):
     """FA-2 (flash_attn_func) on token-major copies of the inputs; returns (out [B,H,N,D] view on the host, grads on
     the host or None). The device copies are released before returning."""
@@ -671,10 +736,12 @@ def _worker(row, res):
     out64, lse64 = ref64_forward(q, k, v, rows, scale)
     dq64 = ref64_dq(q, k, v, dout, out64, lse64, rows, scale) if bwd else None
     ref_out = ref_grads = None
-    res["ref_fa2"] = "skipped"
-    if row.get("ref") == "fa2" and arm != "FA-2":
+    res["ref_fa2"] = "skipped"                                  # the status of the reference arm's run (key kept for old rows)
+    ref_arm = resolve_ref_arm(row.get("ref"))
+    res["ref_arm"] = ref_arm                                    # "FA-2" | "SDPA-flash" | None: what rel_err / fp64_*_fa2 compare to
+    if ref_arm is not None and not (arm == "FA-2" and ref_arm == "FA-2") and not (arm == "SDPA" and ref_arm == "SDPA-flash"):
         try:
-            ref_out, ref_grads = fa2_reference(q, k, v, dout, scale, bwd)
+            ref_out, ref_grads = arm_reference(q, k, v, dout, scale, bwd, ref_arm)
             res["ref_fa2"] = "ok"
             res["fp64_err_fa2"] = rel_rows(ref_out, rows, out64)
             if bwd:
@@ -933,6 +1000,14 @@ def cmd_run(a):
             r["mem_cap_gib"] = a.mem_cap_gib
         if a.set_N:
             r["N"] = a.set_N                                  # plumbing tests of a fixed-N experiment at another N
+    if any(r["arm"] == "FA-2" for r in rows) and not flash_attn_importable():
+        n_fa2 = sum(1 for r in rows if r["arm"] == "FA-2")
+        print(f"== flash_attn is not importable: the {n_fa2} FA-2 arm rows are dropped (SDPA = torch's flash backend stays)", flush=True)
+        rows = [r for r in rows if r["arm"] != "FA-2"]
+    pols = sorted({r.get("ref") for r in rows if r.get("ref") in ("fa2", "sdpa")})
+    if pols:
+        print("== reference arm: " + ", ".join(f"{p} -> {resolve_ref_arm(p)}" for p in pols)
+              + ("" if flash_attn_importable() else " (flash_attn not importable: SDPA-flash stands in and is labelled so)"), flush=True)
     history = read_rows(out_dir)
     done = latest_by_key(history)
     t_start = time.time()
@@ -1022,10 +1097,22 @@ def engine_cell(r):
     return s
 
 
+def ref_arm_of(r):
+    """The arm the row's rel_err / fp64_*_fa2 fields compare to: FA-2 (rows before the ref_arm field), SDPA-flash, or -."""
+    if r.get("ref_fa2") != "ok":
+        return "-"
+    return r.get("ref_arm") or "FA-2"
+
+
+def ref_arms_label(rows):
+    arms = sorted({ref_arm_of(r) for r in rows} - {"-"})
+    return " / ".join(arms) if arms else "ref"
+
+
 def table_for(exp, rows, get_base):
     lines = ["| N | D | dtype | dir | c | itr | acc | qkv | W | arm | engine that ran | wall s | min s | peak GiB | workspace | host GiB | "
-             "/FA-2 | /SDPA | rel vs FA-2 | grads | fp64 (x FA-2) | fp64 dq (x FA-2) | status |",
-             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+             "/FA-2 | /SDPA | ref | rel vs ref | grads | fp64 (x ref) | fp64 dq (x ref) | status |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in rows:
         base = {}
         for arm in BASELINES:
@@ -1038,15 +1125,16 @@ def table_for(exp, rows, get_base):
         lines.append(f"| {n_label(r['N'])} | {r['D']} | {r['dtype']} | {r['direction']} | {r.get('c') or '-'} | {r.get('itr') if r.get('itr') is not None else '-'} | "
                      f"{r.get('acc') or '-'} | {r.get('qkv') or '-'} | {r.get('extra') or '-'} | {r['arm']} | {what} | "
                      f"{fmt(r.get('wall_s'))} | {fmt(r.get('wall_min_s'))} | {fmt(r.get('peak_dev_gib'), 2)} | {fmt(r.get('workspace_gib'), 2)} | "
-                     f"{fmt(r.get('peak_host_gib'), 2)} | {fmt(base['FA-2'], 3)} | {fmt(base['SDPA'], 3)} | {fmt_e(r.get('rel_err'))} | "
+                     f"{fmt(r.get('peak_host_gib'), 2)} | {fmt(base['FA-2'], 3)} | {fmt(base['SDPA'], 3)} | {ref_arm_of(r)} | {fmt_e(r.get('rel_err'))} | "
                      f"{fmt_e(r.get('rel_err_grads'))} | {fp64} | {fp64dq} | {st} |")
     return lines
 
 
 def summary_e0(rows):
     """E0's accuracy table: per series the worst errors over every (c, itr, acc, dtype, D) row."""
-    lines = ["Worst case per series over all E0 rows (ok rows only):", "",
-             "| series | rows | max rel vs FA-2 (output) | max rel vs FA-2 (grads) | max fp64 err (output) | max fp64 err / FA-2's | max fp64 err (dQ) | max fp64 dQ err / FA-2's |",
+    ref = ref_arms_label(rows)
+    lines = [f"Worst case per series over all E0 rows (ok rows only; the reference arm is {ref}):", "",
+             f"| series | rows | max rel vs {ref} (output) | max rel vs {ref} (grads) | max fp64 err (output) | max fp64 err / {ref}'s | max fp64 err (dQ) | max fp64 dQ err / {ref}'s |",
              "|---|---|---|---|---|---|---|---|"]
     for arm in SERIES:
         rs = [r for r in rows if r["arm"] == arm and r.get("status") == "ok"]
@@ -1242,11 +1330,11 @@ def figure_errors(exp, rows, path):
                     ax.plot([r["c"] for r in rs], [r[key] for r in rs], label=f"{arm} itr={itr} acc={acc}", **st)
     fa = [r for r in rows if r.get("fp64_err_fa2") and r["direction"] == "fwd" and r["dtype"] == "fp16" and r["D"] == 64]
     if fa:
-        axes[0].axhline(statistics.median(r["fp64_err_fa2"] for r in fa), color=COLORS["FA-2"], linestyle="--", linewidth=1.5, label="FA-2 (own fp64 error)")
+        axes[0].axhline(statistics.median(r["fp64_err_fa2"] for r in fa), color=COLORS["FA-2"], linestyle="--", linewidth=1.5, label=f"{ref_arms_label(fa)} (own fp64 error)")
     fb = [r for r in rows if r.get("fp64_err_dq_fa2") and r["direction"] == "bwd" and r["dtype"] == "fp16" and r["D"] == 64]
     if fb:
-        axes[2].axhline(statistics.median(r["fp64_err_dq_fa2"] for r in fb), color=COLORS["FA-2"], linestyle="--", linewidth=1.5, label="FA-2 (own fp64 error)")
-    for ax, t, yl in ((axes[0], "output vs fp64 (128 rows)", "norm-relative error"), (axes[1], "output vs FA-2 (full tensor)", "norm-relative error"),
+        axes[2].axhline(statistics.median(r["fp64_err_dq_fa2"] for r in fb), color=COLORS["FA-2"], linestyle="--", linewidth=1.5, label=f"{ref_arms_label(fb)} (own fp64 error)")
+    for ax, t, yl in ((axes[0], "output vs fp64 (128 rows)", "norm-relative error"), (axes[1], f"output vs {ref_arms_label(rows)} (full tensor)", "norm-relative error"),
                       (axes[2], "dQ vs fp64 (128 rows)", "norm-relative error")):
         ax.set_xscale("log")
         ax.set_yscale("log")
@@ -1356,9 +1444,10 @@ def cmd_report(a):
              "B=1 H=8 causal; wall = median of the timed runs (fwd: one attention() call; bwd: forward + torch.autograd.grad), min alongside; "
              "peak = torch.cuda.max_memory_allocated over the call, workspace = peak minus what was resident before it; host = VmHWM delta "
              "over the timed runs; /FA-2 and /SDPA = wall ratios against the resident monolithic baselines of the same (node type, N, D, dtype, "
-             "direction) (the experiment's own first, E1's / E6's otherwise); rel = norm-relative error against FA-2 on the same inputs "
-             "(grads: the worst of dq/dk/dv); fp64 = norm-relative error on 128 sampled rows against an fp64 reference, with the ratio to FA-2's "
-             "own fp64 error on the same rows in parentheses (PLAN.md asks <= 1.2). Every Stream-CQSA row pins itr and c and asserts the "
+             "direction) (the experiment's own first, E1's / E6's otherwise); ref = the reference arm of the row (FA-2 = flash_attn, or SDPA-flash = "
+             "torch SDPA on its flash backend where flash_attn is not installed); rel = norm-relative error against that arm on the same inputs "
+             "(grads: the worst of dq/dk/dv); fp64 = norm-relative error on 128 sampled rows against an fp64 reference, with the ratio to the "
+             "reference arm's own fp64 error on the same rows in parentheses (PLAN.md asks <= 1.2). Every Stream-CQSA row pins itr and c and asserts the "
              "decomposition it reports; `[*]` marks an engine other than the series' nominal one (documented routing: the wave backward runs on "
              "the CUDA kernel and on device-resident inputs only, so wave_Triton fwd+bwd and host-resident wave backwards run on the classic "
              "engine; the wave backward keeps a device accumulator, so wave_CUDA acc=cpu fwd+bwd rows ran with acc=gpu in the backward).", ""]
@@ -1459,7 +1548,8 @@ def main():
     ap.add_argument("--extra", default="")
     ap.add_argument("--reps", type=int, default=None, help="override the plan's timed runs per row")
     ap.add_argument("--warmup", type=int, default=None, help="override the plan's warm-up runs per row")
-    ap.add_argument("--ref", default=None, choices=[None, "fa2", "spot"], help="override the plan's reference policy")
+    ap.add_argument("--ref", default=None, choices=[None, "fa2", "sdpa", "spot"],
+                    help="override the plan's reference policy: fa2 (FA-2, or SDPA-flash when flash_attn is missing), sdpa (SDPA-flash), spot")
     ap.add_argument("--mem-cap-gib", type=float, default=0.0, help="cap the allocator (plumbing tests of the OOM paths; recorded in the row)")
     ap.add_argument("--set-N", type=int, default=0, help="run the selected rows at this N instead (plumbing tests on a shared GPU)")
     a = ap.parse_args()

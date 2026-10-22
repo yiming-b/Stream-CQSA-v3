@@ -32,3 +32,12 @@ kernels/*/build_*/
 
 # v3 harness smoke runs on vis1 (plumbing checks, never measurements): experiments/v3/bench.py --smoke
 .smoke/
+
+# dist_cita: the CITA offline bundle's downloaded wheels and the staged git archive (make_bundle.sh rebuilds them);
+# the scripts, notebook and README are tracked
+dist_cita/wheels/
+dist_cita/src/
+dist_cita/*.log
+dist_cita/results/
+dist_cita/run_cita_executed.ipynb
+dist_cita/cita_results_*.tar.gz

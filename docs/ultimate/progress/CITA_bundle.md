@@ -90,3 +90,28 @@ E0, E1 fwd, E1 fwd+bwd, E3 fwd, E4, E6, report, results tarball). Spec: the task
 - Final bundle from 9bbaefe: /scratch/gpfs/AKEY/yb2807/cita_bundle/stream_cqsa_v3_cita_20261022.tar.gz (132 MB,
   3031 files: src 33 MB, wheels 26 MB, cuda_min 259 MB unpacked). Untarred into cita_bundle/validate3 for the final
   check (setup_cita.sh + plumbing run 3 with the CUDA modules, nbclient mode) once run 2 has finished.
+- Plumbing run 2 finished: 15.6 min, every cell OK with the in-process executor (`--inproc`): 4 series, 169
+  smoke rows (E0 64, E1 12 + 12, E3 8, E4 32, E6 36 + the E1 SDPA baselines), the report's markdown and 5
+  figures captured as display_data, tarball 1.4 MiB. Its classic_CUDA fwd+bwd rows carry backward_kernel=triton
+  (the leak above; a run-2 artefact, not shipped).
+- cuda_min sm90 compile test complete for the hard case too: flash_bwd_hdim64_fp16_legacy_sm80.o (the LEGACY
+  backward unit, ptxas-heavy) rc=0 in 402 s with the bundled nvcc through torch's command.
+- Plumbing run 3 (final bundle in cita_bundle/validate3, HEAD 9bbaefe + the run_cita.py of 91a7adb; CUDA modules
+  via PYTHONPATH; nbclient mode; CITA_SMOKE=1): started 11:41.
+- Plumbing run 3 (final bundle, 4 series, nbclient): 15.3 min, every cell OK; 164 smoke rows, none failed; the
+  classic_CUDA fwd+bwd rows now carry backward_kernel=cuda (18 rows), the inline table shows
+  "classic/cuda (bwd cuda)" / "wave/cuda (bwd cuda)"; every series row asserts its decomposition; the reference
+  arm of every referenced row is SDPA-flash; git_commit 9bbaefe in every row. `CITA_USE_BUNDLED_NVCC=1` enters
+  the cuda_min branch (reports release 12.9) and, on Della's cu130 torch, correctly rejects it for the system 13.0.
+- sm90 compile tests, final: system nvcc 12.9 -- cqs_census 7 s, cqs_census_bwd 6 s, cqsa_kernel 50 s,
+  flash_fwd_hdim64_fp16_causal_sm80 127 s, flash_fwd_hdim64_fp16_causal_legacy_sm80 1524 s (one core, 2 nvcc
+  threads), all rc=0; bundled cuda_min nvcc 12.9 -- cqs_census 10 s, cqsa_kernel 56 s, flash_fwd_hdim64_fp16_
+  causal_sm80 148 s, flash_bwd_hdim64_fp16_legacy_sm80 402 s, all rc=0. The remaining units (bwd main, fwd
+  hdim128 bf16, native/) were still compiling when this log closed; none had failed. README / setup_cita.sh say
+  30-90 min per module.
+- Executed plumbing notebooks (NOT in the bundle): cita_bundle/validate/.../pass1_run_cita_executed_triton_only.ipynb
+  (run 1), cita_bundle/validate/.../run_cita_executed.ipynb (run 2, --inproc), cita_bundle/validate3/.../
+  run_cita_executed.ipynb (run 3, final bundle) with their cita_results_della-vis1_*.tar.gz.
+- Throwaway environments: VENVs/py312_cita_closure (python 3.12.7 conda env, wheel closure proof),
+  VENVs/cita_plumb311 (python 3.11 venv on CQSA311 with a flash_attn-blocking stub). VENVs/py312check existed
+  before this task (with ipykernel etc. already installed) and was not used for the proof.

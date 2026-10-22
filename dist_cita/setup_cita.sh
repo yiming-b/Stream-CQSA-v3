@@ -179,7 +179,7 @@ build_tier() {    # build_tier <label> <module> <log> <env assignments...>
         tier "$label" OK "already importable ($("$PY" -P -c "import $mod; print($mod.__file__)")); CITA_REBUILD=1 to rebuild"; return
     fi
     if [ -z "$NVCC" ]; then tier "$label" SKIPPED "$NVCC_REASON"; return; fi
-    echo "building $mod for sm90 with $JOBS jobs; log: $log (this takes 20-60 min)"
+    echo "building $mod for sm90 with $JOBS jobs; log: $log (30-90 min: 28 units, the LEGACY ones 7-25 min each)"
     local t0=$SECONDS
     ( cd "$SRC" && env "$@" CUDA_HOME="$CUDA_HOME" FLASH_ATTN_CUDA_ARCHS=90 TORCH_CUDA_ARCH_LIST=9.0 MAX_JOBS="$JOBS" NVCC_THREADS=2 \
         "$PY" setup.py build_ext --inplace ) > "$log" 2>&1

@@ -43,8 +43,8 @@ results directory, the executed notebook with every cell's output, the setup / b
    |---|---|---|---|
    | wheels | `pip install --no-index --find-links wheels pytest nbformat nbclient nbconvert ipykernel` | < 1 min | nothing |
    | (a) triton | `CQSA_SKIP_EXT=1 pip install --no-index --no-build-isolation --no-deps -e src/` + a `.pth` file that puts `src/` on `sys.path` (the compiled modules of (b) / (c) land there) | < 1 min | nothing: the pure-Triton kernels (`stream_cqsa/triton_kernel.py`) serve the `classic_Triton` and `wave_Triton` series |
-   | (b) classic_cuda | `cd src && CQSA_KERNEL_SET=common FLASH_ATTN_CUDA_ARCHS=90 TORCH_CUDA_ARCH_LIST=9.0 MAX_JOBS=<min(nproc/2,16)> python setup.py build_ext --inplace` -> `src/cqsa_cuda.*.so`, log `build_classic.log` | 20-60 min | an nvcc of CUDA **12.x** (a system one, else the bundled `cuda_min/`; see below) and `g++` |
-   | (c) wave_cuda | the same with `CQSA_ONLY_NATIVE=1` -> `src/cqsa_native.*.so`, log `build_native.log` | 20-60 min | the same |
+   | (b) classic_cuda | `cd src && CQSA_KERNEL_SET=common FLASH_ATTN_CUDA_ARCHS=90 TORCH_CUDA_ARCH_LIST=9.0 MAX_JOBS=<min(nproc/2,16)> python setup.py build_ext --inplace` -> `src/cqsa_cuda.*.so`, log `build_classic.log` | 30-90 min (28 units; the 12 LEGACY units take 7-25 min each on one core, measured with nvcc 12.9 for sm90) | an nvcc of CUDA **12.x** (a system one, else the bundled `cuda_min/`; see below) and `g++` |
+   | (c) wave_cuda | the same with `CQSA_ONLY_NATIVE=1` -> `src/cqsa_native.*.so`, log `build_native.log` | 30-90 min | the same |
    | doctor | `python -m stream_cqsa.doctor` -> `doctor.txt`: which modules loaded, what fits | < 1 min | |
 
    The last lines (`tiers.txt`) say per tier `OK` / `SKIPPED(reason)` / `FAILED(see log)`. **sm90 only**: the modules are

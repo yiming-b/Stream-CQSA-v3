@@ -24,7 +24,7 @@ results directory, the executed notebook with every cell's output, the setup / b
 
 ## Step by step
 
-1. Copy the tarball (~110 MB) to CITA, e.g. into `$HOME` or a scratch directory with ~2 GB free (the build adds ~1 GB).
+1. Copy the tarball (~130 MB; 3000 files, 320 MB unpacked) to CITA, e.g. into `$HOME` or a scratch directory with ~2 GB free (the build adds ~1 GB).
 2. Unpack and enter it:
    ```
    tar xzf stream_cqsa_v3_cita_<date>.tar.gz
@@ -166,6 +166,9 @@ the pip output along and stay with SDPA-flash. Rows already recorded with `ref_a
   (`ok` and `oom` rows are final; `error` rows are re-run only with `--retry-errors`, i.e. by hand:
   `cd src && python -P experiments/v3/bench.py run --exp E1 --part fwd --out ../results/v3_cita --retry-errors`).
 - **`run_cita.py` cannot start the kernel** (traceback mentioning jupyter_client / zmq): `python run_cita.py --inproc`.
+- **A Triton compile error** (in `tier_a.log`, the doctor's check, the pytest cell or a `classic_Triton` /
+  `wave_Triton` row): the Triton kernels were validated with triton 3.6 (Della, A100); triton 3.7.1 on an H100 is
+  untested here. Send the traceback; the CUDA series (tiers b / c) do not depend on Triton.
 - **Time**: `CITA_QUICK=1` first. The default run is bounded by ~2.5 h; `CITA_BUDGET_SCALE=4` for an overnight
   run; `CITA_FULL=1` for no budgets (6-8 h on the A100 scale).
 - **Running bench.py by hand** (from `src/`): `python -P experiments/v3/bench.py plan --exp E1 --part fwd`

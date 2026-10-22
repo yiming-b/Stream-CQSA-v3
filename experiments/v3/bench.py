@@ -903,7 +903,9 @@ def _worker(row, res):
 # run: the rows of one experiment / part, each in a fresh subprocess
 # ---------------------------------------------------------------------------------------------------------------
 def worker_env():
-    env = {k_: v_ for k_, v_ in os.environ.items() if k_ not in ("CQSA_FORWARD",)}
+    # attention(kernel="triton") sets CQSA_FORWARD / CQSA_BACKWARD=triton in its own process and never unsets them; a parent
+    # that called it (a notebook) must not hand them down, or a CUDA series row would run the Triton backward under a CUDA label
+    env = {k_: v_ for k_, v_ in os.environ.items() if k_ not in ("CQSA_FORWARD", "CQSA_BACKWARD")}
     env.setdefault("PYTHONUNBUFFERED", "1")
     return env
 
@@ -1094,6 +1096,8 @@ def engine_cell(r):
         s += " (oom at itr " + ",".join(str(x["itr"]) for x in r["itr_attempts"]) + ")"
     if r.get("engine_as_expected") is False:
         s += " [*]"
+    if r["arm"] == "classic_CUDA" and r.get("direction") == "bwd" and r.get("backward_kernel") not in (None, "cuda"):
+        s += f" [bwd kernel {r['backward_kernel']}]"             # the module's default backward was not the CUDA one
     return s
 
 

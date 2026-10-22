@@ -78,3 +78,12 @@ E0, E1 fwd, E1 fwd+bwd, E3 fwd, E4, E6, report, results tarball). Spec: the task
   refused by torch's major check), so the full sm90 module build + import remains untested.
 - sm90 compile test with the system nvcc 12.9 (torch 2.10 headers): cqs_census, cqs_census_bwd, cqsa_kernel,
   flash_fwd_hdim64_fp16_causal_sm80 rc=0; the LEGACY fwd unit still compiling (ptxas-heavy).
+- BUG found by plumbing run 2 (fixed): the inline-correctness cell calls attention(kernel="triton") in the
+  notebook's process, which sets CQSA_FORWARD / CQSA_BACKWARD=triton (api.py never unsets them); the next series
+  in the same process, classic_CUDA, then ran "classic/triton", and every bench subprocess inherited
+  CQSA_BACKWARD=triton (bench's worker_env stripped CQSA_FORWARD only), so pass 2's classic_CUDA fwd+bwd rows ran
+  the Triton backward under the label kernel=cuda (visible only in the row's backward_kernel field). Fixes: the
+  cell pops both variables before every call and at its end; the notebook's run() strips them from every
+  subprocess environment; bench.py's worker_env() strips CQSA_BACKWARD too; the report marks a classic_CUDA bwd row
+  whose backward_kernel is not cuda with "[bwd kernel triton]"; the inline table shows the backward kernel.
+  The Della slurm results are unaffected (bench.py run never calls attention() in the parent process).

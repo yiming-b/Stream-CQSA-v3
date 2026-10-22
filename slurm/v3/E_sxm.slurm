@@ -1,0 +1,36 @@
+#!/bin/bash
+#SBATCH --job-name=cqsa_v3_E_sxm
+#SBATCH --account=akey
+#SBATCH --qos=gpu-test
+#SBATCH --nodes=1 --ntasks=1 --cpus-per-task=8 --mem=80G
+#SBATCH --gres=gpu:a100:1 --constraint="sxm&gpu80"
+#SBATCH --time=00:59:00
+#SBATCH --output=/scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/v3/logs/E_sxm_%j.out
+# The ONE gpu-test job of the v3 experiments E0-E6 (experiments/v3/PLAN.md) on one A100-SXM4-80GB, RESUBMITTABLE:
+# every part runs `bench.py run ... --only-missing --budget-s <budget>` (slurm/v3/parts.sh), which skips the rows
+# already in results/v3/results.jsonl and defers the rows its budget cannot hold, so the same command is submitted
+# again until the job's last line says "MISSING 0". The parts run in PLAN.md's order (CQSA_PARTS; each gets at most
+# CQSA_PART_BUDGET_S = 28 min of the job, so every submission advances several experiments; a part whose rows are
+# all recorded returns in seconds and hands its time to the next). Estimated total (bench.py plan): E0 ~70 min,
+# E1 ~180, E3 ~135, E4 ~65, E6 ~120, E5 ~40, E2 (SXM parts) ~150 min: ~12 h of SXM time, i.e. ~13 submissions.
+#
+# --mem: the host memory of the largest host-resident row of these parts, E2:bwd at N=4M (acc=cpu, host-resident
+# Q/K/V, fwd+bwd on the classic streamed backward): pinned Q/K/V 3 x 4M x 8 x 64 x 2 B = 12 GiB + pinned dO 4 GiB
+# + the fp32 host accumulator (output) 8 GiB + its fp16 copy 4 GiB + the backward's fp32 host gradients 3 x 8 = 24 GiB
+# + their fp16 casts 12 GiB + pinned task staging ~4 GiB + interpreter / CUDA context ~3 GiB = ~71 GiB -> 80G.
+# Without E2:bwd the largest is E2:fwd at 4M (12 + 4 + 8 + 4 + 3 = ~31 GiB -> 40G) and the device-resident parts
+# need < 16 GiB (task lists, the fp64 spot reference, the FA-2 reference output on the host at 1M): submit those with
+#   sbatch --mem=40G --export=ALL,...,CQSA_PARTS="E0 E1:fwd E3:fwd E4 E1:bwd E6 E3:bwd E5 E2:fwd" slurm/v3/E_sxm.slurm
+#
+# Everything is frozen: code = CQSA_SRC (slurm/ultimate/snapshot.sh), modules = the frozen directories.
+#   SNAP=$(bash slurm/ultimate/snapshot.sh) && sbatch --export=ALL,CQSA_SRC=$SNAP,CQSA_V13_SO=<dir>,CQSA_NATIVE_V2_SO=<dir> slurm/v3/E_sxm.slurm
+# Knobs: CQSA_PARTS, CQSA_PART_BUDGET_S (default 1700), E_ARGS (extra bench.py arguments: "--retry-errors", "--reps 1", ...).
+set -u
+export CQSA_SRC=${CQSA_SRC:?CQSA_SRC (frozen code root) is required}
+export CQSA_V13_SO=${CQSA_V13_SO:?CQSA_V13_SO (frozen cqsa_cuda_v13 directory) is required}
+export CQSA_NATIVE_V2_SO=${CQSA_NATIVE_V2_SO:?CQSA_NATIVE_V2_SO (frozen cqsa_native_v2 directory) is required}
+export CQSA_PARTS=${CQSA_PARTS:-"E0 E1:fwd E3:fwd E4 E1:bwd E6 E3:bwd E5 E2:fwd E2:bwd"}
+export CQSA_PART_BUDGET_S=${CQSA_PART_BUDGET_S:-1700}
+export CQSA_JOB_TOTAL_S=$((59 * 60))
+export CQSA_V3_RESULTS=${CQSA_V3_RESULTS:-/scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/v3}
+bash "$CQSA_SRC/slurm/v3/parts.sh"

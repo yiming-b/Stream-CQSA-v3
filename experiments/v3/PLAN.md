@@ -2,7 +2,7 @@
 
 One plan, one harness, one results directory. Every measurement of v3 lives under `results/v3/` as one
 JSONL row per (experiment, configuration, arm) plus the tables and figures generated from it; the plan is
-the table below. Written 2026-10-21; status column kept current by the harness's report step.
+the table below. Written 2026-10-21; the status lives in `results/v3/STATUS.md`, written by the harness's report step.
 
 ## Parameters and their values
 
@@ -20,10 +20,13 @@ the table below. Written 2026-10-21; status column kept current by the harness's
 | layout | 128-aligned (v3 default) | fixed | the v2 unaligned layout is a kernel A/B question, settled (`results/ultimate/layout_ab.json`) |
 
 Fixed everywhere: B=1, H=8, causal, device-resident Q/K/V unless the row says host-resident, one process per
-configuration (allocator state cannot leak between rows), 1 warm-up + 3 timed runs, median, `nvidia-smi` GPU
-name in every row. Node type: **A100-SXM4-80GB** (`--qos=gpu-test --constraint="sxm&gpu80"`, 59-min jobs) for
-E1-E6; the 8M rows and the 4M fwd+bwd rows exceed a 59-min slot and run on **A100-80GB-PCIe** (`gpu-short`,
-`gpu80&pcie`) as E7 with their own baselines (never compare across node types).
+configuration (allocator state cannot leak between rows), median of the timed runs (E0: one run, the errors are the
+result; E1/E2: 1 warm-up + 1 timed run, no reference computation beyond the free fp64 spot check; E3-E6: 1 warm-up +
+3 timed runs, FA-2 reference in the same worker), `nvidia-smi` GPU name in every row. Every worker first runs one
+tiny untimed call (N=16K) of its arm so that Triton JIT compilation and module loading never land in a timed run.
+Node type: **A100-SXM4-80GB** (`--qos=gpu-test --constraint="sxm&gpu80"`, 59-min jobs) for E0-E6; E2's 4M and 8M
+host-resident rows run on **A100-80GB-PCIe** (`gpu-short`, `gpu80&pcie`) with their own resident baselines (never
+compare across node types).
 
 ## Metrics (every row)
 
@@ -33,7 +36,7 @@ E1-E6; the 8M rows and the 4M fwd+bwd rows exceed a 59-min slot and run on **A10
 4. `rel_err`: norm-relative error of the fp16 output vs the FA-2 reference; `fp64_err` on 128 sampled rows
    (Stream-CQSA rows must be <= 1.2x FA-2's own fp64 error); backward: worst of dq/dk/dv vs FA-2's grads.
 5. `engine`, `n_subproblems`, `n_waves`, `kernel`: what actually ran (an unpinned call that ran monolithically
-   is labelled so; every Stream-CQSA row in E1-E7 pins itr and asserts the decomposition, per the rule in
+   is labelled so; every Stream-CQSA row in E0-E6 pins itr and asserts the decomposition, per the rule in
    `tests/conftest.py`).
 6. Derived: `ratio_fa2 = wall_s / wall_s(FA-2 resident)` and `ratio_sdpa`; `tokens_per_s`; for the OOM
    boundary, `largest_N_completed` per arm and budget.
@@ -47,13 +50,13 @@ scheduler's measurements already exist under `results/ultimate/dist_sched*.md`);
 
 | id | question | varies | fixed | arms | rows | GPU-min (est.) |
 |---|---|---|---|---|---|---|
-| **E0 correctness** | every series and every (c, itr, acc) path is exact: output and gradients vs FA-2 and vs fp64 | series x c in {3, 7, 31, 133} x itr {1, 2} x acc {gpu, cpu} x direction (fwd, fwd+bwd), plus bf16 and D=128 at c=7 | N=256K | 4 series, FA-2 and fp64 references | 4x4x2x2x2 + 4x2x2 = 144 | 1 part: ~30 (small rows, one timed run each; the errors are the result) |
-| **E1 scaling** | wall and peak memory vs N, device-resident, with the depth the memory allows | N in {128K, 256K, 512K, 1M, 2M, 4M} x direction | c=7, acc=gpu, fp16, D=64; **itr = the smallest depth >= 1 whose plan fits** (the harness asks the planner with `plan_only`; a row that OOMs at that depth retries at itr+1 and records both) | 4 series + SDPA + FA-2 (the baselines up to where they fit) | 6x2 x 6 = 72 | 2 parts: fwd ~25, fwd+bwd ~45 |
-| **E2 scaling, host-resident** | the recovery configuration: Q/K/V and the accumulator in host memory, same N ladder as E1 plus 8M | N in {128K..4M} (SXM) and {4M, 8M} (PCIe) x direction | c=7, acc=cpu, itr as in E1 (min 1) | 4 series (+ E1's resident baselines) | 6x2 x 4 + 2x2 x 4 = 64 | SXM: 2 parts ~30 + ~50; PCIe (8M): 1 part ~3 h |
-| **E3 parameters: c** | how the quorum size shapes time and memory | c in {3, 7, 13, 21, 31, 57, 73, 91, 133} x direction | N=1M, itr=1, acc=gpu | 4 series | 9x2 x 4 = 72 | 2 parts: ~30 + ~40 |
-| **E4 parameters: itr x acc** | the depth and the accumulator placement at one size | itr {1, 2} x acc {gpu, cpu} x direction | N=1M, c=7 | 4 series | 2x2x2 x 4 = 32 | 1 part: ~35 |
-| **E5 parameters: wave budget** | subproblems per launch | max_wave_tokens ladder (5 rungs) x direction | N=1M, c=73, itr=1, acc=gpu | wave_CUDA, wave_Triton | 5x2 x 2 = 20 | 1 part: ~20 |
-| **E6 parameters: precision, head dim** | bf16 and D=128 cost what fp16 / D=64 cost (performance; E0 has their correctness) | {fp16, bf16} x {64, 128} x direction | N=1M, c=7, itr=1, acc=gpu | 4 series + SDPA + FA-2 | 4x2 x 6 = 48 | 1 part: ~40 |
+| **E0 correctness** | every series and every (c, itr, acc) path is exact: output and gradients vs FA-2 and vs fp64 | series x c in {3, 7, 31, 133} x itr {1, 2} x acc {gpu, cpu} x direction (fwd, fwd+bwd), plus bf16 and D=128 at c=7; acc=cpu rows are host-resident (the recovery configuration) | N=256K | 4 series, FA-2 and fp64 references | 4x(4+3)x2x2 + 4x2x2 = 128 (itr=2 only at c in {3, 7, 31}: c=133 and 73 at depth 2 exceed the planner's 4096-subproblem cap) | 1 part: ~70 (one run each; the errors are the result) |
+| **E1 scaling** | wall and peak memory vs N, device-resident, with the depth the memory allows | N in {128K, 256K, 512K, 1M, 2M, 4M} x direction | c=7, acc=gpu, fp16, D=64; **itr = the smallest depth >= 1 whose plan fits** (the harness asks the planner with `plan_only`; a row that OOMs at that depth retries at itr+1 and records both) | 4 series + SDPA + FA-2 (the baselines up to where they fit) | 6x2 x 6 = 72 | 2 parts: fwd ~50, fwd+bwd ~130 (1 warm-up + 1 timed run; the 4M fwd+bwd rows are ~6 min each) |
+| **E2 scaling, host-resident** | the recovery configuration: Q/K/V and the accumulator in host memory, same N ladder as E1 plus 8M | N in {128K..4M} (SXM) and {4M, 8M} (PCIe) x direction | c=7, acc=cpu, itr as in E1 (min 1) | 4 series (+ E1's resident baselines on SXM; the PCIe rows carry their own FA-2 / SDPA rows, OOM where they do not fit) | 6x2 x 4 + 2x2 x 6 = 72 | SXM: 2 parts ~45 + ~120; PCIe: pcie_fwd ~3 h, pcie_bwd ~10 h (the 8M fwd+bwd host-resident rows are ~1.4 h each) |
+| **E3 parameters: c** | how the quorum size shapes time and memory | c in {3, 7, 13, 21, 31, 57, 73, 91, 133} x direction | N=1M, itr=1, acc=gpu | 4 series (ratios against E1's / E6's 1M baselines) | 9x2 x 4 = 72 | 2 parts: ~40 + ~95 |
+| **E4 parameters: itr x acc** | the depth and the accumulator placement at one size (device-resident Q/K/V) | itr {1, 2} x acc {gpu, cpu} x direction | N=1M, c=7 | 4 series | 2x2x2 x 4 = 32 | 1 part: ~65 |
+| **E5 parameters: wave budget** | subproblems per launch | max_wave_tokens = {1, 2, 4, 8, 16} x the largest subproblem (129,664 tokens at 1M, c=73: 73 / 37 / 19 / 10 / 5 waves) x direction | N=1M, c=73, itr=1, acc=gpu | wave_CUDA, wave_Triton | 5x2 x 2 = 20 | 1 part: ~40 |
+| **E6 parameters: precision, head dim** | bf16 and D=128 cost what fp16 / D=64 cost (performance; E0 has their correctness) | {fp16, bf16} x {64, 128} x direction | N=1M, c=7, itr=1, acc=gpu | 4 series + SDPA + FA-2 | 4x2 x 6 = 48 | 1 part: ~120 |
 | **E7 automatic mode** | what the user gets without pinning anything, under device budgets, vs the out-of-core rivals | budget {10, 20, 40, 80 GiB} x N {256K..4M} x direction | `attention(kernel="auto")`, nothing pinned (the engine column records what ran) | auto + FA-2 resident + the two rectangular OOC rivals | the OOC grid (`experiments/ooc_rivals`) re-run on v3 | gpu-short PCIe: ~8 x 1-7 h |
 
 Depth rule for E1/E2 (the user's instruction): `itr` is never 0 (that would be the monolithic call) and is
@@ -62,9 +65,38 @@ lower depth was tried and OOMed, that attempt too. Correctness (E0) is a separat
 scaling rows can time one run per configuration without the reference computations.
 
 E0-E6 run on **A100-SXM4-80GB** in one resubmittable 59-min gpu-test job (`slurm/v3/E_sxm.slurm`; parts in
-the order E0, E1:fwd, E3:fwd, E4, E1:bwd, E6, E3:bwd, E5, E2:fwd, E2:bwd; every part `--only-missing`,
-so the job is resubmitted until STATUS.md shows no missing rows). E2's 8M rows and E7 run on
-**A100-80GB-PCIe** (`gpu-short`): `slurm/v3/E_pcie.slurm` and the OOC harness.
+the order E0, E1:fwd, E3:fwd, E4, E1:bwd, E6, E3:bwd, E5, E2:fwd, E2:bwd, each part at most 28 min of a job; every
+part `--only-missing`, so the job is resubmitted until its last line says `MISSING 0`; ~770 GPU-min in all by the
+harness's estimate, i.e. ~14 submissions). E2's 4M / 8M host-resident rows run on **A100-80GB-PCIe**
+(`gpu-short`): `slurm/v3/E_pcie.slurm` (parts E2:pcie_fwd, E2:pcie_bwd; ~14 h, two submissions). E7 is the OOC
+harness (below).
+
+Routing facts the rows record (the `engine` column says what ran; `[*]` in the report marks a row whose engine is
+not the series' nominal one): the wave backward runs on the CUDA kernel and on device-resident inputs only, so the
+wave_Triton fwd+bwd rows and every host-resident wave backward (E2) run on the classic engine with the Triton /
+CUDA kernel; the wave backward keeps its fp32 gradients and accumulator on the device, so the wave_CUDA acc=cpu
+fwd+bwd rows of E4 ran with a device accumulator in the backward (`acc_ran`). FA-2's fwd+bwd reference at 8M
+(~80 GiB) does not fit an 80 GB device: those baseline rows are expected OOM rows. A pinned depth that does not
+fit is an OOM row (escalation is disabled in the harness), except under E1/E2's depth rule, which records the
+attempt and runs itr+1.
+
+### E7: automatic mode vs the out-of-core rivals (recipe, not run by this harness)
+
+`experiments/ooc_rivals/bench.py` as is, on v3's code and modules: for each budget b in {10, 20, 40, 80} and
+direction d in {fwd, bwd}, from a snapshot `SNAP=$(bash slurm/ultimate/snapshot.sh)`,
+`sbatch --export=ALL,CQSA_SRC=$SNAP slurm/ooc_rivals/b${b}_${d}.slurm` with the job's `cd` / `PYTHONPATH` /
+`CQSA_CUDA_MODULE` lines replaced by v3's (`$CQSA_SRC`, `PYTHONPATH=$CQSA_SRC:next/kernel/stable:...:next/native:
+<frozen v13 dir>:<frozen native_v2 dir>`, `CQSA_CUDA_MODULE` unset so the interface picks cqsa_cuda_v13), results
+into `results/v3/ooc_rivals/` (`--out`), then `python -P experiments/ooc_rivals/report.py --out results/v3/ooc_rivals`.
+The grid, timed region and host layouts are the OOC harness's (its docstring); `cqsa_auto` is
+`attention(kernel="auto")` with nothing pinned and the budget as the hardware description.
+
+### Status
+
+`results/v3/STATUS.md` (written by `bench.py report` / `bench.py status`): rows done / OOM / error / missing per
+experiment and part, with the job ids; `results/v3/report.md` and `results/v3/E*.png` are the tables, fits and
+figures. The harness's plumbing was checked on vis1 (smoke rows, not measurements):
+`docs/ultimate/progress/E_harness.md`.
 
 ## Readers of the results
 

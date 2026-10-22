@@ -29,3 +29,6 @@ kernels/v13/logs/
 
 # kernel variant build trees (torch extension objects per kernel set)
 kernels/*/build_*/
+
+# v3 harness smoke runs on vis1 (plumbing checks, never measurements): experiments/v3/bench.py --smoke
+.smoke/

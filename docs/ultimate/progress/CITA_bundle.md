@@ -115,3 +115,7 @@ E0, E1 fwd, E1 fwd+bwd, E3 fwd, E4, E6, report, results tarball). Spec: the task
 - Throwaway environments: VENVs/py312_cita_closure (python 3.12.7 conda env, wheel closure proof),
   VENVs/cita_plumb311 (python 3.11 venv on CQSA311 with a flash_attn-blocking stub). VENVs/py312check existed
   before this task (with ipykernel etc. already installed) and was not used for the proof.
+- Addendum (after hand-off): the system-nvcc-12.9 sm90 compile test finished: all 8 classic units rc=0
+  (cqs_census 7 s, cqs_census_bwd 6 s, cqsa_kernel 50 s, fwd hdim64 fp16 causal 127 s / LEGACY 1524 s, bwd hdim64
+  fp16 184 s / LEGACY 386 s, fwd hdim128 bf16 190 s; one core, 2 nvcc threads). The native-module sm90 compile is
+  still running in the scratchpad (sm90_native_build.log).

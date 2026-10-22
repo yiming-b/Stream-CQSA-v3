@@ -109,6 +109,12 @@ Observation (not a bug): the Triton series' `rel_err` vs FA-2 is ~2x the CUDA se
 kernel rounds differently from FA-2 (the CUDA kernel is FA-2's code), so its distance to FA-2 is larger without
 being less accurate. `fp64_err` (and its ratio to FA-2's) is the precision metric; `rel_err` is agreement with FA-2.
 
+The part runner was exercised end to end from the frozen snapshot of commit a5da2e8 (`slurm/v3/parts.sh` with
+CQSA_SRC / CQSA_V13_SO / CQSA_NATIVE_V2_SO set, CQSA_PARTS="E1:fwd E5", a 200 s part budget, E_ARGS=--smoke ...,
+results into a scratch directory): module check and md5sums printed, 9 smoke rows run, report + STATUS written,
+`MISSING <n>` last; the rows record the snapshot as code_root, commit a5da2e8 (taken from the snapshot's name:
+a git archive has no .git) and the frozen .so files as cuda_module_file / native_module_file.
+
 ## Open issues
 
 - The E1/E2 OOM-then-retry branch of the depth rule is untested end to end (see above); the first real job tells.

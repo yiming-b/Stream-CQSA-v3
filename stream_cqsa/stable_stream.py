@@ -61,7 +61,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import torch
 
-from .reference import all_paths, group_bits_for_path, level_align, segment_block_base
+from .reference import all_paths, check_quorum_set, group_bits_for_path, level_align, segment_block_base
 from .progress import Progress, verbose_enabled, describe_call, expected_seconds
 import sys
 
@@ -522,6 +522,7 @@ def refine_task(
     the parent's ``c`` whole chunks). What cannot shrink is a parent below
     ``min_refinable_tokens``; refusing it here keeps the recovery honest.
     """
+    check_quorum_set(c, interest_set)
     L_parent = int(task.local_size)
     if L_parent < min_refinable_tokens(c, seg_align):
         align, _ = task_layout(seg_align)
@@ -596,7 +597,13 @@ def build_tasks(
     level is long enough, so no kernel tile straddles a chunk boundary
     (``extra["seg_base"]`` is then the task's in-place block map); ``0`` is the
     legacy even split, for A/B measurements only.
+
+    A pair that is not a perfect difference set is refused (``ValueError``): with
+    it the engine would still run ``c**itr`` subproblems, each gathering ``l``
+    chunks, but most chunk pairs would never meet and the result would be wrong
+    (``reference.check_quorum_set``).
     """
+    check_quorum_set(c, interest_set)
     tasks: list[SubproblemTask] = []
     align, strict = task_layout(seg_align)
     for path_idx, path in enumerate(all_paths(itr, c)):

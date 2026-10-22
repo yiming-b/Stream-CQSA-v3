@@ -51,25 +51,10 @@ from .scheduler import device_rate, dist_local_time
 
 GIB = float(1 << 30)
 
-# Perfect (Singer) difference sets: c = l^2 - l + 1 chunks, |interest_set| = l.
-# A subproblem gathers l of the c chunks; the pair work per depth is (l^2/c)^itr
-# of the monolithic call, the masked fraction inside a subproblem is (l-1)/l^2,
-# the gathered tokens per depth are l^itr * N and there are c^itr tasks.
-# The engine's int64 group bits allow itr*(l-1) <= 63.
-QUORUM_SETS: dict[int, tuple[int, ...]] = {
-    3: (0, 1), 7: (0, 1, 3), 13: (0, 1, 3, 9), 21: (0, 1, 4, 14, 16),
-    31: (0, 1, 3, 8, 12, 18), 57: (0, 1, 3, 13, 32, 36, 43, 52),
-    73: (0, 1, 3, 7, 15, 31, 36, 54, 63),
-    # Singer set for q = 9 (from the trace of GF(q^3) over GF(q)); verified perfect
-    91: (0, 20, 28, 37, 60, 70, 73, 84, 85, 89),
-    # q = 11 (l = 12); verified perfect
-    133: (0, 1, 3, 12, 20, 34, 38, 81, 88, 94, 104, 109),
-}
-
-
-def is_perfect_difference_set(c: int, s: Sequence[int]) -> bool:
-    d = sorted((a - b) % c for a in s for b in s if a != b)
-    return d == list(range(1, c))
+# The perfect (Singer) difference sets ``QUORUM_SETS`` and their validation live in
+# ``reference.py`` (the leaf module the task builders can import); they are
+# re-exported here, where the planner and the callers have always found them.
+from .reference import QUORUM_SETS, is_perfect_difference_set, check_quorum_set  # noqa: E402,F401
 
 
 # ---------------------------------------------------------------------------

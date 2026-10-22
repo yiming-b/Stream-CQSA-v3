@@ -38,6 +38,9 @@ import torch
 __all__ = [
     "C",
     "INTEREST_SET",
+    "QUORUM_SETS",
+    "is_perfect_difference_set",
+    "check_quorum_set",
     "chunk_layout",
     "level_align",
     "quorum_chunks",
@@ -58,6 +61,64 @@ __all__ = [
 
 C = 7
 INTEREST_SET = (0, 1, 3)
+
+# Perfect (Singer) difference sets: c = l^2 - l + 1 chunks, |interest_set| = l.
+# A subproblem gathers l of the c chunks; the pair work per depth is (l^2/c)^itr
+# of the monolithic call, the masked fraction inside a subproblem is (l-1)/l^2,
+# the gathered tokens per depth are l^itr * N and there are c^itr tasks.
+# The engine's int64 group bits allow itr*(l-1) <= 63. (``autoconfig`` re-exports
+# this table; it lives here so the task builders can validate against it
+# without importing the planner.)
+QUORUM_SETS: dict[int, tuple[int, ...]] = {
+    3: (0, 1), 7: (0, 1, 3), 13: (0, 1, 3, 9), 21: (0, 1, 4, 14, 16),
+    31: (0, 1, 3, 8, 12, 18), 57: (0, 1, 3, 13, 32, 36, 43, 52),
+    73: (0, 1, 3, 7, 15, 31, 36, 54, 63),
+    # Singer set for q = 9 (from the trace of GF(q^3) over GF(q)); verified perfect
+    91: (0, 20, 28, 37, 60, 70, 73, 84, 85, 89),
+    # q = 11 (l = 12); verified perfect
+    133: (0, 1, 3, 12, 20, 34, 38, 81, 88, 94, 104, 109),
+}
+
+
+def is_perfect_difference_set(c: int, s: Sequence[int]) -> bool:
+    """``(c, s)`` is a perfect difference set: the members are distinct mod ``c`` and
+    the differences of distinct members cover every non-zero residue mod ``c``
+    exactly once -- so every pair of chunks is gathered by exactly one owner."""
+    c = int(c)
+    s = [int(x) % c for x in s]
+    if c < 2 or len(set(s)) != len(s):
+        return False
+    d = sorted((a - b) % c for i, a in enumerate(s) for j, b in enumerate(s) if i != j)
+    return d == list(range(1, c))
+
+
+def check_quorum_set(c: int, interest_set: Sequence[int]) -> None:
+    """
+    Refuse a ``(c, interest_set)`` pair that is not a perfect difference set.
+
+    The decomposition is exact only when every pair of chunks ``(i, j)`` lands in
+    exactly one subproblem; with an interest set that does not match ``c`` the
+    differences it covers are a subset of the residues, so most chunk pairs are
+    never gathered and the engine returns a result with most of the attention
+    SKIPPED -- silently, fast, and with a plausible-looking output. That is what
+    v2.2.3's ``attention(..., c=73)`` did: it pinned ``c`` and kept the plan's
+    ``(0, 1, 3)`` (docs/ultimate/progress/BUG_v223_c73.md). The engine entry
+    points therefore validate the pair before any task is built.
+    """
+    if is_perfect_difference_set(c, interest_set):
+        return
+    c = int(c)
+    iset = tuple(int(x) for x in interest_set)
+    covered = {(a - b) % c for i, a in enumerate(iset) for j, b in enumerate(iset) if i != j}
+    missing = (c - 1) - len(covered & set(range(1, c)))
+    known = QUORUM_SETS.get(c)
+    hint = (f"the quorum set for c={c} is interest_set={known}" if known is not None
+            else f"the known quorum sets are c in {sorted(QUORUM_SETS)} (stream_cqsa.autoconfig.QUORUM_SETS)")
+    raise ValueError(
+        f"Stream-CQSA: (c={c}, interest_set={iset}) is not a perfect difference set: {missing} of the {c - 1} "
+        f"non-zero chunk differences are never gathered, so the decomposition would skip those chunk pairs and "
+        f"return a wrong result. Pass a matching pair: {hint}."
+    )
 
 
 # ---------------------------------------------------------------------------

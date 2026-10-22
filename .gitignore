@@ -41,3 +41,5 @@ dist_cita/*.log
 dist_cita/results/
 dist_cita/run_cita_executed.ipynb
 dist_cita/cita_results_*.tar.gz
+dist_cita/cuda_min/
+dist_cita/cuda_min_pkgs/

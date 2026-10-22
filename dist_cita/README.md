@@ -11,6 +11,9 @@ stream_cqsa_v3_cita_<date>/
   run_cita.ipynb       the experiment notebook (environment, correctness, E0, E1 fwd, E1 fwd+bwd, E3, E4, E6, report)
   wheels/              54 python-3.12 wheels (pytest, nbformat, nbclient, nbconvert, ipykernel and every dependency)
                        + flash_attn-2.8.3.tar.gz (the source distribution; optional, see below)
+  cuda_min/            a relocatable CUDA 12.9.86 compiler (nvcc, cicc, ptxas, cudafe++, fatbinary, nvlink, nvvm,
+                       libdevice, the crt / cudart / CCCL headers, libcudart): the conda-forge packages of
+                       cuda_min_pkgs.txt unpacked into one prefix; used by setup_cita.sh when CITA has no CUDA 12.x nvcc
   src/                 the repository at commit GIT_COMMIT: stream_cqsa/, csrc/ (incl. csrc/cutlass), native/,
                        experiments/v3/, tests/, setup.py, pyproject.toml, third_party/, docs/, benchmarks/
   GIT_COMMIT  MANIFEST.txt  SHA256SUMS  wheels.txt
@@ -21,7 +24,7 @@ results directory, the executed notebook with every cell's output, the setup / b
 
 ## Step by step
 
-1. Copy the tarball to CITA, e.g. into `$HOME` or a scratch directory with ~2 GB free (the build adds ~1 GB).
+1. Copy the tarball (~110 MB) to CITA, e.g. into `$HOME` or a scratch directory with ~2 GB free (the build adds ~1 GB).
 2. Unpack and enter it:
    ```
    tar xzf stream_cqsa_v3_cita_<date>.tar.gz
@@ -40,7 +43,7 @@ results directory, the executed notebook with every cell's output, the setup / b
    |---|---|---|---|
    | wheels | `pip install --no-index --find-links wheels pytest nbformat nbclient nbconvert ipykernel` | < 1 min | nothing |
    | (a) triton | `CQSA_SKIP_EXT=1 pip install --no-index --no-build-isolation --no-deps -e src/` + a `.pth` file that puts `src/` on `sys.path` (the compiled modules of (b) / (c) land there) | < 1 min | nothing: the pure-Triton kernels (`stream_cqsa/triton_kernel.py`) serve the `classic_Triton` and `wave_Triton` series |
-   | (b) classic_cuda | `cd src && CQSA_KERNEL_SET=common FLASH_ATTN_CUDA_ARCHS=90 TORCH_CUDA_ARCH_LIST=9.0 MAX_JOBS=<min(nproc/2,16)> python setup.py build_ext --inplace` -> `src/cqsa_cuda.*.so`, log `build_classic.log` | 20-60 min | a CUDA **12.x** toolkit with `nvcc` (see below) and `g++` |
+   | (b) classic_cuda | `cd src && CQSA_KERNEL_SET=common FLASH_ATTN_CUDA_ARCHS=90 TORCH_CUDA_ARCH_LIST=9.0 MAX_JOBS=<min(nproc/2,16)> python setup.py build_ext --inplace` -> `src/cqsa_cuda.*.so`, log `build_classic.log` | 20-60 min | an nvcc of CUDA **12.x** (a system one, else the bundled `cuda_min/`; see below) and `g++` |
    | (c) wave_cuda | the same with `CQSA_ONLY_NATIVE=1` -> `src/cqsa_native.*.so`, log `build_native.log` | 20-60 min | the same |
    | doctor | `python -m stream_cqsa.doctor` -> `doctor.txt`: which modules loaded, what fits | < 1 min | |
 
@@ -50,10 +53,15 @@ results directory, the executed notebook with every cell's output, the setup / b
    **About nvcc.** The venv's pip packages do not provide one: the wheel `nvidia-cuda-nvcc-cu12 12.9.86` (what
    `cuda-toolkit 12.9.1` pulls in) contains only `ptxas`, `nvvm/` and the `crt/` headers, not the `nvcc` driver,
    `cicc` or `cudafe++`. The script looks for `$CUDA_HOME/bin/nvcc`, `nvcc` on `PATH`, `/usr/local/cuda*`,
-   `/opt/cuda*` and the NVIDIA HPC SDK, and accepts a release whose major version equals torch's CUDA (12): a
-   CUDA 13 nvcc is refused by torch's extension builder for a cu129 torch. If CITA has a modules system, try
-   `module avail cuda` and `module load cuda/12.9` (or 12.8 / 12.6 / 12.4) before step 4, or set
-   `CUDA_HOME=/path/to/cuda-12.x`. Without an nvcc, tiers (b) and (c) are `SKIPPED` and the run is Triton-only,
+   `/opt/cuda*` and the NVIDIA HPC SDK, and accepts a release whose major version equals torch's CUDA (12),
+   preferring the one closest to 12.9 (a CUDA 13 nvcc is refused by torch's extension builder for a cu129 torch,
+   and a far newer minor can fail on torch's own headers). If none is found it uses the bundled `cuda_min/`
+   (nvcc 12.9.86, the conda-forge build, relocatable, no installation) and links the cuBLAS / cuSPARSE / cuSOLVER
+   headers of the venv's `nvidia-*-cu12` wheels into it (torch's ATen headers include them). `CITA_USE_BUNDLED_NVCC=1`
+   forces the bundled one; `CUDA_HOME=/path/to/cuda-12.x` or `module load cuda/12.x` before step 4 selects a system
+   one. nvcc needs a host `g++` (<= 14 for nvcc 12.9; for a newer one set `NVCC_APPEND_FLAGS=-allow-unsupported-compiler`).
+   Tested on Della: `cuda_min`'s nvcc compiles the classic module's units for sm90 through the exact command torch's
+   builder generates. If every route fails, tiers (b) and (c) are `SKIPPED` / `FAILED` and the run is Triton-only,
    which is a complete run of the two Triton series (exact; on the A100 they run at 0.65-0.7x the CUDA modules'
    speed).
 
@@ -124,9 +132,11 @@ SDPBackend.FLASH_ATTENTION)`) as the reference for the error columns and as the 
 records `ref_arm = "SDPA-flash"`, the report's `ref` column and headers say so, the `/FA-2` ratio column stays
 empty and the `FA-2` arm is dropped from the plan with a printed notice. It is never labelled FA-2.
 
-Optional: `wheels/flash_attn-2.8.3.tar.gz` is the source distribution. With a CUDA 12.x nvcc, a 20-60 min compile
-(`MAX_JOBS` nvcc jobs, ~3 GB RAM each) adds the real FA-2 arm and reference:
+Optional: `wheels/flash_attn-2.8.3.tar.gz` is the source distribution. With a CUDA 12.x nvcc (the one
+`setup.log` says it used: `export CUDA_HOME=$PWD/cuda_min` for the bundled one, after `setup_cita.sh` has linked the
+headers), a 20-60 min compile (`MAX_JOBS` nvcc jobs, ~3 GB RAM each) adds the real FA-2 arm and reference:
 ```
+export CUDA_HOME=$PWD/cuda_min          # or the system toolkit setup_cita.sh chose
 FLASH_ATTENTION_FORCE_BUILD=TRUE FLASH_ATTN_CUDA_ARCHS=90 MAX_JOBS=8 \
   pip install --no-index --no-build-isolation --no-deps wheels/flash_attn-2.8.3.tar.gz
 python -c "import flash_attn; print(flash_attn.__version__)"
@@ -138,13 +148,16 @@ the pip output along and stay with SDPA-flash. Rows already recorded with `ref_a
 
 ## Troubleshooting
 
-- **`tiers.txt` says `classic_cuda SKIPPED no nvcc of CUDA 12.x found`**: the Triton-only run is a complete,
-  exact run (series `classic_Triton`, `wave_Triton`). To get the CUDA series, find a CUDA 12.x toolkit on CITA
-  (`module avail cuda`, `ls /usr/local/ | grep cuda`, `ls /opt`), then `CUDA_HOME=<root> bash setup_cita.sh`.
-  Set `CITA_REBUILD=1` to force a rebuild of a module that already imports.
+- **`tiers.txt` says `classic_cuda SKIPPED no nvcc of CUDA 12.x found`** (the bundled `cuda_min/bin/nvcc` did not
+  run either: `setup.log` says so): the Triton-only run is a complete, exact run (series `classic_Triton`,
+  `wave_Triton`). To get the CUDA series, find a CUDA 12.x toolkit on CITA (`module avail cuda`,
+  `ls /usr/local/ | grep cuda`, `ls /opt`), then `CUDA_HOME=<root> bash setup_cita.sh`. Set `CITA_REBUILD=1` to
+  force a rebuild of a module that already imports.
 - **`FAILED` tier**: send back `build_classic.log` / `build_native.log` (they are in the results tarball too).
-  The usual causes: a g++ older than 9 or newer than the toolkit supports (`nvcc -ccbin <g++>`; set `CXX`),
-  an incomplete toolkit (no `include/cuda_runtime.h`), running out of host RAM (lower `CITA_MAX_JOBS`).
+  The usual causes: a g++ older than 9 or newer than nvcc 12.9 supports (14; `NVCC_APPEND_FLAGS=-allow-unsupported-compiler`,
+  or `CXX=<older g++>`), a missing `cublas_v2.h` / `cusparse.h` / `cusolverDn.h` (the venv lacks the
+  `nvidia-cublas-cu12` / `-cusparse-cu12` / `-cusolver-cu12` wheels that torch depends on; `setup.log` warns),
+  running out of host RAM (lower `CITA_MAX_JOBS`). A system CUDA 12.x can be tried instead with `CUDA_HOME=<root>`.
 - **Out of memory in an experiment row**: the row is recorded as `oom` and the run continues. If the 4M rows of
   E1 are all `oom` on an 80 GB H100 something else holds the GPU: check `nvidia-smi`, set
   `CUDA_VISIBLE_DEVICES` to a free GPU, or `CITA_MAX_N=2097152`.

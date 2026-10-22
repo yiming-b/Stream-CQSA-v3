@@ -1,0 +1,16 @@
+# conda-forge packages (linux-64, CUDA 12.9) that make dist_cita/cuda_min: a relocatable nvcc 12.9.86 toolchain for the H100
+# build on CITA (bin/nvcc, cicc, ptxas, cudafe++, fatbinary, nvlink, nvvm + libdevice, crt / cudart / CCCL headers, libcudart).
+# Downloaded and unpacked by make_bundle.sh --download; the md5 is checked. Columns: filename  md5  url
+cuda-cccl_linux-64-12.9.27-ha770c72_0.conda  87ff6381e33b76e5b9b179a2cdd005ec  https://conda.anaconda.org/conda-forge/linux-64/cuda-cccl_linux-64-12.9.27-ha770c72_0.conda
+cuda-crt-dev_linux-64-12.9.86-ha770c72_2.conda  79d280de61e18010df5997daea4743df  https://conda.anaconda.org/conda-forge/linux-64/cuda-crt-dev_linux-64-12.9.86-ha770c72_2.conda
+cuda-crt-tools-12.9.86-ha770c72_2.conda  503a94e20d2690d534d676a764a1852c  https://conda.anaconda.org/conda-forge/linux-64/cuda-crt-tools-12.9.86-ha770c72_2.conda
+cuda-cudart-dev_linux-64-12.9.79-h3f2d84a_0.conda  86e40eb67d83f1a58bdafdd44e5a77c6  https://conda.anaconda.org/conda-forge/linux-64/cuda-cudart-dev_linux-64-12.9.79-h3f2d84a_0.conda
+cuda-cudart_linux-64-12.9.79-h3f2d84a_0.conda  64508631775fbbf9eca83c84b1df0cae  https://conda.anaconda.org/conda-forge/linux-64/cuda-cudart_linux-64-12.9.79-h3f2d84a_0.conda
+cuda-cudart-static_linux-64-12.9.79-h3f2d84a_0.conda  b87bf315d81218dd63eb46cc1eaef775  https://conda.anaconda.org/conda-forge/linux-64/cuda-cudart-static_linux-64-12.9.79-h3f2d84a_0.conda
+cuda-driver-dev_linux-64-12.9.79-h3f2d84a_0.conda  d411828daa36ac84eab210ba3bbe5a64  https://conda.anaconda.org/conda-forge/linux-64/cuda-driver-dev_linux-64-12.9.79-h3f2d84a_0.conda
+cuda-nvcc-dev_linux-64-12.9.86-he91c749_2.conda  19d4e090217f0ea89d30bedb7461c048  https://conda.anaconda.org/conda-forge/linux-64/cuda-nvcc-dev_linux-64-12.9.86-he91c749_2.conda
+cuda-nvcc-impl-12.9.86-h85509e4_2.conda  67458d2685e7503933efa550f3ee40f3  https://conda.anaconda.org/conda-forge/linux-64/cuda-nvcc-impl-12.9.86-h85509e4_2.conda
+cuda-nvcc-tools-12.9.86-he02047a_2.conda  dc256c9864c2e8e9c817fbca1c84a4bc  https://conda.anaconda.org/conda-forge/linux-64/cuda-nvcc-tools-12.9.86-he02047a_2.conda
+cuda-nvvm-dev_linux-64-12.9.86-ha770c72_2.conda  7b386291414c7eea113d25ac28a33772  https://conda.anaconda.org/conda-forge/linux-64/cuda-nvvm-dev_linux-64-12.9.86-ha770c72_2.conda
+cuda-nvvm-impl-12.9.86-h4bc722e_2.conda  82125dd3c0c4aa009faa00e2829b93d8  https://conda.anaconda.org/conda-forge/linux-64/cuda-nvvm-impl-12.9.86-h4bc722e_2.conda
+cuda-nvvm-tools-12.9.86-h4bc722e_2.conda  f9af26e4079adcd72688a8e8dbecb229  https://conda.anaconda.org/conda-forge/linux-64/cuda-nvvm-tools-12.9.86-h4bc722e_2.conda

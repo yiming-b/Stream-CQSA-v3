@@ -6,7 +6,7 @@
 #   bash dist_cita/make_bundle.sh --download      (re-download the wheels of wheels.txt first; needs network)
 #
 # The tarball unpacks to one directory stream_cqsa_v3_cita_<date>/ with
-#   README.md  setup_cita.sh  run_cita.py  run_cita.ipynb  wheels/  src/  GIT_COMMIT
+#   README.md  setup_cita.sh  run_cita.py  run_cita.ipynb  wheels/  cuda_min/  src/  GIT_COMMIT
 # src/ is `git archive HEAD` of the repository (every tracked file) minus results/, kernels/, csrc_nc/,
 # docs/ultimate/kernel_diffs/, slurm/, .github/ and the notebooks' outputs; it carries a GIT_COMMIT file
 # (bench.py records it in every row). Nothing is built here: no .so, no build/ directory.
@@ -32,6 +32,34 @@ if [ "${1:-}" = "--download" ]; then
             https://files.pythonhosted.org/packages/3b/b2/8d76c41ad7974ee264754709c22963447f7f8134613fd9ce80984ed0dab7/flash_attn-2.8.3.tar.gz
     fi
 fi
+
+# cuda_min/: the relocatable nvcc 12.9 toolchain (conda-forge packages of cuda_min_pkgs.txt, unpacked into one prefix
+# with the conda layout: bin/, nvvm/, targets/x86_64-linux/{include,lib}; include and lib64 symlinks for torch's extension builder)
+if [ "${1:-}" = "--download" ] || [ ! -x "$HERE/cuda_min/bin/nvcc" ]; then
+    echo "== cuda_min/: downloading and unpacking the conda-forge nvcc 12.9 packages"
+    mkdir -p "$HERE/cuda_min_pkgs"
+    grep -v '^#' "$HERE/cuda_min_pkgs.txt" | while read -r f md5 url; do
+        [ -n "$f" ] || continue
+        [ -f "$HERE/cuda_min_pkgs/$f" ] || curl -sL -o "$HERE/cuda_min_pkgs/$f" "$url"
+        got="$(md5sum "$HERE/cuda_min_pkgs/$f" | cut -d' ' -f1)"
+        [ "$got" = "$md5" ] || { echo "md5 mismatch for $f: $got != $md5" >&2; exit 1; }
+    done
+    rm -rf "$HERE/cuda_min"
+    mkdir -p "$HERE/cuda_min"
+    X="$(mktemp -d "${TMPDIR:-/tmp}/cuda_min.XXXXXX")"
+    for c in "$HERE"/cuda_min_pkgs/*.conda; do
+        d="$X/$(basename "$c" .conda)"
+        mkdir -p "$d"
+        ( cd "$d" && unzip -q -o "$c" && for t in pkg-*.tar.zst; do tar --zstd -xf "$t"; done; \
+          find . -path ./info -prune -o \( -type f -o -type l \) ! -name 'pkg-*.tar.zst' ! -name 'info-*.tar.zst' ! -name metadata.json -print | cpio -pdm --quiet "$HERE/cuda_min" )
+    done
+    rm -rf "$X"
+    ( cd "$HERE/cuda_min" && ln -sfn targets/x86_64-linux/include include && ln -sfn targets/x86_64-linux/lib lib64 )
+    "$HERE/cuda_min/bin/nvcc" --version | tail -1
+    echo "cuda_min: $(du -sh "$HERE/cuda_min" | cut -f1)"
+fi
+test -x "$HERE/cuda_min/bin/nvcc" || { echo "cuda_min/bin/nvcc missing" >&2; exit 1; }
+test -f "$HERE/cuda_min/include/cuda_runtime.h" || { echo "cuda_min/include/cuda_runtime.h missing" >&2; exit 1; }
 
 n_wheels="$(ls "$HERE"/wheels/*.whl 2>/dev/null | wc -l)"
 if [ "$n_wheels" -lt 40 ]; then
@@ -70,7 +98,9 @@ test -f "$B/src/csrc/cutlass/include/cutlass/cutlass.h" || { echo "csrc/cutlass 
 test -f "$B/src/csrc/cutlass/include/cute/tensor.hpp" || { echo "csrc/cutlass/include/cute is incomplete in HEAD" >&2; exit 1; }
 
 echo "== dist files"
-cp "$HERE/README.md" "$HERE/setup_cita.sh" "$HERE/run_cita.py" "$HERE/run_cita.ipynb" "$HERE/wheels.txt" "$B/"
+cp "$HERE/README.md" "$HERE/setup_cita.sh" "$HERE/run_cita.py" "$HERE/run_cita.ipynb" "$HERE/wheels.txt" "$HERE/cuda_min_pkgs.txt" "$B/"
+cp -a "$HERE/cuda_min" "$B/cuda_min"
+find "$B/cuda_min/targets/x86_64-linux/include" -maxdepth 1 -type l -exec rm -f {} +     # no venv header links from a local test
 mkdir -p "$B/wheels"
 cp "$HERE"/wheels/*.whl "$B/wheels/"
 [ -f "$HERE/wheels/flash_attn-2.8.3.tar.gz" ] && cp "$HERE/wheels/flash_attn-2.8.3.tar.gz" "$B/wheels/"

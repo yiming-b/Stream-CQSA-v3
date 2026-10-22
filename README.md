@@ -1,4 +1,4 @@
-# Stream-CQSA v2
+# Stream-CQSA v3
 
 Exact out-of-memory recovery for attention. When an attention call does not fit
 in device memory, Stream-CQSA decomposes its pair set over a cyclic quorum set
@@ -7,7 +7,15 @@ on several devices), and recomposes the exact result. It defines no attention
 rule of its own: it reproduces whatever kernel it wraps.
 
 Paper (v1): [arXiv:2604.20819](https://arxiv.org/abs/2604.20819) ·
-v1 repo: [yiming-b/Stream-CQSA](https://github.com/yiming-b/Stream-CQSA)
+v1 repo: [yiming-b/Stream-CQSA](https://github.com/yiming-b/Stream-CQSA) ·
+v2 repo (released, PyPI `stream-cqsa` 2.2.3): [yiming-b/Stream-CQSA-v2](https://github.com/yiming-b/Stream-CQSA-v2)
+
+**v3 is in development** (version `3.0.0.dev0`, not on PyPI yet). It is v2.2.3 plus the kernel and engine
+work of the "ultimate A100 kernel" program (`docs/ultimate/`): new forward and backward kernels that remove
+the decomposition's overhead on the live tiles, a wave kernel with the same design, 128-aligned chunk
+layouts, routing by a memory model, a multi-device scheduler for mixed GPUs, and one experiment plan
+(`experiments/v3/PLAN.md`) whose results fill the placeholders marked **[E#: pending]** below as the
+jobs finish (`results/v3/STATUS.md` says which rows exist).
 
 ## How it works
 
@@ -22,7 +30,22 @@ the *global* log-sum-exp and scatter-added into host gradient buffers. Only one
 subproblem's inputs and partial result are on the device at a time, and every
 kept query–key pair is counted exactly once, so the result is exact.
 
-## What is new in v2
+## What is new in v3
+
+| area | v3 | measured (A100-SXM4-80GB, fp16, B=1 H=8 D=64, causal; `results/ultimate/`) |
+|---|---|---|
+| **forward kernel** | a census kernel classifies every 128x128 tile on the device, then an ALIGNED run-table kernel (upstream FlashAttention-2's loop walking the live tiles, no per-tile verdicts) runs tasks without mixed tiles and v11's code stays as the LEGACY path; one stream, no host sync (`csrc/`, `docs/ultimate/03_kernels_report.md`) | 56K-token task: **0.77x flash_attn** (v2's kernel: 1.04x); the all-live tax 1.30x -> 0.99x; non-causal 1.46-1.75x faster than v2's separate kernel; bit-identical to v2's kernel |
+| **backward kernel** | the same design per column block; dP_sum staged in shared memory; deterministic dq available | 56K-token task: **0.78x flash_attn**, **2.48x faster than v2** (dk/dv bit-identical, dq within the atomics' drift) |
+| **one extension** | causal and non-causal, fp16 and bf16, head dims 64 and 128 in one module (`cqsa_cuda_v13`); the CUDA backward is the default again; v2's second non-causal extension is gone | engine, 1M tokens, 7 subproblems: forward **0.98x** a single flash_attn call (v2.2.3: 1.30x), forward+backward **15.2 s vs 15.1 s** (v2.2.3: 39.2 s CUDA / 29.0 s Triton) |
+| **wave kernel** | the census + ALIGNED design on the uniform wave layout (several subproblems per launch, `native/`), head dim 128 now compiles | 73 subproblems in one launch at 131K: **1.02x** one flash_attn call forward, 1.02x backward (v2's wave: 1.42x / 2.4-2.6x slower) |
+| **128-aligned chunks** | every task's chunk boundaries fall on 128-token blocks, at every depth, so no tile straddles a chunk (v2: 1.365x -> 1.004x flash_attn at 56K with the SAME kernel) | engine 131K c=7: 150 -> 135 ms; c=73: 222 -> 179 ms |
+| **routing by a memory model** | the planner models the wave's peak (`a*N + b*W`) and chooses the engine, the wave budget W and gathered-vs-in-place reads; the subproblem-count rule is gone | — |
+| **async host fold** | the wave engine's host accumulator folds on a worker under the next wave | host-streamed 1M: 9.0 s (classic 9.3 s); 2M: 34.2 vs 34.6 s |
+| **multi-device scheduler** | per-GPU rates (calibrated per model), exact live-tile work per task, LPT with a cost-aware split, reduce_scatter merge; identical schedule on every rank; heterogeneous devices supported (`stream_cqsa/scheduler.py`) | model within 2% rms of the measured 4x A100 job; the measured winner reproduced on every shape (`results/ultimate/dist_sched.md`); **[mixed-GPU job pending]** |
+| **correctness discipline** | every comparison against SDPA / FA-2 / fp64 forces a decomposition and asserts it ran (`tests/_decomp.py`; an unpinned call that fits is SDPA itself) | 745 tests |
+| **fixes** | a pinned `c=` without `interest_set=` silently used the c=7 quorum set in v2.1-v2.2.3 (wrong results for every c != 7; v3 re-plans the set and the engine refuses a non-perfect-difference-set pair); the autograd forward moved an 8 GiB fp32 host result to the device at 4M tokens (the 10 GiB-budget backward OOM in the OOC study) | `docs/ultimate/progress/BUG_v223_c73.md` |
+
+### What v2 brought (released as 2.2.x)
 
 | area | v2 |
 |---|---|
@@ -38,7 +61,14 @@ kept query–key pair is counted exactly once, so the result is exact.
 
 ## Install
 
-Two implementations of the kernels ship, and where you get them differs:
+**v3 (this repo, development):** source only until 3.0.0 is released. In a checkout:
+`pip install -e . --no-build-isolation` compiles the classic module (`csrc/`, one extension; `CQSA_KERNEL_SET=common`
+= fp16+bf16, head dims 64+128, causal + non-causal; 30-75 min of nvcc) and `CQSA_BUILD_NATIVE=1` adds the wave kernel
+(`native/`); `CQSA_SKIP_EXT=1` installs the Triton-only build with no compilation. **[release: pending]** -- the
+3.0.0 wheels (PyPI pure wheel; CUDA wheels per python / torch / CUDA / GPU on the release page) follow the
+experiment results.
+
+**v2.2.3 (released):** two implementations of the kernels ship, and where you get them differs:
 
 | | kernels | where | install |
 |---|---|---|---|
@@ -50,9 +80,9 @@ Triton otherwise. `stream-cqsa-doctor` shows which kernels loaded. `stream_cqsa.
 in host memory (a guardrail for shared GPUs); `verbose=True` prints every automatic choice. Since v2.2.0 the wave engine
 also runs on the Triton kernel (`attention(..., kernel="wave-triton")`; `"wave-cuda"` pins the
 CUDA one), supports the host accumulator (`accumulate_on_gpu=False`) on both, and the quorum-set
-register includes c=3 and c=133; the automatic planner enumerates every registered set. The Triton backward is the
-default in both builds (it measured faster than the CUDA backward at every length);
-`CQSA_BACKWARD=cuda` selects the CUDA backward.
+register includes c=3 and c=133; the automatic planner enumerates every registered set. In v2.2.x the Triton backward was the
+default in both builds (it measured faster than v2's CUDA backward at every length);
+in v3 the CUDA backward of the new module is the default and `CQSA_BACKWARD=triton` selects Triton.
 
 ### Triton build (PyPI)
 
@@ -151,30 +181,68 @@ Stream-CQSA continues, exact.
     notebooks/        the demo notebook and its generator
     docs/             kernel technical note, design notes (kernel suite / automatic conversion),
                       the full engineering log (LOG.md), per-step kernel diffs
-    results/          every measurement referenced in the docs (JSON + slurm logs)
+    kernels/          the kernel variant sources of the program (v12f forward, v12b backward, v11x experiment)
+    experiments/v3/   PLAN.md (the experiment plan) and bench.py (the one harness: run / report / status)
+    slurm/v3/         the resubmittable experiment jobs (E_sxm.slurm, E_pcie.slurm)
+    docs/ultimate/    the kernel program: 00_map (design basis), 01_design, 02 and 03 reports, progress logs
+    results/v3/       every v3 measurement: results.jsonl, report.md, STATUS.md, figures
+    results/          v2-era measurements referenced in the docs (JSON + slurm logs), incl. results/ultimate/
 
-## Headline measurements (A100-SXM4-80GB, fp16, B=1 H=8 D=64, causal)
+## Measurements
 
-| N | FlashAttention-2 (device-resident) | Stream-CQSA v1 | Stream-CQSA v2 | v2 / v1 |
-|---|---|---|---|---|
-| 256K | 0.36 s | 2.17 s | 1.17 s | 1.86x |
-| 1M | 5.96 s | 15.51 s | 9.49 s | 1.63x |
-| 2M | 24.18 s | 50.97 s | 35.31 s | 1.44x |
+All v3 numbers come from one plan, `experiments/v3/PLAN.md`, one harness (`experiments/v3/bench.py`) and one
+results directory, `results/v3/` (`results.jsonl` = every row; `report.md` = the tables and fits; `STATUS.md` =
+which rows exist; `E*.png` = the figures). Every row records the GPU, the engine and kernel that ran, the
+subproblem count, wall-clock (median of 3 after a warm-up), peak device memory, peak host memory and the
+error against FlashAttention-2 and against float64. Every Stream-CQSA row pins the depth and asserts that
+the decomposition ran. Node types are never mixed within a table: E0-E6 are **A100-SXM4-80GB**, the 8M rows
+and E7 are **A100 80GB PCIe**.
 
-Both Stream-CQSA arms stream Q/K/V from host memory with a host accumulator (the
-recovery configuration); outputs are identical to v1 and, against float64, more
-accurate than the monolithic fp16 call (2.8e-4 vs 5.5e-4 at 1M). Kernel alone on
-the real subproblem: 30.2 → 24.4 ms (FA-2: 17.5 ms). Details and every other
-number: `docs/LOG.md`, `results/`.
+### Headline (job 15958597, A100-SXM4-80GB, fp16, B=1 H=8 D=64, causal, device-resident Q/K/V, 7 subproblems)
 
-### One parameter at a time (`results/profile_sweep/`, forward, device-resident Q/K/V, A100-SXM4-80GB)
+| N | direction | flash_attn (one call) | v2.2.3 | v3 | v3 / flash_attn |
+|---|---|---|---|---|---|
+| 1M | forward | 5.99 s | 7.79 s (1.30x) | **5.84 s** | **0.98x** |
+| 1M | forward + backward | 15.1 s | 39.2 s CUDA / 29.0 s Triton | **15.2 s** | **1.01x** |
+| 131K | forward | 90 ms | 152 ms (1.69x) | 110 ms | 1.22x |
+| 131K | forward + backward | 238 ms | 643 ms CUDA / 503 ms Triton | 268 ms | 1.13x |
 
-Four kernel paths measured on one GPU (della-l09g5) in one session, 5 runs per point after a
-warm-up, each configuration in its own process: the classic engine (one subproblem per launch, two
-in flight) on the CUDA and on the Triton kernel, and the wave engine (several subproblems per launch)
-on the CUDA and on the Triton kernel.
+The decomposition does no extra attention work (perfect-difference-set quorums cover every chunk pair
+exactly once), so at 1M the launches, gathers and the merge are the whole overhead and vanish next to seven
+0.8-s kernels; at 131K they are a visible share. Full rows (bf16, c=73, itr=2, the wave engine, SDPA):
+`results/ultimate/engine_ab.md`; the kernel-level numbers: `docs/ultimate/03_kernels_report.md`.
 
-Vary c at N=512K, itr=1, acc=GPU (time in s / peak device memory in GiB):
+### E0 correctness **[E0: pending]**
+
+Every series (classic CUDA / Triton, wave CUDA / Triton) x c in {3, 7, 31, 133} x itr {1, 2} x accumulator
+{GPU, host} x {forward, forward+backward} at N=256K, plus bf16 and head dim 128: output and gradient errors
+against FlashAttention-2 and float64. Expected from the smoke rows: fp16 fp64-error 1.1-1.5e-4 (= FA-2's own,
+ratio 0.99-1.00), bf16 ~8e-4.
+
+### E1 scaling, device-resident **[E1: pending]**
+
+Wall-clock and peak memory vs N in {128K, 256K, 512K, 1M, 2M, 4M}, c=7, the smallest depth that fits
+(never 0), forward and forward+backward, four series against SDPA and FA-2 up to where they fit; quadratic
+fits of time and linear fits of memory per series. Replaces v2's "Headline" table and the N sweep.
+
+### E2 scaling, host-resident (the recovery configuration) **[E2: pending]**
+
+The same N ladder with Q/K/V and the accumulator in host memory, plus 4M and 8M on the PCIe node type.
+
+### E3-E6 parameters **[E3-E6: pending]**
+
+E3: c in {3, 7, 13, 21, 31, 57, 73, 91, 133} at N=1M (replaces v2's c table below); E4: itr x accumulator at
+1M; E5: the wave budget (subproblems per launch) at c=73; E6: {fp16, bf16} x {head dim 64, 128} at 1M.
+
+### E7 automatic mode under device budgets **[E7: pending]**
+
+`attention()` with nothing pinned against FA-2 resident and two rectangular out-of-core rivals at budgets of
+10/20/40/80 GiB (the v2.2.3 run of this grid: `results/ooc_rivals/report.md`; on the 1M backward at 10 GiB
+v2.2.3 was 1.7x behind the rivals because of its backward kernel, which v3 replaces).
+
+### v2.2.3 reference: one parameter at a time (`results/profile_sweep/`, forward, A100-SXM4-80GB)
+
+Kept until E3 replaces it. Vary c at N=512K, itr=1, acc=GPU (time in s / peak device memory in GiB):
 
 | c | 3 | 7 | 13 | 21 | 31 | 57 | 73 | 91 | 133 |
 |---|---|---|---|---|---|---|---|---|---|
@@ -226,13 +294,9 @@ one after another.
 
 ![profile sweep](results/profile_sweep/profile_sweep.png)
 
-Reproduce: `sbatch slurm/profile_sweep_<kernel>.slurm` for cuda / triton / wave_cuda / wave_triton
-(one gpu-test job each, `--constraint="sxm&gpu80"` so that all four land on the same GPU model),
-then `python benchmarks/profile_sweep.py fit --out results/profile_sweep`.
+## v2.2.3 paper re-run (A100 80GB PCIe, `results/paper_rerun/`)
 
-## Paper re-run (A100 80GB PCIe, `results/paper_rerun/`)
-
-The paper's single-GPU experiments re-run with the v2 engine (B=1 H=8 D=64, causal, fp16 / bf16, 262K-16.8M
+The paper's single-GPU experiments re-run with the v2.2.3 engine (E1/E2 of the v3 plan supersede this table) (B=1 H=8 D=64, causal, fp16 / bf16, 262K-16.8M
 tokens, automatic depth with a floor of 1, every measurement in its own process). Baselines run on
 device-resident Q/K/V; Stream-CQSA streams Q/K/V from host memory (acc=GPU / acc=CPU = where the fp32
 accumulator lives). Native CUDA kernel, fp16 (time / peak device memory; ratio = Stream-CQSA's faster arm

@@ -34,3 +34,14 @@ export CQSA_PART_BUDGET_S=${CQSA_PART_BUDGET_S:-1700}
 export CQSA_JOB_TOTAL_S=$((59 * 60))
 export CQSA_V3_RESULTS=${CQSA_V3_RESULTS:-/scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/v3}
 bash "$CQSA_SRC/slurm/v3/parts.sh"
+# Self-resubmission: when rows are still missing, queue the next copy of this job from the live repo's script
+# (same frozen code and modules), up to CQSA_MAX_CHAIN hops. A watcher in an interactive session dies with that
+# session; the chain does not. Stop it with: scancel <the queued job>, or CQSA_MAX_CHAIN=0.
+CHAIN=${CQSA_CHAIN:-0}; MAXCHAIN=${CQSA_MAX_CHAIN:-20}
+MISSING=$(grep -o "MISSING [0-9]*" "$CQSA_V3_RESULTS/logs/E_sxm_${SLURM_JOB_ID}.out" 2>/dev/null | tail -1 | awk '{print $2}')
+if [ -n "$MISSING" ] && [ "$MISSING" != "0" ] && [ "$CHAIN" -lt "$MAXCHAIN" ]; then
+  NEXT=$(cd /scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3 && sbatch --parsable --export=ALL,CQSA_CHAIN=$((CHAIN + 1)) slurm/v3/E_sxm.slurm)
+  echo "== $MISSING rows missing: resubmitted as job $NEXT (chain hop $((CHAIN + 1)) of $MAXCHAIN)"
+else
+  echo "== chain ends: missing=${MISSING:-?} hop=$CHAIN"
+fi

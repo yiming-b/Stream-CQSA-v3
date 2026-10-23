@@ -166,6 +166,8 @@ def plan_rows(exp, part=None, smoke=False):
         for r in _rows_of_grid(exp, spec, g, arms, node):
             if smoke:
                 r.update(warmup=0, reps=1, smoke=True)
+            if known_exclusion(r):
+                continue
             k = row_key(r)
             if k in seen:
                 continue
@@ -183,6 +185,27 @@ def plan_rows(exp, part=None, smoke=False):
             r["part"] = next((p for p, flt in spec["parts"].items() if all(r.get(k_) == v_ for k_, v_ in flt.items())), "all")
     rows.sort(key=row_order)
     return rows
+
+
+# Rows that are not measurements but findings: configurations the current code cannot run to completion.
+# They are left out of the plan (STATUS.md counts them as excluded, not missing) and reported in report.md.
+KNOWN_EXCLUSIONS = [
+    # The Triton backward at head dim 128 never finishes at N=1M: every other E6 cell completed (Triton D=64
+    # backward 37 s, CUDA D=128 backward 38 s) while every Triton D=128 backward row hit the 33-minute part
+    # timeout with nothing recorded, in five consecutive jobs (16084365..16090304, A100-SXM4-80GB). The map
+    # records the Triton backward's 128-wide key tiles as pathological (results/triton_bwd_bench.json: up to
+    # 1955 ms per tile); the CUDA backward is the default, so this path only matters when nothing is compiled.
+    dict(arm=("classic_Triton", "wave_Triton"), D=128, direction="bwd",
+         reason="Triton backward at D=128 does not finish (known 128-wide key-tile pathology); CUDA backward is the default"),
+]
+
+
+def known_exclusion(r):
+    """The reason this row is excluded from the plan, or None."""
+    for x in KNOWN_EXCLUSIONS:
+        if all((r.get(k) in v) if isinstance(v, tuple) else (r.get(k) == v) for k, v in x.items() if k != "reason"):
+            return x["reason"]
+    return None
 
 
 def row_order(r):
@@ -1414,6 +1437,12 @@ def status_doc(out_dir, latest, smoke=False):
             missing_total += cnt["missing"]
             lines.append(f"| {exp} | {part} | {len(rows)} | {cnt['ok']} | {cnt['oom']} | {cnt['error']} | {cnt['missing']} | {', '.join(sorted(jobs)) or '-'} |")
     lines += ["", f"**Missing rows: {missing_total}**", ""]
+    if KNOWN_EXCLUSIONS:
+        lines += ["## Excluded from the plan (findings, not measurements)", ""]
+        for x in KNOWN_EXCLUSIONS:
+            where = ", ".join(f"{k}={'/'.join(v) if isinstance(v, tuple) else v}" for k, v in x.items() if k != "reason")
+            lines.append(f"- {where}: {x['reason']}")
+        lines.append("")
     if failed:
         lines += ["## Failed rows (oom / error)", "", "| experiment | part | row | status | job | message |", "|---|---|---|---|---|---|"]
         for exp, part, g in failed:

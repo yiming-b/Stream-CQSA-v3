@@ -90,7 +90,8 @@ def test_tight_budget_shrinks_wave_before_depth_and_in_place_only_when_copies_do
     floor_gathered = estimate_wave_peak_bytes(N, picks[1].wave_tokens, B=1, H=H, D=D, itemsize=2, itr=1, c=7, l=3, stream_from_host=False,
                                               accumulate_on_gpu=True, gather=True, out_bytes_per_el=2)
     assert floor_gathered > 1.35 * 0.85 * GIB >= picks[2].est_peak_gib * GIB
-    assert not any(c["ok"] and c.get("engine") == "wave" and c["gather"] and c["itr"] == 1 for c in picks[2].candidates)
+    assert not any(c["ok"] and c.get("engine") == "wave" and c["gather"] and c["itr"] == 1 and c["acc"] == "gpu"
+                   for c in picks[2].candidates)                                # (a host-accumulator wave fits; v3 enumerates it)
     # the frontier rule itself: fastest, ties within 2% broken to the smaller peak
     rows = [dict(time=1.00, peak=3.0), dict(time=1.01, peak=2.0), dict(time=1.05, peak=1.0)]
     assert frontier_pick(rows)[0]["peak"] == 2.0
@@ -157,9 +158,13 @@ def test_monolithic_fits_whenever_a_device_resident_wave_does():
             for direction in ("fwd", "bwd"):
                 p = plan(N=n, H=H, D=D, hardware=_hw(gib), engines=E, direction=direction, allow_distributed=False,
                          out_bytes_per_el=2)
-                dev_wave = [c for c in p.candidates if c.get("engine") == "wave" and not c["stream_from_host"]]
+                # device-accumulator waves: a host accumulator (v3) can undercut the monolithic peak, and the plan
+                # still takes the monolithic call whenever it fits (the explicit rule in plan())
+                dev_wave = [c for c in p.candidates if c.get("engine") == "wave" and not c["stream_from_host"] and c["acc"] == "gpu"]
                 mono = p.candidates[0]
                 assert min(c["peak"] for c in dev_wave) > mono["peak"], (n, gib, direction)
+                if mono["ok"]:
+                    assert p.mode == "mono", (n, gib, direction)
                 if any(c["ok"] for c in dev_wave):
                     assert mono["ok"] and p.mode == "mono", (n, gib, direction)
 

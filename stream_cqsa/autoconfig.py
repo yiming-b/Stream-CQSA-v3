@@ -253,15 +253,16 @@ def hardware_from_dict(spec: dict[str, Any], *, interconnect_gbs: float | None =
 @dataclass
 class CostModel:
     """
-    Wall-time model. Defaults measured on A100-SXM4-80GB with the next/ engine
-    (v11 kernel), fp16, H=8 D=64 (next/logs/e2e_compare_v11.json,
-    pipeline_opts.json, dist_test_*.json). `calibrate` refits them.
+    Wall-time model. Defaults fitted on the v3 measurements of an A100-SXM4-80GB (v13 classic kernel, native_v2
+    wave kernel; fp16, H=8, D=64; results/v3/results.jsonl, benchmarks/v3/refit_cost_model.py: within 10% of
+    96 of 104 measured rows of E1-E4). `calibrate` refits them on another GPU; the multi-device terms are from
+    the 4 x A100-PCIe scheduler job.
     """
-    pair_rate: float = 7.4e11        # monolithic FA-2: score pairs per second over all heads (causal 1M, H=8: 8*N^2/2 / 5.96 s)
-    kernel_ratio: float = 1.40       # Stream-CQSA kernel time per live pair / FA-2 time per pair (v11 at L=56K)
+    pair_rate: float = 7.207e+11        # monolithic FA-2: score pairs per second over all heads (causal 2M-4M, H=8; E1 baselines)
+    kernel_ratio: float = 0.9482       # Stream-CQSA kernel time per pair / FA-2 time per pair (v13, itr=1 rows of E1 and E3)
     masked_frac: float = 0.22        # kept for calibrate(); the planner uses (l-1)/l^2 per quorum set
-    depth_factor: float = 1.0        # residual per-depth factor (per-task overhead now explicit below)
-    task_overhead_s: float = 3.0e-3  # fixed cost per subproblem (launch, scheduling, small-L kernel inefficiency); fitted from c=7..73 at N=131K
+    depth_factor: float = 1.009        # residual per-depth factor (E4 itr=2 vs itr=1; the per-task overhead is explicit below)
+    task_overhead_s: float = 0.002807  # fixed cost per subproblem (launch, scheduling, small-L kernel inefficiency); E1 128K-4M and E3 c=3..133
     # Wave engine: one launch per wave of several subproblems. Per subproblem only its grid tail remains
     # (wave_task_s); the launch gap is paid once per wave (wave_launch_s). The two sum to task_overhead_s, so a
     # W=1 wave costs what a classic subproblem costs (measured equal within 0.6%, bit-identical; layout_ab), and
@@ -269,16 +270,21 @@ class CostModel:
     wave_launch_s: float = 1.5e-3
     wave_task_s: float = 1.5e-3
     inplace_ratio: float = 1.045     # kernel time reading Q/K/V in place through the block map / gathered copies (+3-6%, layout_ab)
-    bwd_ratio: float = 3.0           # backward (fwd+bwd of a subproblem) / forward time per pair
+    bwd_ratio: float = 3.587           # backward (fwd+bwd of a subproblem) / forward time per pair
+    # host-stage work of a training call (fwd+bwd) relative to the forward's: the forward moves one output
+    # out and three inputs in, the backward three gradients out and five operands in, and the streamed
+    # backward's scatter is not overlapped (fitted on E2/E1 of results/v3: 5.0 at 512K-2M)
+    bwd_host_factor: float = 5.112
     # Host-stage costs per gathered token of H*D = 512 fp16 elements (the
     # measured shape); scaled by (B*H*D)/512 for other shapes.
-    gather_s_per_tok: float = 0.5 / 3.1e6     # host gather (shared_chunks) per gathered token
+    gather_s_per_tok: float = 3.287e-07     # host gather per gathered token, host-resident inputs (E2-E1 forward)
     gather_dev_s_per_tok: float = 0.06 / 3.1e6  # device-side gather per token (inputs resident)
-    merge_cpu_s_per_tok: float = 2.25 / 3.1e6  # host accumulator merge per gathered token, 8 threads
+    merge_cpu_s_per_tok: float = 7.767e-07  # host accumulator merge per gathered token, 8 threads (E4 acc=cpu with device inputs)
     merge_gpu_s_per_tok: float = 0.10 / 3.1e6  # device accumulator merge per gathered token
-    d2h_s_per_tok: float = 0.25 / 3.1e6        # output d2h per gathered token (host accumulator)
-    overlap: float = 0.85            # fraction of the host stages hidden under compute (pipelined engine, n_par=1)
-    overlap_npar2: float = 0.92      # with two subproblems in flight
+    d2h_s_per_tok: float = 8.63e-08        # output d2h per gathered token (host accumulator)
+    host_stream_setup_s: float = 0.01108  # fixed cost of a host-streamed call (pinned chunk pool, staging slots, threads); fitted on E2-E1
+    overlap: float = 0.6758            # fraction of the host stages hidden under compute (pipelined engine, n_par=1; fitted jointly with the per-token costs)
+    overlap_npar2: float = 0.7584      # with two subproblems in flight, and the wave engine's host fold (E4 wave vs classic acc=cpu)
     # Multi-device terms, refitted from the 4 x A100-80GB-PCIe scheduler job 14330294 (one node, NCCL ring over
     # two NV12 and two SYS hops; results/ultimate/dist_sched.md, benchmarks/ultimate/dist_cost_refit.py). The
     # slowest rank's local time comes from the driver's own scheduler (scheduler.dist_local_time) on equal
@@ -315,8 +321,13 @@ class CostModel:
         L = N * (l / c) ** itr
         n_tasks = c ** itr
         tokens = n_tasks * L                       # gathered tokens over all subproblems
-        masked = (l - 1) / (l * l)                 # non-owner diagonal blocks of a subproblem
-        pairs = n_tasks * B * H * L * L * (0.5 if causal else 1.0) * (1 - masked)
+        # The pair sets of a (perfect difference set) decomposition partition the problem's pairs at every
+        # depth: the live kernel work is the whole problem's, whatever (c, l, itr). (At itr=1 the former
+        # per-subproblem count n * L^2/2 * (1 - (l-1)/l^2) equals N^2/2 exactly; at itr=2 it overstated
+        # the work by 29%, which is why the planner never took a second level: measured +4% at 1M.)
+        # A deeper decomposition costs its per-task overhead and the residual depth_factor (shorter
+        # subproblems fill the GPU less well).
+        pairs = B * H * N * N * (0.5 if causal else 1.0)
         kernel = pairs / self.pair_rate * self.kernel_ratio * (self.depth_factor ** (itr - 1))
         if engine == "wave":
             n_waves = math.ceil(tokens / max(float(wave_tokens), L))
@@ -332,7 +343,15 @@ class CostModel:
         host = gather_s + merge + d2h
         # the wave's host fold runs on a worker under the next wave (P0.3), like a second subproblem in flight
         ov = self.overlap_npar2 if (n_par >= 2 or (engine == "wave" and acc == "cpu")) else self.overlap
-        t = compute + host * (1 - ov) + max(0.0, host * ov - compute)   # hidden part cannot exceed compute
+        if direction == "bwd":
+            # a training call's host work (the forward's output and the backward's three gradients out, dO and
+            # O in as well) relative to the forward's unhidden share; the backward's compute is 3-4x the
+            # forward's, so its host stages never dominate the way a small forward's do (fitted on E2-E1)
+            t = compute + host * (1 - ov) * self.bwd_host_factor
+        else:
+            t = compute + host * (1 - ov) + max(0.0, host * ov - compute)   # hidden part cannot exceed compute
+        if stream_from_host:
+            t += self.host_stream_setup_s
         if world > 1:
             # the slowest rank's local time: n equal subproblems of this model's kernel time, assigned by the
             # driver's scheduler to ranks of relative rates `rates` (1.0 = the device this model describes) with
@@ -446,6 +465,7 @@ class Plan:
     engine: str = "classic"        # 'wave' (several subproblems per launch) or 'classic' (the pinned per-task pipeline)
     wave_tokens: int = 0           # wave engine: packed-token budget per wave (W)
     gather: bool = True            # wave engine: gathered copies of Q/K/V per wave (True) or read in place (False)
+    tol: float = 0.15              # the frontier tolerance this plan was picked with (PLAN_TOL_DEFAULT unless given)
     device_rates: list = field(default_factory=list)   # live-tile rates of `devices` (tiles/s; 0 = unknown)
 
     def name(self) -> str:
@@ -464,12 +484,25 @@ class Plan:
                     shared_chunks=bool(self.stream_from_host and self.itr == 1))
 
 
-def _host_bytes(N, B, H, D, itemsize, stream_from_host, acc):
+# The planner's rule on feasible candidates is "the fastest predicted, then the smallest device peak among the
+# candidates predicted within PLAN_TOL of that time". v3 default 0.15 (was 0.02): on an A100 the host
+# accumulator costs 10-15% of the wall time at 1M tokens and less above (E4 / E2 of results/v3) for 40-70% less
+# device memory, which the planner now takes by default; CQSA_PLAN_TOL=0 (or attention(tol=0)) restores "the
+# fastest configuration whatever it holds on the device", accumulate_on_gpu=True pins the device accumulator.
+PLAN_TOL_DEFAULT = float(os.environ.get("CQSA_PLAN_TOL", "0.15"))
+
+
+def _host_bytes(N, B, H, D, itemsize, stream_from_host, acc, direction="fwd"):
+    el = N * B * H * D
     b = 0
     if stream_from_host:
-        b += 3 * N * B * H * D * itemsize          # pinned Q/K/V
+        b += 3 * el * itemsize                     # pinned Q/K/V
+        if direction == "bwd":
+            b += 2 * el * itemsize                 # ... and dO, O (the forward's output) streamed as well
     if acc == "cpu":
-        b += N * B * H * D * 4 + N * B * H * 8     # fp32 accumulator (+ m, l)
+        b += el * 4 + N * B * H * 8                # the forward's fp32 accumulator (+ m, l)
+        if direction == "bwd":
+            b += 3 * el * 4                        # the three fp32 gradient accumulators
     return b
 
 
@@ -477,7 +510,7 @@ def plan(*, N: int, B: int = 1, H: int = 8, D: int = 64, dtype=torch.float16, ca
          hardware: HardwareSpec | None = None, model: CostModel | None = None,
          max_itr: int = 3, n_pars: Sequence[int] = (1, 2, 4), allow_distributed: bool = True,
          quorum_sets: dict[int, Sequence[int]] | None = None, direction: str = "fwd",
-         safety: float = 0.85, tol: float = 0.02, out_bytes_per_el: int = 4,
+         safety: float = 0.85, tol: float | None = None, out_bytes_per_el: int = 4,
          resident_input_bytes: int = 0, budget_excludes_inputs: bool = True, evict_inputs: bool = False,
          engines: Sequence[str] | None = None, allow_mono: bool = True, inputs_on_host: bool = False,
          min_itr: int = 1) -> Plan:
@@ -526,6 +559,7 @@ def plan(*, N: int, B: int = 1, H: int = 8, D: int = 64, dtype=torch.float16, ca
     from .native_wave import native_available, estimate_wave_peak_bytes, wave_token_ladder, in_place_possible
     hw = hardware or detect_hardware()
     cm = model or load_cost_model() or CostModel()
+    tol = PLAN_TOL_DEFAULT if tol is None else float(tol)
     itemsize = torch.empty((), dtype=dtype).element_size()
     if not hw.devices:
         raise RuntimeError("no CUDA device in the hardware description")
@@ -565,9 +599,11 @@ def plan(*, N: int, B: int = 1, H: int = 8, D: int = 64, dtype=torch.float16, ca
                     continue
                 for acc in ("gpu", "cpu"):
                     for host in (False, True):
-                        if (acc == "cpu" and not host) or (inputs_on_host and not host):
+                        # acc=cpu with device-resident Q/K/V: the accumulator (the forward's fp32 output, the
+                        # backward's three fp32 gradients) in host memory, the inputs where they are
+                        if inputs_on_host and not host:
                             continue
-                        hostb = _host_bytes(N, B, H, D, itemsize, host, acc) * (2.0 if bwd else 1.0)
+                        hostb = _host_bytes(N, B, H, D, itemsize, host, acc, direction)
                         evict = bool(host and R and evict_inputs)
                         stay = R if (host and R and not evict) else 0      # streaming next to the unevicted device copy
                         base = dict(mode="cqsa" if w == 1 else "cqsa_dist", itr=itr, c=c, interest_set=tuple(iset),
@@ -635,7 +671,7 @@ def plan(*, N: int, B: int = 1, H: int = 8, D: int = 64, dtype=torch.float16, ca
                              + (": the wave backward is device-resident only; use kernel='auto' or 'cuda'"
                                 if bwd and engines == ("wave",) else ""))
         fb = min(off, key=lambda c: (c["peak"], c["time"]))
-        p = Plan(mode="cqsa", itr=fb["itr"], c=fb["c"], interest_set=tuple(fb["interest_set"]), direction=direction,
+        p = Plan(mode="cqsa", itr=fb["itr"], c=fb["c"], interest_set=tuple(fb["interest_set"]), direction=direction, tol=tol,
                  acc=fb["acc"], stream_from_host=fb["stream_from_host"], n_par=fb["n_par"], world=1,
                  evict_inputs=bool(fb.get("evict", False)),
                  engine=fb["engine"], wave_tokens=fb["wave_tokens"], gather=fb["gather"],
@@ -646,8 +682,16 @@ def plan(*, N: int, B: int = 1, H: int = 8, D: int = 64, dtype=torch.float16, ca
                          f"Falling back to the most frugal configuration {_cname(fb)} "
                          f"(~{fb['peak']:.1f} GiB); the engine escalates on its own if that still does not fit."))
         return p
-    pick, front = frontier_pick(feas, tol)
-    p = Plan(mode=pick["mode"], itr=pick["itr"], c=pick["c"], interest_set=tuple(pick["interest_set"]), direction=direction,
+    # The monolithic call whenever it fits on one device: one kernel, no accumulator, the memory any single-kernel
+    # attention needs (the documented promise); only a multi-device decomposition predicted faster than it
+    # competes. The frontier tolerance chooses among the single-device decompositions when it does not fit.
+    mono_ok = [c for c in feas if c["mode"] == "mono"]
+    if mono_ok:
+        faster_dist = [c for c in feas if c["world"] > 1 and c["time"] < mono_ok[0]["time"]]
+        pick, front = frontier_pick(mono_ok + faster_dist, tol)
+    else:
+        pick, front = frontier_pick(feas, tol)
+    p = Plan(mode=pick["mode"], itr=pick["itr"], c=pick["c"], interest_set=tuple(pick["interest_set"]), direction=direction, tol=tol,
              acc=pick["acc"], stream_from_host=pick["stream_from_host"],
              n_par=pick["n_par"], world=pick["world"], devices=[d.name for d in devs[:pick["world"]]],
              device_rates=[d.tile_rate for d in devs[:pick["world"]]],
@@ -669,13 +713,37 @@ def plan(*, N: int, B: int = 1, H: int = 8, D: int = 64, dtype=torch.float16, ca
     return p
 
 
-def frontier_pick(feas: Sequence[dict], tol: float = 0.02) -> tuple[dict, list[dict]]:
-    """The planner's rule on feasible candidates: the (time, peak) Pareto frontier, its fastest point, and among
-    the points within ``tol`` of that time the smallest peak. Returns (pick, frontier)."""
+MICRO_TOL = 0.02   # the tolerance within a residency group and for multi-device plans (the pre-v3 rule)
+
+
+def _residency_key(c: dict) -> tuple:
+    return (c.get("mode", "cqsa"), c.get("world", 1), c.get("itr", 1), c.get("c", 7), c.get("acc", "gpu"),
+            bool(c.get("stream_from_host", False)))
+
+
+def frontier_pick(feas: Sequence[dict], tol: float | None = None) -> tuple[dict, list[dict]]:
+    """The planner's rule on feasible candidates. Two tiers:
+
+    * within a residency group -- the same (mode, world, depth, quorum size, accumulator placement, input
+      residency); its members differ in the micro choices (wave budget W, gathered or in-place reads, subproblems
+      in flight, engine) -- the fastest predicted, then the smallest peak within ``MICRO_TOL`` of it;
+    * across groups -- the O(N) choices that move 20-70% of the device memory -- the fastest group, then the
+      smallest peak among the groups within ``tol`` (default ``PLAN_TOL_DEFAULT``) of its time; multi-device
+      groups stay on ``MICRO_TOL`` (their host-accumulator cost is not measured).
+
+    Returns (pick, frontier) with the (time, peak) Pareto frontier of ``feas`` for the reason line."""
+    tol = PLAN_TOL_DEFAULT if tol is None else float(tol)
+    groups: dict = {}
+    for c in feas:
+        groups.setdefault(_residency_key(c), []).append(c)
+    reps = []
+    for grp in groups.values():
+        fastest = min(c["time"] for c in grp)
+        reps.append(min((c for c in grp if c["time"] <= fastest * (1 + MICRO_TOL)), key=lambda c: (c["peak"], c["time"])))
+    best_t = min(c["time"] for c in reps)
+    near = [c for c in reps if c["time"] <= best_t * (1 + (tol if c.get("world", 1) == 1 else MICRO_TOL))]
     front = [c for c in feas if not any((o["time"] < c["time"]) and (o["peak"] < c["peak"]) for o in feas)]
-    best_t = min(c["time"] for c in front)
-    near = [c for c in front if c["time"] <= best_t * (1 + tol)]
-    return min(near, key=lambda c: c["peak"]), front
+    return min(near, key=lambda c: (c["peak"], c["time"])), front
 
 
 def _cname(c: dict) -> str:
@@ -719,7 +787,7 @@ def calibrate(hardware: HardwareSpec | None = None, *, N: int = 131072, B: int =
     _, info = stream_cqsa_forward(qd, kd, vd, itr=1, causal=causal, allow_escalation=False, max_parallel=1, trace=tr)
     st = info.get("stage_totals_ms", {})
     L = N * 3 / 7; tokens = 7 * L * (B * H * D) / 512.0
-    live_pairs = 7 * B * H * L * L * (0.5 if causal else 1.0) * (1 - (cm.masked_frac if causal else cm.masked_frac * 0.5))
+    live_pairs = pairs                       # the pair sets partition the problem: the live work is the whole problem's (cqsa_time)
     if st.get("compute"):
         cm.kernel_ratio = (st["compute"] / 1e3) / (live_pairs / cm.pair_rate)
     if st.get("gather"):

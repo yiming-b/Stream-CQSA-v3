@@ -102,6 +102,14 @@ def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, attn_mask=None,
     Triton), "wave-cuda", "wave-triton", "cuda", "triton" (classic engine). The wave backward is
     device-resident only: a host-resident backward runs on the classic engine whatever ``kernel`` says.
     ``overrides`` (itr=, c=, interest_set=, max_parallel=, max_wave_tokens=, gather=, ...) pin engine settings.
+
+    Where the accumulator lives is the planner's choice by the (time, memory) frontier: among the feasible
+    configurations predicted within ``tol`` (default 0.15, ``CQSA_PLAN_TOL``) of the fastest one, the one with the
+    smallest device peak runs. On an A100 that means the host accumulator (``acc=cpu``: the forward's fp32 output
+    and the backward's fp32 gradients accumulate in host memory, 40-70% less device memory) from about 1M tokens
+    up, where it costs 5-15% of the wall time, and the device accumulator below, where it would cost more.
+    ``tol=0`` takes the fastest configuration whatever it holds on the device; ``accumulate_on_gpu=True`` /
+    ``low_memory=False`` pin the device accumulator, ``accumulate_on_gpu=False`` / ``low_memory=True`` the host one.
     ``plan_only=True`` returns the plan without computing anything; ``return_info=True`` reports the
     engine, kernel, wave budget and gather mode that ran.
 
@@ -317,10 +325,12 @@ def _attention(q, k, v, attn_mask, dropout_p, is_causal, scale, enable_gqa, *, v
     # inputs_on_host: only host-streaming decompositions can run on host tensors (the planner skips the rest)
     pkw = dict(resident_input_bytes=resident, budget_excludes_inputs=hardware is None,
                evict_inputs=bool(evict) and on_cuda, inputs_on_host=not on_cuda)
+    if "tol" in overrides:                                # the planner's frontier tolerance (see autoconfig.PLAN_TOL_DEFAULT)
+        pkw["tol"] = float(overrides.pop("tol"))
     if evict is True and on_cuda and not plan_only:
         (q, k, v), ev["state"] = _evict_inputs((q, k, v), direction == "bwd", vb)
         on_cuda = False
-        pkw = dict(resident_input_bytes=0, inputs_on_host=True)
+        pkw = dict(resident_input_bytes=0, inputs_on_host=True, **({"tol": pkw["tol"]} if "tol" in pkw else {}))
         engines = _engines_for(kernel, q.dtype, D, direction, on_host=True)
         if hardware is None:
             hw = detect_hardware()
@@ -377,7 +387,7 @@ def _prefer_device_resident(p) -> bool:
     dev_ok = [c for c in p.candidates if c["ok"] and c["mode"] == "cqsa" and not c["stream_from_host"]]
     if not dev_ok:
         return False
-    c0, _ = frontier_pick(dev_ok)
+    c0, _ = frontier_pick(dev_ok, getattr(p, "tol", None))
     p.itr, p.c, p.interest_set, p.acc, p.stream_from_host, p.n_par = \
         int(c0["itr"]), int(c0["c"]), tuple(c0["interest_set"]), c0["acc"], False, int(c0["n_par"])
     p.engine, p.wave_tokens, p.gather = c0.get("engine", "classic"), int(c0.get("wave_tokens", 0)), bool(c0.get("gather", True))

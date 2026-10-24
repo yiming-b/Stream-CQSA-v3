@@ -2425,7 +2425,7 @@ def stream_cqsa_backward(
     c: int = 7,
     interest_set: Sequence[int] = (0, 1, 3),
     stream_from_host: bool = False,
-    accumulate_on_gpu: bool = False,
+    accumulate_on_gpu: bool | None = None,
     allow_escalation: bool = True,
     max_parallel: int | None = None,
     cpu_threads: int | None = _CPU_MERGE_THREADS_DEFAULT,
@@ -2465,12 +2465,23 @@ def stream_cqsa_backward(
     ``O(n_par * L * H * D)`` rather than ``O(N * H * D)``, and the ``dQ/dK/dV``
     accumulators (3 x fp32, the largest term) live on the host.
 
-    Returns ``(dq, dk, dv)`` in ``[B, H, N, D]``, fp32.
+    ``accumulate_on_gpu`` places the dQ/dK/dV accumulators independently of where the inputs live: ``None``
+    (default) follows the inputs (device-resident inputs accumulate on the device, streamed ones on the host);
+    ``False`` with device-resident inputs keeps the three fp32 accumulators in host memory (since v3.0; each
+    subproblem's gradients take a D2H copy into a pinned slot and a host add, overlapped with the next
+    subproblem's kernel) and returns them there -- cast where they sit before moving the half-size result.
+
+    Returns ``(dq, dk, dv)`` in ``[B, H, N, D]``, fp32, on the accumulator's device.
     """
     from .interface import flash_attn_bwd_cqs_global_lse
 
     B, H, N, D = q.shape
     host_resident = bool(stream_from_host) and q.device.type == "cpu"
+    if accumulate_on_gpu is None:
+        # the historical default per residency: device-resident inputs accumulate dQ/dK/dV on the device,
+        # streamed inputs in host memory. attention() passes the planner's explicit choice; since v3.0 the
+        # device-resident path honours accumulate_on_gpu=False too (fp32 gradients in host memory).
+        accumulate_on_gpu = not host_resident
     if isinstance(itr, str):
         # next/: the backward plans its own depth (independent of the forward's).
         if itr != "auto":
@@ -2604,9 +2615,87 @@ def stream_cqsa_backward(
                     tasks_at_depth = [t for t in tasks_at_depth
                                       if tuple(t.path)[:len(next(iter(_mine)))] in _mine]
 
-    dq = torch.zeros((B, N, H, D), device=device, dtype=torch.float32)
-    dk = torch.zeros((B, N, H, D), device=device, dtype=torch.float32)
-    dv = torch.zeros((B, N, H, D), device=device, dtype=torch.float32)
+    # Where dQ/dK/dV accumulate is the backward's analogue of the forward's
+    # accumulate_on_gpu, and it is independent of where Q/K/V live: with the
+    # inputs on the device and the three fp32 [B, N, H, D] accumulators on the
+    # host, the device holds no O(N) term that a depth of decomposition does
+    # not reduce (12 * N * H * D bytes: 6 GiB at 1M tokens, 24 GiB at 4M).
+    # Each subproblem's gradients then take a D2H copy into a pinned slot and a
+    # host add, both overlapped with the next subproblem's kernel. Until v3.0
+    # this path ignored accumulate_on_gpu=False (the accumulators were always
+    # on the device, so acc=cpu saved nothing in a device-resident backward).
+    host_acc = not bool(accumulate_on_gpu)
+    acc_dev = None if host_acc else device
+    dq = torch.zeros((B, N, H, D), device=acc_dev, dtype=torch.float32)
+    dk = torch.zeros((B, N, H, D), device=acc_dev, dtype=torch.float32)
+    dv = torch.zeros((B, N, H, D), device=acc_dev, dtype=torch.float32)
+    if host_acc:
+        # Two pinned slots of the largest subproblem (refinement only makes
+        # them smaller), a copy stream for the D2H, one worker for the host
+        # add (shared accumulators: concurrent adds to overlapping tokens
+        # would race; one at a time, order irrelevant since addition commutes).
+        _max_L = max((int(t.local_size) for t in tasks), default=1)
+        _n_slots = 2
+        _stage = [tuple(torch.empty(B * _max_L * H * D, dtype=q.dtype, pin_memory=True) for _ in range(3))
+                  for _ in range(_n_slots)]
+        _slot_state: list[tuple | None] = [None] * _n_slots       # (event, idx_cpu, runs, L) of a slot in flight
+        _slot_fut: list = [None] * _n_slots
+        _copy_stream = torch.cuda.Stream(device=device)
+        _pool = ThreadPoolExecutor(max_workers=1)
+        _slot_counter = [0]
+
+        def _host_add(slot: int, idx_cpu, runs, Lloc: int) -> None:
+            n_el = B * Lloc * H * D
+            with _cpu_threads(cpu_threads):
+                for acc, buf in zip((dq, dk, dv), _stage[slot]):
+                    src = buf[:n_el].view(B, Lloc, H, D)
+                    if runs:
+                        for off, start, ln in runs:
+                            acc[:, start:start + ln].add_(src[:, off:off + ln])   # add_ promotes to fp32 in place
+                    else:
+                        acc.index_add_(1, idx_cpu, src.float())
+
+        def _retire(slot: int) -> None:
+            """Wait for a slot's D2H, hand its host add to the worker, then make sure the worker is done
+            with the slot's staging buffer before the caller refills it."""
+            st = _slot_state[slot]
+            if st is not None:
+                ev, idx_cpu, runs, Lloc = st
+                ev.synchronize()
+                _slot_fut[slot] = _pool.submit(_host_add, slot, idx_cpu, runs, Lloc)
+                _slot_state[slot] = None
+            if _slot_fut[slot] is not None:
+                _slot_fut[slot].result()
+                _slot_fut[slot] = None
+
+        def _commit_host(task, dq_i, dk_i, dv_i) -> None:
+            """Enqueue one subproblem's gradients for the host accumulators (no device allocation:
+            an out-of-memory failure can only land before this, so a retry never double counts)."""
+            slot = _slot_counter[0] % _n_slots
+            _slot_counter[0] += 1
+            _retire(slot)
+            idx_cpu = task.token_ids
+            Lloc = int(idx_cpu.numel())
+            runs = task.extra.get("runs") if isinstance(getattr(task, "extra", None), dict) else None
+            if runs is None:
+                runs = _contiguous_runs(idx_cpu)
+                if isinstance(getattr(task, "extra", None), dict):
+                    task.extra["runs"] = runs
+            n_el = B * Lloc * H * D
+            cur = torch.cuda.current_stream(device)
+            _copy_stream.wait_stream(cur)
+            with torch.cuda.stream(_copy_stream):
+                for g, buf in zip((dq_i, dk_i, dv_i), _stage[slot]):
+                    buf[:n_el].view(B, Lloc, H, D).copy_(g, non_blocking=True)
+                    g.record_stream(_copy_stream)
+                ev = torch.cuda.Event()
+                ev.record(_copy_stream)
+            _slot_state[slot] = (ev, idx_cpu, runs, Lloc)
+
+        def _drain_host() -> None:
+            for slot in range(_n_slots):
+                _retire(slot)
+            _pool.shutdown(wait=True)
 
     # rowsum(dO * O) is global per token, so compute it once rather than letting
     # each subproblem's preprocess pass rederive it from a gathered O. O is then
@@ -2650,6 +2739,9 @@ def stream_cqsa_backward(
         # of between them. That matters because the recovery re-runs the failed
         # subproblem and the accumulation is additive -- a commit left half
         # applied would be counted twice, silently, in the gradient.
+        if host_acc:
+            _commit_host(task, dq_i, dk_i, dv_i)
+            return
         dq_f, dk_f, dv_f = dq_i.float(), dk_i.float(), dv_i.float()
         del dq_i, dk_i, dv_i
         dq.index_add_(1, idx, dq_f)
@@ -2674,48 +2766,51 @@ def stream_cqsa_backward(
                              causal=bool(causal), device=str(device),
                              extra=f"gradients accumulated on {'device' if accumulate_on_gpu else 'host'}"),
         expected_s=expected_seconds(N=N, B=B, H=H, D=D, itr=int(itr), c=int(c), causal=bool(causal), direction="bwd"))
-    while pending:
-        task = pending.pop(0)
-        try:
-            _run_bwd_task(task)
-            progress.update(1)
-        except RuntimeError as exc:
-            if not is_oom(exc):
-                raise
-            if nonlocal_dirty[0]:
-                raise RuntimeError(
-                    "Stream-CQSA backward: ran out of memory while accumulating a "
-                    "subproblem's gradient. Part of its contribution is already in "
-                    "the buffers, so retrying would double count and recovery is "
-                    "unsafe. Re-run at a higher itr."
-                ) from exc
-            retries += 1
-            if torch.cuda.is_available():
-                torch.cuda.synchronize(device)
-                torch.cuda.empty_cache()
-            if not allow_escalation or (task_align <= 1 and int(task.itr) >= depth_cap) \
-                    or int(task.local_size) < min_refinable_tokens(c, task_seg_align) \
-                    or retries > retry_budget:
-                raise torch.cuda.OutOfMemoryError(
-                    f"Stream-CQSA backward: a {task.local_size}-token subproblem "
-                    f"at itr={task.itr} does not fit and cannot be refined further "
-                    f"(itr={depth_cap} is the deepest decomposition N={N} admits at "
-                    f"c={c}; a subproblem needs {min_refinable_tokens(c, task_seg_align)} "
-                    f"tokens to split). The O(N*H*D) resident terms dominate and no "
-                    f"depth reduces them; offload them, or reduce N, H or D."
-                ) from exc
-            kids = refine_task(
-                task, N, B=B, H=H, D=D, itemsize=q.element_size(),
-                sorted_gather=sorted_gather, pin=True, c=c,
-                interest_set=interest_set, seg_align=task_seg_align,
-            )
-            if bwd_info is not None:
-                bwd_info["depth_escalations"] += 1
-                bwd_info["oom_retries"] = retries
-                bwd_info["itr_reached"] = max(bwd_info["itr_reached"],
-                                              max(int(t.itr) for t in kids))
-            pending[0:0] = kids
-            progress.set_total(progress.done + len(pending))
-
+    try:
+        while pending:
+            task = pending.pop(0)
+            try:
+                _run_bwd_task(task)
+                progress.update(1)
+            except RuntimeError as exc:
+                if not is_oom(exc):
+                    raise
+                if nonlocal_dirty[0]:
+                    raise RuntimeError(
+                        "Stream-CQSA backward: ran out of memory while accumulating a "
+                        "subproblem's gradient. Part of its contribution is already in "
+                        "the buffers, so retrying would double count and recovery is "
+                        "unsafe. Re-run at a higher itr."
+                    ) from exc
+                retries += 1
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize(device)
+                    torch.cuda.empty_cache()
+                if not allow_escalation or (task_align <= 1 and int(task.itr) >= depth_cap) \
+                        or int(task.local_size) < min_refinable_tokens(c, task_seg_align) \
+                        or retries > retry_budget:
+                    raise torch.cuda.OutOfMemoryError(
+                        f"Stream-CQSA backward: a {task.local_size}-token subproblem "
+                        f"at itr={task.itr} does not fit and cannot be refined further "
+                        f"(itr={depth_cap} is the deepest decomposition N={N} admits at "
+                        f"c={c}; a subproblem needs {min_refinable_tokens(c, task_seg_align)} "
+                        f"tokens to split). The O(N*H*D) resident terms dominate and no "
+                        f"depth reduces them; offload them, or reduce N, H or D."
+                    ) from exc
+                kids = refine_task(
+                    task, N, B=B, H=H, D=D, itemsize=q.element_size(),
+                    sorted_gather=sorted_gather, pin=True, c=c,
+                    interest_set=interest_set, seg_align=task_seg_align,
+                )
+                if bwd_info is not None:
+                    bwd_info["depth_escalations"] += 1
+                    bwd_info["oom_retries"] = retries
+                    bwd_info["itr_reached"] = max(bwd_info["itr_reached"],
+                                                  max(int(t.itr) for t in kids))
+                pending[0:0] = kids
+                progress.set_total(progress.done + len(pending))
+    finally:
+        if host_acc:
+            _drain_host()                      # every slot's D2H waited for and added; the worker released
     progress.close(f"{progress.done} subproblems" + (f", {retries} OOM retries" if retries else ""))
     return dq.transpose(1, 2), dk.transpose(1, 2), dv.transpose(1, 2)

@@ -40,7 +40,10 @@ bash "$CQSA_SRC/slurm/v3/parts.sh"
 CHAIN=${CQSA_CHAIN:-0}; MAXCHAIN=${CQSA_MAX_CHAIN:-20}
 MISSING=$(grep -o "MISSING [0-9]*" "$CQSA_V3_RESULTS/logs/E_sxm_${SLURM_JOB_ID}.out" 2>/dev/null | tail -1 | awk '{print $2}')
 if [ -n "$MISSING" ] && [ "$MISSING" != "0" ] && [ "$CHAIN" -lt "$MAXCHAIN" ]; then
-  NEXT=$(cd /scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3 && sbatch --parsable --export=ALL,CQSA_CHAIN=$((CHAIN + 1)) slurm/v3/E_sxm.slurm)
+  # carry this job's own --mem into the successor (a flag is not part of the exported environment: four 80G hops
+  # after a 120G one were OOM-killed on the host-resident 4M backward rows on 2026-10-23)
+  MEM=$(scontrol show job "$SLURM_JOB_ID" | grep -o "MinMemoryNode=[0-9]*[GM]" | head -1 | cut -d= -f2)
+  NEXT=$(cd /scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3 && sbatch --parsable ${MEM:+--mem=$MEM} --export=ALL,CQSA_CHAIN=$((CHAIN + 1)) slurm/v3/E_sxm.slurm)
   echo "== $MISSING rows missing: resubmitted as job $NEXT (chain hop $((CHAIN + 1)) of $MAXCHAIN)"
 else
   echo "== chain ends: missing=${MISSING:-?} hop=$CHAIN"

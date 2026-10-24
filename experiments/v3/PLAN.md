@@ -57,6 +57,7 @@ scheduler's measurements already exist under `results/ultimate/dist_sched*.md`);
 | **E4 parameters: itr x acc** | the depth and the accumulator placement at one size (device-resident Q/K/V) | itr {1, 2} x acc {gpu, cpu} x direction | N=1M, c=7 | 4 series | 2x2x2 x 4 = 32 | 1 part: ~65 |
 | **E5 parameters: wave budget** | subproblems per launch | max_wave_tokens = {1, 2, 4, 8, 16} x the largest subproblem (129,664 tokens at 1M, c=73: 73 / 37 / 19 / 10 / 5 waves) x direction | N=1M, c=73, itr=1, acc=gpu | wave_CUDA, wave_Triton | 5x2 x 2 = 20 | 1 part: ~40 |
 | **E6 parameters: precision, head dim** | bf16 and D=128 cost what fp16 / D=64 cost (performance; E0 has their correctness) | {fp16, bf16} x {64, 128} x direction | N=1M, c=7, itr=1, acc=gpu | 4 series + SDPA + FA-2 | 4x2 x 6 = 48 | 1 part: ~120 |
+| **E8 the v3 default** | the accumulator in host memory with Q/K/V on the device (what `attention()` picks from 1M up since the frontier tolerance became 15%): time cost and device memory saved against E1's device accumulator at the same N | N in {512K, 1M, 2M, 4M} x direction | c=7, acc=cpu, Q/K/V device-resident, itr as in E1 | classic_CUDA, wave_CUDA (ratios against E1's rows and baselines) | 4x2 x 2 = 16 | 1 part: ~65 |
 | **E7 automatic mode** | what the user gets without pinning anything, under device budgets, vs the out-of-core rivals | budget {10, 20, 40, 80 GiB} x N {256K..4M} x direction | `attention(kernel="auto")`, nothing pinned (the engine column records what ran) | auto + FA-2 resident + the two rectangular OOC rivals | the OOC grid (`experiments/ooc_rivals`) re-run on v3 | gpu-short PCIe: ~8 x 1-7 h |
 
 Depth rule for E1/E2 (the user's instruction): `itr` is never 0 (that would be the monolithic call) and is
@@ -64,8 +65,8 @@ raised one level at a time until the plan fits the device; the row records the d
 lower depth was tried and OOMed, that attempt too. Correctness (E0) is a separate experiment so that the
 scaling rows can time one run per configuration without the reference computations.
 
-E0-E6 run on **A100-SXM4-80GB** in one resubmittable 59-min gpu-test job (`slurm/v3/E_sxm.slurm`; parts in
-the order E0, E1:fwd, E3:fwd, E4, E1:bwd, E6, E3:bwd, E5, E2:fwd, E2:bwd, each part at most 28 min of a job; every
+E0-E6 and E8 run on **A100-SXM4-80GB** in one resubmittable 59-min gpu-test job (`slurm/v3/E_sxm.slurm`; parts in
+the order E0, E1:fwd, E3:fwd, E4, E1:bwd, E6, E3:bwd, E5, E2:fwd, E2:bwd (E8 after the fix above), each part at most 28 min of a job; every
 part `--only-missing`, so the job is resubmitted until its last line says `MISSING 0`; ~770 GPU-min in all by the
 harness's estimate, i.e. ~14 submissions). E2's 4M / 8M host-resident rows run on **A100-80GB-PCIe**
 (`gpu-short`): `slurm/v3/E_pcie.slurm` (parts E2:pcie_fwd, E2:pcie_bwd; ~14 h, two submissions). E7 is the OOC
@@ -79,6 +80,25 @@ fwd+bwd rows of E4 ran with a device accumulator in the backward (`acc_ran`). FA
 (~80 GiB) does not fit an 80 GB device: those baseline rows are expected OOM rows. A pinned depth that does not
 fit is an OOM row (escalation is disabled in the harness), except under E1/E2's depth rule, which records the
 attempt and runs itr+1.
+
+### The accumulator's placement (E4 / E2 finding, 2026-10-24) and E8
+
+E4 measured the host accumulator (acc=cpu) with Q/K/V on the device at 1M: the forward costs 10-14% more wall
+time for 41% less device memory (classic_CUDA 9.5 -> 5.6 GiB; FA-2 itself holds 4.0), the depth-2 classic
+forward 46% (the wave engine's per-wave merge halves that); E2 against E1 (host-resident inputs as well) costs
+1.21x / 1.11x / 1.10x at 1M / 2M / 4M forward and 1.30x / 1.15x / 1.06x fwd+bwd for 3-3.6x less device memory,
+and 1.4-4x below 512K (fixed costs). The backward rows of E4 at acc=cpu saved **nothing** (19.07 vs 19.06 GiB):
+the device-resident classic backward ignored `accumulate_on_gpu=False` (its banner said "accumulated on host").
+Commit 5bb74b2 fixed the backward (fp32 dQ/dK/dV in pinned host memory with an overlapped D2H + host add),
+made the planner enumerate "Q/K/V on the device, accumulator on the host", widened its frontier tolerance from 2%
+to 15% (`CQSA_PLAN_TOL`, `attention(tol=)`; the monolithic call whenever it fits is unchanged) and refit the cost
+model on E1-E4 (96 of 104 rows within 10%; the old model predicted every forward 8x high and a second depth at
++57% instead of the measured +4%). So the **default** is now the host accumulator wherever its predicted cost is
+within 15% of the fastest configuration (from about 1M tokens on an A100), the device accumulator below;
+`accumulate_on_gpu=True` pins the old behaviour. The six E4 fwd+bwd acc=cpu rows of the classic engine
+(classic_CUDA, classic_Triton, wave_Triton x itr 1, 2) measured the no-op path and are re-run; the originals are in
+`results/v3/superseded.jsonl`. E8 measures the default's trade across N (device Q/K/V, host accumulator, the
+planner's depth) against E1.
 
 ### E7: automatic mode vs the out-of-core rivals (recipe, not run by this harness)
 

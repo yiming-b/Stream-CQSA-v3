@@ -122,6 +122,12 @@ PLAN = {
         grid=dict(N=[M], c=[7], itr=[1], acc=["gpu"], dtype=["fp16", "bf16"], D=[64, 128], direction=["fwd", "bwd"]),
         arms=SERIES + BASELINES, qkv="device", warmup=1, reps=3, ref="fa2", node="sxm",
         parts={"all": {}}),
+    "E8": dict(
+        question="the v3 default: Q/K/V on the device with the accumulator in host memory (what attention() picks from "
+                 "1M up) against E1's device accumulator at the same N (time cost vs device memory saved)",
+        grid=dict(N=[512 * K, M, 2 * M, 4 * M], c=[7], itr=["min"], acc=["cpu"], dtype=["fp16"], D=[64], direction=["fwd", "bwd"]),
+        arms=("classic_CUDA", "wave_CUDA"), qkv="device", warmup=1, reps=1, ref="spot", node="sxm",
+        parts={"all": {}}),
 }
 EXPERIMENTS = tuple(PLAN)
 
@@ -1157,6 +1163,25 @@ def table_for(exp, rows, get_base):
     return lines
 
 
+def summary_e8(rows, ok):
+    """E8 against E1: the same arm, N and direction with the device accumulator (E1) and the host accumulator (E8),
+    Q/K/V on the device in both: wall ratio, device peak saved, host memory added."""
+    e1 = {(r["arm"], r["N"], r["direction"]): r for r in ok if r["exp"] == "E1" and r["node"] == "sxm" and r["kind"] == "series"}
+    out = ["Host accumulator (E8) vs device accumulator (E1), Q/K/V on the device, c=7, the planner's depth:", "",
+           "| arm | N | dir | E1 wall s (itr) | E8 wall s (itr) | E8/E1 | E1 dev GiB | E8 dev GiB | saved | E8 host GiB (VmHWM) | E8 acc ran |",
+           "|---|---|---|---|---|---|---|---|---|---|---|"]
+    n = 0
+    for r in sorted((r for r in rows if r.get("status") == "ok"), key=lambda r: (r["direction"], r["arm"], r["N"])):
+        a = e1.get((r["arm"], r["N"], r["direction"]))
+        if a is None or a.get("status") != "ok":
+            continue
+        n += 1
+        out.append(f"| {r['arm']} | {n_label(r['N'])} | {r['direction']} | {a['wall_s']:.2f} ({a.get('itr_ran')}) | {r['wall_s']:.2f} ({r.get('itr_ran')}) | "
+                   f"{r['wall_s'] / a['wall_s']:.3f} | {a['peak_dev_gib']:.2f} | {r['peak_dev_gib']:.2f} | "
+                   f"{100 * (1 - r['peak_dev_gib'] / a['peak_dev_gib']):.0f}% | {r.get('peak_host_gib', 0):.1f} ({r.get('vmhwm_gib', 0):.1f}) | {r.get('acc_ran')} |")
+    return (out + [""]) if n else []
+
+
 def summary_e0(rows):
     """E0's accuracy table: per series the worst errors over every (c, itr, acc, dtype, D) row."""
     ref = ref_arms_label(rows)
@@ -1526,6 +1551,10 @@ def cmd_report(a):
             elif exp == "E4":
                 figure_bars(exp, ex, png, lambda r: (r.get("itr"), r.get("acc")), lambda g: f"itr={g[0]} acc={g[1]}",
                             [(1, "gpu"), (1, "cpu"), (2, "gpu"), (2, "cpu")])
+            elif exp == "E8":
+                base_rows = [r for r in ok if r["exp"] == "E1" and r["arm"] in BASELINES and r["node"] == "sxm"]
+                lines += summary_e8(ex, ok)
+                figure_scaling(exp, ex, {}, png, base_rows=base_rows)
             elif exp == "E5":
                 figure_wave_budget(exp, ex, png)
             elif exp == "E6":

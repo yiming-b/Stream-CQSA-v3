@@ -39,12 +39,17 @@ bash "$CQSA_SRC/slurm/v3/parts.sh"
 # session; the chain does not. Stop it with: scancel <the queued job>, or CQSA_MAX_CHAIN=0.
 CHAIN=${CQSA_CHAIN:-0}; MAXCHAIN=${CQSA_MAX_CHAIN:-20}
 MISSING=$(grep -o "MISSING [0-9]*" "$CQSA_V3_RESULTS/logs/E_sxm_${SLURM_JOB_ID}.out" 2>/dev/null | tail -1 | awk '{print $2}')
-if [ -n "$MISSING" ] && [ "$MISSING" != "0" ] && [ "$CHAIN" -lt "$MAXCHAIN" ]; then
+# only this job's own parts count: the plan-wide MISSING also holds the PCIe parts, which an SXM hop can never run
+# (hop 3 of the E2:bwd chain on 2026-10-23 was queued for them). A part reports "N deferred by the budget" for the
+# rows it skipped and, with --retry-errors, the rows that errored are re-run on the next hop.
+DEFERRED=$(grep -o "[0-9]* deferred by the budget" "$CQSA_V3_RESULTS/logs/E_sxm_${SLURM_JOB_ID}.out" 2>/dev/null | awk '{s+=$1} END {print s+0}')
+TIMEDOUT=$(grep -c "exit 124" "$CQSA_V3_RESULTS/logs/E_sxm_${SLURM_JOB_ID}.out" 2>/dev/null || echo 0)
+if [ -n "$MISSING" ] && [ "$MISSING" != "0" ] && { [ "$DEFERRED" != "0" ] || [ "$TIMEDOUT" != "0" ]; } && [ "$CHAIN" -lt "$MAXCHAIN" ]; then
   # carry this job's own --mem into the successor (a flag is not part of the exported environment: four 80G hops
   # after a 120G one were OOM-killed on the host-resident 4M backward rows on 2026-10-23)
   MEM=$(scontrol show job "$SLURM_JOB_ID" | grep -o "MinMemoryNode=[0-9]*[GM]" | head -1 | cut -d= -f2)
   NEXT=$(cd /scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3 && sbatch --parsable ${MEM:+--mem=$MEM} --export=ALL,CQSA_CHAIN=$((CHAIN + 1)) slurm/v3/E_sxm.slurm)
-  echo "== $MISSING rows missing: resubmitted as job $NEXT (chain hop $((CHAIN + 1)) of $MAXCHAIN)"
+  echo "== $MISSING rows missing ($DEFERRED deferred by this job's parts): resubmitted as job $NEXT (chain hop $((CHAIN + 1)) of $MAXCHAIN)"
 else
-  echo "== chain ends: missing=${MISSING:-?} hop=$CHAIN"
+  echo "== chain ends: missing=${MISSING:-?} deferred=${DEFERRED:-?} hop=$CHAIN"
 fi

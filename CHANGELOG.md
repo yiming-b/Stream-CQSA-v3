@@ -2,6 +2,31 @@
 
 ## v3.0.0 (unreleased, development in Stream-CQSA-v3)
 
+* **The accumulator in host memory by default where it is cheap.** The v3 experiments (E4 / E2, A100-SXM4-80GB)
+  measured the host accumulator (`acc=cpu`) at 10-14% of the wall time at 1M tokens and 5-10% above for 40-70%
+  less device memory, and 1.4-4x below 512K. The planner now enumerates "Q/K/V on the device, accumulator on the
+  host" (never before) and its frontier rule has two tiers: within a residency group (depth, quorum size,
+  accumulator placement, input residency) the micro choices (wave budget, in-place reads, subproblems in flight,
+  engine) keep the 2% rule; across groups the smallest device peak within `PLAN_TOL_DEFAULT = 0.15` of the
+  fastest predicted time wins (`CQSA_PLAN_TOL`, `attention(tol=)`; `tol=0` = the fastest configuration;
+  `accumulate_on_gpu=True` pins the device accumulator). The monolithic call is taken whenever it fits on one
+  device, as before (explicit now; only a faster multi-device decomposition competes). On an A100 the host
+  accumulator is chosen from about 1M tokens up, the device accumulator below.
+* Fix: the device-resident classic backward ignored `accumulate_on_gpu=False` (the three fp32 dQ/dK/dV
+  accumulators were always on the device while its banner said "accumulated on host"; E4 measured acc=cpu
+  saving 0 GiB in the backward, and `attention()`'s "keep Q/K/V on the device with a host accumulator" fallback
+  for training saved nothing). It now keeps them in pinned host memory: per subproblem a D2H copy into one of
+  two pinned slots on a copy stream and a host add on a worker, overlapped with the next kernel; no device
+  allocation after the kernel, so the OOM-refinement retry stays sound. The engine entry point's default is
+  `None` = follow the inputs (its historical behaviour); `attention()` passes the planner's choice.
+* Cost model refit on the v3 rows (`benchmarks/v3/refit_cost_model.py`, `results/v3/cost_model_a100_sxm4_80gb.json`,
+  shipped as the defaults): kernel_ratio 0.95 (the v2 calibration said 1.83); the live pair count is the whole
+  problem's at every depth (the pair sets partition; the per-subproblem count overstated itr=2 by 29%, so the
+  planner never took a second level: measured +4%); depth_factor 1.01; per-token host costs and overlap fitted
+  jointly; a host-streaming setup cost; the backward's host work as a linear factor of the forward's unhidden
+  share. 96 of 104 measured E1-E4 rows within 10% (the old model predicted every v3 forward 8x high).
+  `calibrate()` uses the same pair count.
+
 * 128-aligned chunk layouts for every task (adaptive default `seg_align=None`; children built on the parent's
   local sequence; refinement refuses parents below c*128 tokens; `max_depth_for(align, l)`): the v11 kernel
   goes from 1.365x to 1.004x FA-2 at L~56K with no change to the kernel; outputs within rel 1e-4 of the

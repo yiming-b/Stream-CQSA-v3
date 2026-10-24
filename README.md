@@ -146,7 +146,8 @@ the rest is optional:
 | run inside a model where Q/K/V fill the GPU | nothing: `attention` releases Q/K/V to pinned host memory when nothing fits next to them, puts the output on the GPU first, and brings Q/K/V back if room remains (`evict_inputs=`, `restore_inputs=` = `"auto"`｜`True`｜`False`; `del` a fused QKV tensor first so the memory can be freed) |
 | describe the budget instead of detecting it | `attention(..., hardware={"cuda:0": "10GiB", "host": "64GiB"})` |
 | route an existing model without touching it | `stream_cqsa.patch_sdpa()` or `with stream_cqsa.patched_sdpa(): model(...)` |
-| pin a setting | keywords of `attention`: `itr=`, `c=`/`interest_set=`, `accumulate_on_gpu=False`, `max_parallel=`, `bwd_itr=`, `kernel="cuda"｜"triton"｜"wave-cuda"｜"wave-triton"` |
+| pin a setting | keywords of `attention`: `itr=`, `c=`/`interest_set=`, `accumulate_on_gpu=True`｜`False`, `max_parallel=`, `bwd_itr=`, `kernel="cuda"｜"triton"｜"wave-cuda"｜"wave-triton"` |
+| trade differently between time and device memory | the planner takes the configuration with the smallest device peak among those predicted within 15% of the fastest (so from about 1M tokens on an A100 the fp32 accumulator -- the forward's output, the backward's gradients -- lives in host memory: 10-15% slower, 40-70% less device memory); `attention(..., tol=0)` or `CQSA_PLAN_TOL=0` takes the fastest, `accumulate_on_gpu=True` pins the device accumulator, `tol=0.3` leans further toward memory |
 | make the planner's times accurate for my GPU | `stream_cqsa.calibrate()` once (about a minute; cached in `~/.cache/stream_cqsa`) |
 | check an installation | `stream-cqsa-doctor` |
 
@@ -233,6 +234,15 @@ The same N ladder with Q/K/V and the accumulator in host memory, plus 4M and 8M 
 
 E3: c in {3, 7, 13, 21, 31, 57, 73, 91, 133} at N=1M (replaces v2's c table below); E4: itr x accumulator at
 1M; E5: the wave budget (subproblems per launch) at c=73; E6: {fp16, bf16} x {head dim 64, 128} at 1M.
+
+### E8 the default's trade: accumulator in host memory **[E8: pending]**
+
+What `attention()` picks from about 1M tokens up when the monolithic call does not fit: Q/K/V on the device,
+the fp32 accumulator (the forward's output, the backward's three gradients) in host memory, against E1's
+device accumulator at the same N (time cost, device memory saved, host memory added). The E4 measurement that
+led to the default: at 1M the host accumulator costs 10-14% of the forward's wall time for 41% less device
+memory (classic_CUDA 9.5 -> 5.6 GiB; FA-2 holds 4.0); the host-resident configuration (E2) 1.21x / 1.11x /
+1.10x at 1M / 2M / 4M for 3-3.6x less.
 
 ### E7 automatic mode under device budgets **[E7: pending]**
 

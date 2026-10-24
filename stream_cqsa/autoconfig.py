@@ -720,31 +720,36 @@ MICRO_TOL = 0.02   # the tolerance within a residency group and for multi-device
 
 
 def _residency_key(c: dict) -> tuple:
+    # the choices that move O(N)-scale device memory: mode, world, depth, quorum size, accumulator placement, input
+    # residency, and the classic engine's subproblems in flight (each one a subproblem's working set, N/c-scale)
     return (c.get("mode", "cqsa"), c.get("world", 1), c.get("itr", 1), c.get("c", 7), c.get("acc", "gpu"),
-            bool(c.get("stream_from_host", False)))
+            bool(c.get("stream_from_host", False)), int(c.get("n_par", 1)))
 
 
 def frontier_pick(feas: Sequence[dict], tol: float | None = None) -> tuple[dict, list[dict]]:
     """The planner's rule on feasible candidates. Two tiers:
 
     * within a residency group -- the same (mode, world, depth, quorum size, accumulator placement, input
-      residency); its members differ in the micro choices (wave budget W, gathered or in-place reads, subproblems
-      in flight, engine) -- the fastest predicted, then the smallest peak within ``MICRO_TOL`` of it;
+      residency, subproblems in flight); its members differ in the micro choices (wave budget W, gathered or
+      in-place reads, engine) -- the fastest predicted, then the smallest peak within ``MICRO_TOL`` of it;
     * across groups -- the O(N) choices that move 20-70% of the device memory -- the fastest group, then the
       smallest peak among the groups within ``tol`` (default ``PLAN_TOL_DEFAULT``) of its time; multi-device
       groups stay on ``MICRO_TOL`` (their host-accumulator cost is not measured).
 
     Returns (pick, frontier) with the (time, peak) Pareto frontier of ``feas`` for the reason line."""
     tol = PLAN_TOL_DEFAULT if tol is None else float(tol)
+    micro = min(MICRO_TOL, tol)                  # tol=0 is "the fastest configuration", micro choices included
     groups: dict = {}
     for c in feas:
         groups.setdefault(_residency_key(c), []).append(c)
     reps = []
     for grp in groups.values():
         fastest = min(c["time"] for c in grp)
-        reps.append(min((c for c in grp if c["time"] <= fastest * (1 + MICRO_TOL)), key=lambda c: (c["peak"], c["time"])))
-    best_t = min(c["time"] for c in reps)
-    near = [c for c in reps if c["time"] <= best_t * (1 + (tol if c.get("world", 1) == 1 else MICRO_TOL))]
+        reps.append(min((c for c in grp if c["time"] <= fastest * (1 + micro)), key=lambda c: (c["peak"], c["time"])))
+    best_t = min(c["time"] for c in feas)        # the absolute fastest: the two tolerances do not compound
+    near = [c for c in reps if c["time"] <= best_t * (1 + (tol if c.get("world", 1) == 1 else micro))]
+    if not near:                                 # every representative is above the band (a multi-device fastest with tol < micro)
+        near = [min(reps, key=lambda c: c["time"])]
     front = [c for c in feas if not any((o["time"] < c["time"]) and (o["peak"] < c["peak"]) for o in feas)]
     return min(near, key=lambda c: (c["peak"], c["time"])), front
 

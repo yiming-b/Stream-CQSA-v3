@@ -1,0 +1,25 @@
+== v3 job 16061811 on della-l01g16  Fri Oct 23 02:59:28 AM EDT 2026
+NVIDIA A100 80GB PCIe, 210 MHz, 1410 MHz, 81920 MiB
+code /scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-34b67bf | v13 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2 | native_v2 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/native_v2/frozen/b2 | results /scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/v3 | parts: E2:pcie_fwd | part budget 3300s | total 3540s
+/scratch/gpfs/AKEY/yb2807/VENVs/CQSA311/bin/python
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-34b67bf/stream_cqsa/__init__.py 2.10.0+cu130 flash_attn 2.8.3
+classic module cqsa_cuda_v13 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2/cqsa_cuda_v13.cpython-311-x86_64-linux-gnu.so backward cuda
+wave module cqsa_native_v2 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/native_v2/frozen/b2/cqsa_native_v2.cpython-311-x86_64-linux-gnu.so WAVE_API 2
+1af3b98c3d2a61c0212d45f695e9fb1a  /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2/cqsa_cuda_v13.cpython-311-x86_64-linux-gnu.so
+8a070db8d7a22391fcbce5a0a75c422c  /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/native_v2/frozen/b2/cqsa_native_v2.cpython-311-x86_64-linux-gnu.so
+== part E2:pcie_fwd: budget 3300s, timeout 3467s, starts 02:59:41 -> /scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/v3/logs/16061811_E2_pcie_fwd.log
+== part E2:pcie_fwd: exit 0 (124 = timeout)  03:19:11
+E2:pcie_fwd classic_CUDA   N= 8388608 D= 64 fp16 fwd c=  7 itr=min acc=cpu qkv=host  : ERROR: worker killed (rc=-9): host memory / signal?
+E2:pcie_fwd wave_CUDA      N= 8388608 D= 64 fp16 fwd c=  7 itr=min acc=cpu qkv=host  : ERROR: worker killed (rc=-9): host memory / signal?
+E2:pcie_fwd classic_Triton N= 8388608 D= 64 fp16 fwd c=  7 itr=min acc=cpu qkv=host  : ERROR: worker killed (rc=-9): host memory / signal?
+E2:pcie_fwd wave_Triton    N= 8388608 D= 64 fp16 fwd c=  7 itr=min acc=cpu qkv=host  : ERROR: worker killed (rc=-9): host memory / signal?
+== done: 5 rows run, 7 already present, 0 deferred by the budget, 1170 s
+== report  03:19:11
+report: /scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/v3/report.md (424 lines), figures ['E0.png', 'E1.png', 'E2_pcie.png', 'E2.png', 'E3.png', 'E4.png', 'E6.png'], fits.json, STATUS.md (missing 99)
+MISSING 99
+16061811||00:19:52
+16061811.batch||00:19:52
+16061811.extern||00:19:52
+== v3 job done  Fri Oct 23 03:19:16 AM EDT 2026
+== chain ends: E2:pcie_fwd missing=0 hop=1
+[2026-10-23T03:19:16.273] error: Detected 4 oom_kill events in StepId=16061811.batch. Some of the step tasks have been OOM Killed.

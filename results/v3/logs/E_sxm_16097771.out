@@ -1,0 +1,31 @@
+== v3 job 16097771 on della-l09g5  Fri Oct 23 04:38:09 PM EDT 2026
+NVIDIA A100-SXM4-80GB, 210 MHz, 1410 MHz, 81920 MiB
+code /scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-e83a390 | v13 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2 | native_v2 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/native_v2/frozen/b2 | results /scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/v3 | parts: E1:bwd E2:bwd E6 | part budget 3300s | total 3540s
+/scratch/gpfs/AKEY/yb2807/VENVs/CQSA311/bin/python
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-e83a390/stream_cqsa/__init__.py 2.10.0+cu130 flash_attn 2.8.3
+classic module cqsa_cuda_v13 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2/cqsa_cuda_v13.cpython-311-x86_64-linux-gnu.so backward cuda
+wave module cqsa_native_v2 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/native_v2/frozen/b2/cqsa_native_v2.cpython-311-x86_64-linux-gnu.so WAVE_API 2
+1af3b98c3d2a61c0212d45f695e9fb1a  /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2/cqsa_cuda_v13.cpython-311-x86_64-linux-gnu.so
+8a070db8d7a22391fcbce5a0a75c422c  /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/native_v2/frozen/b2/cqsa_native_v2.cpython-311-x86_64-linux-gnu.so
+== part E1:bwd: budget 3300s, timeout 3477s, starts 16:38:12 -> /scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/v3/logs/16097771_E1_bwd.log
+== part E1:bwd: exit 0 (124 = timeout)  16:38:13
+== done: 0 rows run, 36 already present, 0 deferred by the budget, 0 s
+== part E2:bwd: budget 3300s, timeout 3476s, starts 16:38:13 -> /scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/v3/logs/16097771_E2_bwd.log
+== part E2:bwd: exit 0 (124 = timeout)  16:50:09
+E2:bwd      classic_CUDA   N= 4194304 D= 64 fp16 bwd c=  7 itr=min acc=cpu qkv=host  : ERROR: worker killed (rc=-9): host memory / signal?
+E2:bwd      wave_CUDA      N= 4194304 D= 64 fp16 bwd c=  7 itr=min acc=cpu qkv=host  : ERROR: worker killed (rc=-9): host memory / signal?
+E2:bwd      classic_Triton N= 4194304 D= 64 fp16 bwd c=  7 itr=min acc=cpu qkv=host  : ERROR: worker killed (rc=-9): host memory / signal?
+E2:bwd      wave_Triton    N= 4194304 D= 64 fp16 bwd c=  7 itr=min acc=cpu qkv=host  : ERROR: worker killed (rc=-9): host memory / signal?
+== done: 4 rows run, 20 already present, 0 deferred by the budget, 715 s
+== part E6: budget 2640s, timeout 2760s, starts 16:50:09 -> /scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/v3/logs/16097771_E6.log
+== part E6: exit 0 (124 = timeout)  16:50:11
+== done: 0 rows run, 44 already present, 0 deferred by the budget, 0 s
+== report  16:50:11
+report: /scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/v3/report.md (521 lines), figures ['E0.png', 'E1.png', 'E2_pcie.png', 'E2.png', 'E3.png', 'E4.png', 'E5.png', 'E6.png'], fits.json, STATUS.md (missing 12)
+MISSING 12
+16097771||00:12:09
+16097771.batch||00:12:09
+16097771.extern||00:12:09
+== v3 job done  Fri Oct 23 04:50:16 PM EDT 2026
+== 12 rows missing: resubmitted as job 16098304 (chain hop 4 of 4)
+[2026-10-23T16:50:16.530] error: Detected 4 oom_kill events in StepId=16097771.batch. Some of the step tasks have been OOM Killed.

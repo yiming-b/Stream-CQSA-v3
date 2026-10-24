@@ -203,6 +203,11 @@ KNOWN_EXCLUSIONS = [
     # 1955 ms per tile); the CUDA backward is the default, so this path only matters when nothing is compiled.
     dict(arm=("classic_Triton", "wave_Triton"), D=128, direction="bwd",
          reason="Triton backward at D=128 does not finish (known 128-wide key-tile pathology); CUDA backward is the default"),
+    # E2's PCIe forward+backward rows (4M and 8M host-resident, with their FA-2 / SDPA baselines): 1.5-3 h each at
+    # 150 GB of host RAM on a queue measured in days; the SXM 4M rows and the PCIe 4M / 8M forward rows already
+    # show the host-resident backward's behaviour (E2). Not run, by decision (2026-10-24).
+    dict(exp="E2", node="pcie", direction="bwd",
+         reason="not run: 1.5-3 h per row at 150 GB host RAM on gpu-short; the SXM 4M rows and the PCIe forward rows cover the question"),
 ]
 
 

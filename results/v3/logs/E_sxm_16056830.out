@@ -1,0 +1,5 @@
+== v3 job 16056830 on della-l09g7  Fri Oct 23 12:13:11 AM EDT 2026
+NVIDIA A100-SXM4-80GB, 210 MHz, 1410 MHz, 81920 MiB
+code /scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-34b67bf | v13 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2 | native_v2 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/native_v2/frozen/b2 | results /scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/v3 | parts: E0 E1:fwd E3:fwd E4 E1:bwd E6 E3:bwd E5 E2:fwd E2:bwd | part budget 1700s | total 3540s
+/scratch/gpfs/AKEY/yb2807/VENVs/CQSA311/bin/python
+[2026-10-23T00:13:15.650] error: *** JOB 16056830 ON della-l09g7 CANCELLED AT 2026-10-23T00:13:15 DUE to SIGNAL Terminated ***

@@ -14,8 +14,9 @@ v2 repo (released, PyPI `stream-cqsa` 2.2.3): [yiming-b/Stream-CQSA-v2](https://
 work of the "ultimate A100 kernel" program (`docs/ultimate/`): new forward and backward kernels that remove
 the decomposition's overhead on the live tiles, a wave kernel with the same design, 128-aligned chunk
 layouts, routing by a memory model, a multi-device scheduler for mixed GPUs, and one experiment plan
-(`experiments/v3/PLAN.md`) whose results fill the placeholders marked **[E#: pending]** below as the
-jobs finish (`results/v3/STATUS.md` says which rows exist).
+(`experiments/v3/PLAN.md`) whose results are the measurement sections below (E0-E6, E8 measured on
+A100-SXM4-80GB in jobs 15966097-16119471, E2's 4M/8M rows on A100 80GB PCIe; `results/v3/STATUS.md` says which
+rows exist; E7 is still **[E7: pending]**).
 
 ## How it works
 
@@ -41,7 +42,7 @@ kept query–key pair is counted exactly once, so the result is exact.
 | **128-aligned chunks** | every task's chunk boundaries fall on 128-token blocks, at every depth, so no tile straddles a chunk (v2: 1.365x -> 1.004x flash_attn at 56K with the SAME kernel) | engine 131K c=7: 150 -> 135 ms; c=73: 222 -> 179 ms |
 | **routing by a memory model** | the planner models the wave's peak (`a*N + b*W`) and chooses the engine, the wave budget W and gathered-vs-in-place reads; the subproblem-count rule is gone | — |
 | **async host fold** | the wave engine's host accumulator folds on a worker under the next wave | host-streamed 1M: 9.0 s (classic 9.3 s); 2M: 34.2 vs 34.6 s |
-| **multi-device scheduler** | per-GPU rates (calibrated per model), exact live-tile work per task, LPT with a cost-aware split, reduce_scatter merge; identical schedule on every rank; heterogeneous devices supported (`stream_cqsa/scheduler.py`) | model within 2% rms of the measured 4x A100 job; the measured winner reproduced on every shape (`results/ultimate/dist_sched.md`); **[mixed-GPU job pending]** |
+| **multi-device scheduler** | per-GPU rates (calibrated per model), exact live-tile work per task, LPT with a cost-aware split, reduce_scatter merge; identical schedule on every rank; heterogeneous devices supported (`stream_cqsa/scheduler.py`) | model within 2% rms of the measured 4x A100 job; the measured winner reproduced on every shape (`results/ultimate/dist_sched.md`); on 2 SXM + 2 PCIe A100s (job 15949746, `results/ultimate/dist_het.md`) LPT reaches 2.91x one GPU forward and 3.5-3.7x forward+backward at 2M where round-robin reaches 2.75x / 2.88x |
 | **correctness discipline** | every comparison against SDPA / FA-2 / fp64 forces a decomposition and asserts it ran (`tests/_decomp.py`; an unpinned call that fits is SDPA itself) | 745 tests |
 | **fixes** | a pinned `c=` without `interest_set=` silently used the c=7 quorum set in v2.1-v2.2.3 (wrong results for every c != 7; v3 re-plans the set and the engine refuses a non-perfect-difference-set pair); the autograd forward moved an 8 GiB fp32 host result to the device at 4M tokens (the 10 GiB-budget backward OOM in the OOC study) | `docs/ultimate/progress/BUG_v223_c73.md` |
 
@@ -213,36 +214,240 @@ exactly once), so at 1M the launches, gathers and the merge are the whole overhe
 0.8-s kernels; at 131K they are a visible share. Full rows (bf16, c=73, itr=2, the wave engine, SDPA):
 `results/ultimate/engine_ab.md`; the kernel-level numbers: `docs/ultimate/03_kernels_report.md`.
 
-### E0 correctness **[E0: pending]**
+### E0 correctness (job 15966097, A100-SXM4-80GB)
 
 Every series (classic CUDA / Triton, wave CUDA / Triton) x c in {3, 7, 31, 133} x itr {1, 2} x accumulator
 {GPU, host} x {forward, forward+backward} at N=256K, plus bf16 and head dim 128: output and gradient errors
-against FlashAttention-2 and float64. Expected from the smoke rows: fp16 fp64-error 1.1-1.5e-4 (= FA-2's own,
-ratio 0.99-1.00), bf16 ~8e-4.
+against FlashAttention-2 and against float64. Every row decomposed (asserted) and every row is exact: the
+output's error against float64 is 0.91-1.00x FlashAttention-2's own, the gradients' at most 1.24x (fp16
+rounding of the gradient accumulation at c=133, itr=2), bf16 ~8e-4 as the format allows.
 
-### E1 scaling, device-resident **[E1: pending]**
+<!-- v3-tables:E0 -->
+128 of 128 rows ran and are exact; the worst errors per series (the reference is FlashAttention-2's output and gradients; the fp64 columns compare both to a float64 SDPA):
 
-Wall-clock and peak memory vs N in {128K, 256K, 512K, 1M, 2M, 4M}, c=7, the smallest depth that fits
-(never 0), forward and forward+backward, four series against SDPA and FA-2 up to where they fit; quadratic
-fits of time and linear fits of memory per series. Replaces v2's "Headline" table and the N sweep.
+| series | rows | max rel vs FA-2 (output) | max rel vs FA-2 (grads) | max fp64 err (output) | max fp64 err / FA-2's | max fp64 err (dQ) | max fp64 dQ err / FA-2's |
+|---|---|---|---|---|---|---|---|
+| classic_CUDA | 32 | 1.0e-03 | 2.8e-03 | 2.2e-04 | 1.00 | 2.6e-03 | 1.24 |
+| wave_CUDA | 32 | 1.0e-03 | 3.0e-03 | 2.2e-04 | 1.00 | 2.6e-03 | 1.24 |
+| classic_Triton | 32 | 2.4e-03 | 2.9e-03 | 2.2e-04 | 1.00 | 2.6e-03 | 1.24 |
+| wave_Triton | 32 | 2.4e-03 | 2.9e-03 | 2.2e-04 | 1.00 | 2.6e-03 | 1.24 |
+<!-- /v3-tables:E0 -->
 
-### E2 scaling, host-resident (the recovery configuration) **[E2: pending]**
+### E1 scaling, device-resident
 
-The same N ladder with Q/K/V and the accumulator in host memory, plus 4M and 8M on the PCIe node type.
+Wall-clock and peak device memory vs N in {128K, ..., 4M}, c=7, the smallest depth that fits (never 0),
+forward and forward+backward, four series against SDPA and FA-2 (all fit on the 80 GB device at these sizes).
+From 512K up the decomposition costs nothing against FA-2: the classic CUDA series is 0.95-1.00x FA-2's
+forward and 0.99-1.01x its forward+backward at 1M-4M (1.27x / 1.14x at 128K, where seven launches and gathers
+are a visible share of a 90 ms call); the wave series is 1-3% behind it (the W=1 wave's grid tail); the
+Triton series 1.45-2.0x. Peak device memory is 2.0-2.4x FA-2's (the fp32 accumulator and output copies that
+the host accumulator removes, E8); at 4M the forward+backward needed depth 2 (classic) / 4 (wave) to fit.
 
-### E3-E6 parameters **[E3-E6: pending]**
+<!-- v3-tables:E1 -->
+*forward* (wall s (x FA-2) / peak device GiB; the depth that ran when it is not 1):
 
-E3: c in {3, 7, 13, 21, 31, 57, 73, 91, 133} at N=1M (replaces v2's c table below); E4: itr x accumulator at
-1M; E5: the wave budget (subproblems per launch) at c=73; E6: {fp16, bf16} x {head dim 64, 128} at 1M.
+| N | FA-2 | SDPA | classic CUDA | wave CUDA | classic Triton | wave Triton |
+|---|---|---|---|---|---|---|
+| 128K | 0.09 s / 0.5 GiB | 0.10 s / 0.5 GiB | 0.11 s (1.27x) / 1.2 GiB | 0.12 s (1.32x) / 2.2 GiB | 0.17 s (1.89x) / 1.2 GiB | 0.18 s (2.03x) / 3.6 GiB |
+| 256K | 0.36 s / 1.0 GiB | 0.38 s / 1.0 GiB | 0.38 s (1.06x) / 2.4 GiB | 0.41 s (1.13x) / 2.6 GiB | 0.60 s (1.66x) / 2.4 GiB | 0.64 s (1.76x) / 3.1 GiB |
+| 512K | 1.48 s / 2.0 GiB | 1.56 s / 2.0 GiB | 1.48 s (1.00x) / 4.8 GiB | 1.54 s (1.04x) / 5.2 GiB | 2.28 s (1.54x) / 4.8 GiB | 2.36 s (1.60x) / 6.2 GiB |
+| 1M | 6.03 s / 4.0 GiB | 6.32 s / 4.0 GiB | 5.85 s (0.97x) / 9.5 GiB | 6.03 s (1.00x) / 10.4 GiB | 8.93 s (1.48x) / 9.5 GiB | 9.16 s (1.52x) / 11.0 GiB |
+| 2M | 24.40 s / 8.1 GiB | 25.53 s / 8.1 GiB | 23.30 s (0.95x) / 19.0 GiB | 23.98 s (0.98x) / 20.8 GiB | 35.49 s (1.45x) / 19.0 GiB | 36.29 s (1.49x) / 19.8 GiB |
+| 4M | 97.67 s / 16.1 GiB | 101.88 s / 16.1 GiB | 92.67 s (0.95x) / 37.9 GiB | 96.16 s (0.98x) / 41.7 GiB | 142.20 s (1.46x) / 37.9 GiB | 145.57 s (1.49x) / 37.7 GiB |
 
-### E8 the default's trade: accumulator in host memory **[E8: pending]**
+*forward + backward* (wall s (x FA-2) / peak device GiB; the depth that ran when it is not 1):
+
+| N | FA-2 | SDPA | classic CUDA | wave CUDA | classic Triton | wave Triton |
+|---|---|---|---|---|---|---|
+| 128K | 0.33 s / 1.3 GiB | 0.35 s / 1.5 GiB | 0.37 s (1.14x) / 2.4 GiB | 0.38 s (1.17x) / 4.0 GiB | 0.65 s (2.00x) / 2.4 GiB | 0.65 s (1.99x) / 2.4 GiB |
+| 256K | 1.30 s / 2.5 GiB | 1.40 s / 3.0 GiB | 1.38 s (1.06x) / 4.8 GiB | 1.42 s (1.09x) / 5.0 GiB | 2.40 s (1.84x) / 4.8 GiB | 2.40 s (1.84x) / 4.8 GiB |
+| 512K | 5.24 s / 5.0 GiB | 5.62 s / 6.0 GiB | 5.31 s (1.01x) / 9.5 GiB | 5.40 s (1.03x) / 10.0 GiB | 9.31 s (1.78x) / 9.5 GiB | 9.31 s (1.78x) / 9.5 GiB |
+| 1M | 21.03 s / 10.1 GiB | 22.58 s / 12.1 GiB | 20.88 s (0.99x) / 19.1 GiB | 21.13 s (1.00x) / 20.0 GiB | 36.97 s (1.76x) / 19.1 GiB | 37.00 s (1.76x) / 19.1 GiB |
+| 2M | 84.12 s / 20.1 GiB | 90.15 s / 24.1 GiB | 83.08 s (0.99x) / 38.1 GiB | 83.85 s (1.00x) / 40.0 GiB | 147.69 s (1.76x) / 38.1 GiB | 148.17 s (1.76x) / 38.1 GiB |
+| 4M | 337.80 s / 40.3 GiB | 363.53 s / 48.3 GiB | 340.95 s (1.01x) / 64.1 GiB itr2 | 379.99 s (1.12x) / 76.3 GiB itr4 | 592.77 s (1.75x) / 64.1 GiB itr2 | 592.69 s (1.75x) / 64.1 GiB itr2 |
+<!-- /v3-tables:E1 -->
+
+### E2 scaling, host-resident (the recovery configuration)
+
+The same N ladder with Q/K/V in pinned host memory and the accumulator in host memory (the configuration a
+small device falls back to), plus 4M and 8M on the PCIe node type. The overhead against the resident FA-2 call
+falls as the per-subproblem transfers amortise: forward 1.40x at 512K, 1.17x at 1M, 1.06x at 2M, 1.04x at 4M;
+forward+backward 1.41x / 1.29x / 1.14x / 1.07x; below 512K the fixed costs dominate (2.5-5.5x at 128K-256K).
+Device memory is 3-3.6x less than the device-resident decomposition's and 0.55-0.65x FA-2's (4M forward: 10.4
+GiB against FA-2's 16.1 and E1's 37.9); the price is host RAM, about 8 GiB per million tokens forward and 17
+forward+backward (VmHWM 12 / 22). On the PCIe node the 8M forward -- which no monolithic kernel can hold
+with its output on an 80 GB card -- runs at 0.97x FA-2's time in 21 GiB of device memory and 91 GiB of host
+RAM; the 8M forward+backward rows are not run (1.5-3 h each).
+
+<!-- v3-tables:E2 -->
+**A100-SXM4-80GB**, Q/K/V in pinned host memory and the accumulator in host memory (ratios against E1's resident FA-2 rows of the same N):
+
+*forward* (wall s (x FA-2) / peak device GiB; the depth that ran when it is not 1):
+
+| N | FA-2 | SDPA | classic CUDA | wave CUDA | classic Triton | wave Triton | host GiB (classic CUDA) |
+|---|---|---|---|---|---|---|---|
+| 128K | 0.09 s / 0.5 GiB | 0.10 s / 0.5 GiB | 0.50 s (5.55x) / 0.5 GiB | 0.34 s (3.80x) / 0.8 GiB | 0.50 s (5.58x) / 0.3 GiB | 0.37 s (4.07x) / 1.9 GiB | 1.4 (VmHWM 3) |
+| 256K | 0.36 s / 1.0 GiB | 0.38 s / 1.0 GiB | 0.93 s (2.56x) / 0.7 GiB | 0.74 s (2.03x) / 1.2 GiB | 1.28 s (3.53x) / 0.6 GiB | 1.04 s (2.87x) / 2.3 GiB | 2.0 (VmHWM 4) |
+| 512K | 1.48 s / 2.0 GiB | 1.56 s / 2.0 GiB | 2.07 s (1.40x) / 1.3 GiB | 2.18 s (1.47x) / 2.4 GiB | 3.57 s (2.41x) / 1.1 GiB | 3.09 s (2.09x) / 4.6 GiB | 3.9 (VmHWM 7) |
+| 1M | 6.03 s / 4.0 GiB | 6.32 s / 4.0 GiB | 7.08 s (1.17x) / 2.6 GiB | 7.30 s (1.21x) / 4.8 GiB | 11.47 s (1.90x) / 2.2 GiB | 10.56 s (1.75x) / 7.8 GiB | 7.5 (VmHWM 12) |
+| 2M | 24.40 s / 8.1 GiB | 25.53 s / 8.1 GiB | 25.86 s (1.06x) / 7.8 GiB | 26.69 s (1.09x) / 9.6 GiB | 38.30 s (1.57x) / 4.3 GiB | 38.90 s (1.59x) / 13.4 GiB | 20.8 (VmHWM 29) |
+| 4M | 97.67 s / 16.1 GiB | 101.88 s / 16.1 GiB | 101.47 s (1.04x) / 10.4 GiB | 102.67 s (1.05x) / 19.1 GiB | 151.36 s (1.55x) / 8.7 GiB | 150.10 s (1.54x) / 24.7 GiB | 32.0 (VmHWM 46) |
+
+*forward + backward* (wall s (x FA-2) / peak device GiB; the depth that ran when it is not 1):
+
+| N | FA-2 | SDPA | classic CUDA | wave CUDA | classic Triton | wave Triton | host GiB (classic CUDA) |
+|---|---|---|---|---|---|---|---|
+| 128K | 0.33 s / 1.3 GiB | 0.35 s / 1.5 GiB | 1.23 s (3.77x) / 0.7 GiB | 1.24 s (3.79x) / 0.7 GiB | 1.49 s (4.56x) / 0.8 GiB | 1.52 s (4.64x) / 0.8 GiB | 2.2 (VmHWM 4) |
+| 256K | 1.30 s / 2.5 GiB | 1.40 s / 3.0 GiB | 2.95 s (2.26x) / 1.4 GiB | 2.98 s (2.29x) / 1.4 GiB | 4.09 s (3.13x) / 1.5 GiB | 4.04 s (3.10x) / 1.5 GiB | 4.4 (VmHWM 7) |
+| 512K | 5.24 s / 5.0 GiB | 5.62 s / 6.0 GiB | 7.38 s (1.41x) / 2.8 GiB | 7.50 s (1.43x) / 2.8 GiB | 10.62 s (2.03x) / 3.0 GiB | 10.69 s (2.04x) / 3.0 GiB | 11.5 (VmHWM 15) |
+| 1M | 21.03 s / 10.1 GiB | 22.58 s / 12.1 GiB | 27.10 s (1.29x) / 5.6 GiB | 26.98 s (1.28x) / 5.6 GiB | 43.21 s (2.06x) / 6.0 GiB | 43.30 s (2.06x) / 6.0 GiB | 17.2 (VmHWM 22) |
+| 2M | 84.12 s / 20.1 GiB | 90.15 s / 24.1 GiB | 95.78 s (1.14x) / 11.2 GiB | 95.54 s (1.14x) / 11.2 GiB | 160.41 s (1.91x) / 12.0 GiB | 160.62 s (1.91x) / 12.0 GiB | 33.6 (VmHWM 44) |
+| 4M | 337.80 s / 40.3 GiB | 363.53 s / 48.3 GiB | 360.01 s (1.07x) / 22.4 GiB | 358.57 s (1.06x) / 22.4 GiB | 617.40 s (1.83x) / 24.1 GiB | 617.64 s (1.83x) / 24.1 GiB | 67.7 (VmHWM 86) |
+
+**A100 80GB PCIe** (its own resident baselines; FA-2's fwd+bwd at 8M does not fit an 80 GB device):
+
+*forward* (wall s (x FA-2) / peak device GiB; the depth that ran when it is not 1):
+
+| N | FA-2 | SDPA | classic CUDA | wave CUDA | classic Triton | wave Triton | host GiB (classic CUDA) |
+|---|---|---|---|---|---|---|---|
+| 4M | 136.08 s / 16.1 GiB | 131.02 s / 16.1 GiB | 125.95 s (0.93x) / 10.4 GiB | 129.93 s (0.95x) / 19.1 GiB | 182.46 s (1.34x) / 8.7 GiB | 180.61 s (1.33x) / 24.7 GiB | 32.0 (VmHWM 46) |
+| 8M | 544.97 s / 32.3 GiB | 507.86 s / 32.3 GiB | 526.60 s (0.97x) / 20.8 GiB | 535.63 s (0.98x) / 34.8 GiB | 708.50 s (1.30x) / 17.3 GiB | 716.09 s (1.31x) / 47.2 GiB | 64.8 (VmHWM 91) |
+
+*forward + backward* (wall s (x FA-2) / peak device GiB; the depth that ran when it is not 1):
+
+| N | FA-2 | SDPA | classic CUDA | wave CUDA | classic Triton | wave Triton | host GiB (classic CUDA) |
+|---|---|---|---|---|---|---|---|
+| 4M | - | - | - | - | - | - | - |
+| 8M | - | - | - | - | - | - | - |
+<!-- /v3-tables:E2 -->
+
+### E3-E6 parameters
+
+**E3, the quorum size c** (N=1M, itr=1): time is nearly flat in c -- classic CUDA 0.97x FA-2 at c=3 to 1.03x
+at c=133 forward, 0.99x to 1.05x forward+backward (133 launches instead of 3) -- while the peak device memory
+falls from 11.9 to 7.2 GiB forward and 22.4 to 16.0 GiB forward+backward as the subproblems shrink: c is the
+memory knob. **E4, depth x accumulator** (N=1M, c=7, Q/K/V on the device): a second level costs 4% (classic)
+to 5% (wave) and saves 24% of the device memory; the host accumulator costs 10-14% forward (classic 9.5 -> 5.6
+GiB, -41%) and 6-10% forward+backward (19.1 -> 11.4 GiB, -40%), at depth 2 the classic engine's host fold costs
+46% where the wave engine's per-wave merge costs 20%. These two rows are why the planner's default became the
+host accumulator from about 1M tokens (E8). **E5, the wave budget** (c=73): 5 to 73 waves per call change the
+time by 1% and the memory by 2.2x (9.5 to 21 GiB forward). **E6, precision and head dim**: bf16 costs what fp16
+costs; D=128 costs what FA-2's D=128 costs (0.93-0.99x) on the CUDA series, 2.2-2.3x on the Triton forward,
+and the Triton backward at D=128 does not finish (a known 128-wide key-tile pathology; the CUDA backward is the
+default and is unaffected).
+
+<!-- v3-tables:E3 -->
+*forward* at N=1M, itr=1 (wall s (x FA-2) / peak device GiB):
+
+| c | subproblems | classic CUDA | wave CUDA | classic Triton | wave Triton |
+|---|---|---|---|---|---|
+| 3 | 3 | 5.84 s (0.97x) / 11.9 GiB | 6.04 s (1.00x) / 11.8 GiB | 8.91 s (1.48x) / 11.9 GiB | 9.15 s (1.52x) / 11.9 GiB |
+| 7 | 7 | 5.86 s (0.97x) / 9.5 GiB | 6.06 s (1.01x) / 10.4 GiB | 8.92 s (1.48x) / 9.5 GiB | 9.16 s (1.52x) / 11.0 GiB |
+| 13 | 13 | 5.90 s (0.98x) / 8.2 GiB | 6.10 s (1.01x) / 10.1 GiB | 8.94 s (1.48x) / 8.2 GiB | 9.22 s (1.53x) / 10.5 GiB |
+| 21 | 21 | 5.93 s (0.98x) / 7.5 GiB | 6.16 s (1.02x) / 9.9 GiB | 9.04 s (1.50x) / 7.5 GiB | 9.32 s (1.55x) / 10.1 GiB |
+| 31 | 31 | 5.97 s (0.99x) / 7.2 GiB | 6.21 s (1.03x) / 9.7 GiB | 9.14 s (1.51x) / 7.2 GiB | 9.43 s (1.56x) / 9.5 GiB |
+| 57 | 57 | 6.04 s (1.00x) / 7.2 GiB | 6.31 s (1.05x) / 9.6 GiB | 9.32 s (1.55x) / 7.2 GiB | 9.65 s (1.60x) / 9.1 GiB |
+| 73 | 73 | 6.08 s (1.01x) / 7.2 GiB | 6.36 s (1.06x) / 9.5 GiB | 9.49 s (1.57x) / 7.2 GiB | 9.78 s (1.62x) / 9.1 GiB |
+| 91 | 91 | 6.13 s (1.02x) / 7.2 GiB | 6.42 s (1.07x) / 9.5 GiB | 9.62 s (1.59x) / 7.2 GiB | 9.89 s (1.64x) / 9.1 GiB |
+| 133 | 133 | 6.20 s (1.03x) / 7.2 GiB | 6.55 s (1.09x) / 9.4 GiB | 9.89 s (1.64x) / 7.2 GiB | 10.12 s (1.68x) / 9.1 GiB |
+
+*forward + backward* at N=1M, itr=1 (wall s (x FA-2) / peak device GiB):
+
+| c | subproblems | classic CUDA | wave CUDA | classic Triton | wave Triton |
+|---|---|---|---|---|---|
+| 3 | 3 | 20.86 s (0.99x) / 22.4 GiB | 21.27 s (1.01x) / 22.2 GiB | 37.11 s (1.77x) / 22.4 GiB | 37.21 s (1.77x) / 22.4 GiB |
+| 7 | 7 | 20.94 s (1.00x) / 19.1 GiB | 21.30 s (1.01x) / 20.0 GiB | 37.07 s (1.76x) / 19.1 GiB | 37.21 s (1.77x) / 19.1 GiB |
+| 13 | 13 | 21.03 s (1.00x) / 17.4 GiB | 21.39 s (1.02x) / 19.1 GiB | 37.02 s (1.76x) / 17.4 GiB | 37.14 s (1.77x) / 17.4 GiB |
+| 21 | 21 | 21.14 s (1.01x) / 16.4 GiB | 21.51 s (1.02x) / 19.1 GiB | 37.09 s (1.76x) / 16.4 GiB | 37.20 s (1.77x) / 16.4 GiB |
+| 31 | 31 | 21.24 s (1.01x) / 16.0 GiB | 21.65 s (1.03x) / 19.1 GiB | 37.36 s (1.78x) / 16.0 GiB | 37.30 s (1.77x) / 16.0 GiB |
+| 57 | 57 | 21.45 s (1.02x) / 16.0 GiB | 21.82 s (1.04x) / 19.1 GiB | 37.82 s (1.80x) / 16.0 GiB | 37.79 s (1.80x) / 16.0 GiB |
+| 73 | 73 | 21.67 s (1.03x) / 16.0 GiB | 21.97 s (1.05x) / 19.1 GiB | 38.23 s (1.82x) / 16.0 GiB | 38.18 s (1.82x) / 16.0 GiB |
+| 91 | 91 | 21.78 s (1.04x) / 16.0 GiB | 22.12 s (1.05x) / 19.1 GiB | 38.51 s (1.83x) / 16.0 GiB | 38.49 s (1.83x) / 16.0 GiB |
+| 133 | 133 | 22.01 s (1.05x) / 16.0 GiB | 22.43 s (1.07x) / 19.1 GiB | 39.36 s (1.87x) / 16.0 GiB | 39.30 s (1.87x) / 16.0 GiB |
+<!-- /v3-tables:E3 -->
+
+<!-- v3-tables:E4 -->
+N=1M, c=7, Q/K/V on the device (wall s (x FA-2) / peak device GiB / peak host GiB):
+
+| direction | itr | accumulator | classic CUDA | wave CUDA | classic Triton | wave Triton |
+|---|---|---|---|---|---|---|
+| fwd | 1 | device | 5.85 s (0.97x) / 9.5 GiB / 0.1 | 6.05 s (1.00x) / 10.4 GiB / 0.1 | 8.92 s (1.48x) / 9.5 GiB / 0.1 | 9.15 s (1.52x) / 11.0 GiB / 0.1 |
+| fwd | 1 | host | 6.69 s (1.11x) / 5.6 GiB / 6.8 | 6.92 s (1.15x) / 6.1 GiB / 8.4 | 9.86 s (1.64x) / 5.2 GiB / 6.8 | 10.09 s (1.67x) / 7.8 GiB / 8.4 |
+| fwd | 2 | device | 6.08 s (1.01x) / 7.2 GiB itr2 / 0.2 | 6.38 s (1.06x) / 9.7 GiB itr2 / 0.2 | 9.29 s (1.54x) / 7.2 GiB itr2 / 0.2 | 9.66 s (1.60x) / 9.4 GiB itr2 / 0.2 |
+| fwd | 2 | host | 8.89 s (1.47x) / 5.0 GiB itr2 / 4.9 | 7.64 s (1.27x) / 4.3 GiB itr2 / 7.4 | 10.85 s (1.80x) / 5.0 GiB itr2 / 5.0 | 11.05 s (1.83x) / 5.7 GiB itr2 / 7.4 |
+| bwd | 1 | device | 21.10 s (1.00x) / 19.1 GiB / 0.1 | 21.31 s (1.01x) / 20.0 GiB / 0.1 | 36.97 s (1.76x) / 19.1 GiB / 0.1 | 36.98 s (1.76x) / 19.1 GiB / 0.1 |
+| bwd | 1 | host | 23.09 s (1.10x) / 11.4 GiB / 14.2 | 21.32 s (1.01x) / 20.0 GiB / 0.1 (ran acc=gpu) | 39.14 s (1.86x) / 11.8 GiB / 14.2 | 39.06 s (1.86x) / 11.8 GiB / 14.2 |
+| bwd | 2 | device | 21.71 s (1.03x) / 16.0 GiB itr2 / 0.2 | 22.12 s (1.05x) / 19.1 GiB itr2 / 0.2 | 37.74 s (1.79x) / 16.0 GiB itr2 / 0.2 | 37.74 s (1.79x) / 16.0 GiB itr2 / 0.2 |
+| bwd | 2 | host | 25.72 s (1.22x) / 10.0 GiB itr2 / 11.3 | 22.12 s (1.05x) / 19.1 GiB itr2 / 0.2 (ran acc=gpu) | 40.29 s (1.92x) / 10.0 GiB itr2 / 11.3 | 40.40 s (1.92x) / 10.0 GiB itr2 / 11.4 |
+<!-- /v3-tables:E4 -->
+
+<!-- v3-tables:E5 -->
+N=1M, c=73, itr=1 (73 subproblems), the wave budget as a multiple of the largest subproblem (wall s (x FA-2) / peak device GiB / waves):
+
+| direction | W | wave CUDA | wave Triton |
+|---|---|---|---|
+| fwd | 1x | 6.37 s (1.06x) / 9.5 GiB / 73 waves | 9.80 s (1.62x) / 9.1 GiB / 73 waves |
+| fwd | 2x | 6.34 s (1.05x) / 9.5 GiB / 37 waves | 9.80 s (1.62x) / 10.5 GiB / 37 waves |
+| fwd | 4x | 6.34 s (1.05x) / 10.6 GiB / 19 waves | 9.76 s (1.62x) / 12.8 GiB / 19 waves |
+| fwd | 8x | 6.32 s (1.05x) / 14.1 GiB / 10 waves | 9.71 s (1.61x) / 16.4 GiB / 10 waves |
+| fwd | 16x | 6.30 s (1.04x) / 21.0 GiB / 5 waves | 9.62 s (1.60x) / 21.5 GiB / 5 waves |
+| bwd | 1x | 22.10 s (1.05x) / 19.1 GiB / 73 waves | 38.08 s (1.81x) / 16.0 GiB |
+| bwd | 2x | 22.03 s (1.05x) / 19.1 GiB / 37 waves | 38.09 s (1.81x) / 16.0 GiB |
+| bwd | 4x | 21.98 s (1.05x) / 20.6 GiB / 19 waves | 38.08 s (1.81x) / 16.0 GiB |
+| bwd | 8x | 21.93 s (1.04x) / 25.1 GiB / 10 waves | 38.08 s (1.81x) / 16.0 GiB |
+| bwd | 16x | 21.80 s (1.04x) / 34.1 GiB / 5 waves | 38.09 s (1.81x) / 16.0 GiB |
+<!-- /v3-tables:E5 -->
+
+<!-- v3-tables:E6 -->
+N=1M, c=7, itr=1 (wall s (x FA-2) / peak device GiB):
+
+| direction | dtype | D | FA-2 | classic CUDA | wave CUDA | classic Triton | wave Triton |
+|---|---|---|---|---|---|---|---|
+| fwd | fp16 | 64 | 5.95 s / 4.0 GiB | 5.75 s (0.97x) / 9.5 GiB | 5.98 s (1.01x) / 10.4 GiB | 8.90 s (1.50x) / 9.5 GiB | 9.14 s (1.54x) / 11.0 GiB |
+| fwd | fp16 | 128 | 10.87 s / 8.0 GiB | 10.12 s (0.93x) / 18.8 GiB | 10.32 s (0.95x) / 20.7 GiB | 24.08 s (2.22x) / 18.8 GiB | 24.52 s (2.26x) / 21.7 GiB |
+| fwd | bf16 | 64 | 5.83 s / 4.0 GiB | 5.71 s (0.98x) / 9.5 GiB | 5.89 s (1.01x) / 10.4 GiB | 8.89 s (1.53x) / 9.5 GiB | 9.14 s (1.57x) / 11.0 GiB |
+| fwd | bf16 | 128 | 10.50 s / 8.0 GiB | 10.04 s (0.96x) / 18.8 GiB | 10.24 s (0.98x) / 20.7 GiB | 24.05 s (2.29x) / 18.8 GiB | 24.48 s (2.33x) / 21.7 GiB |
+| bwd | fp16 | 64 | 21.08 s / 10.1 GiB | 20.96 s (0.99x) / 19.1 GiB | 21.20 s (1.01x) / 20.0 GiB | 37.05 s (1.76x) / 19.1 GiB | 37.36 s (1.77x) / 19.1 GiB |
+| bwd | fp16 | 128 | 38.38 s / 20.1 GiB | 37.39 s (0.97x) / 38.1 GiB | 37.88 s (0.99x) / 39.8 GiB | excluded | excluded |
+| bwd | bf16 | 64 | 20.97 s / 10.1 GiB | 20.89 s (1.00x) / 19.1 GiB | 21.12 s (1.01x) / 20.0 GiB | 36.93 s (1.76x) / 19.1 GiB | 36.92 s (1.76x) / 19.1 GiB |
+| bwd | bf16 | 128 | 38.39 s / 20.1 GiB | 37.62 s (0.98x) / 38.1 GiB | 37.88 s (0.99x) / 39.8 GiB | excluded | excluded |
+
+excluded: the Triton backward at D=128 does not finish at 1M (a known 128-wide key-tile pathology; the CUDA backward is the default), see `results/v3/STATUS.md`.
+<!-- /v3-tables:E6 -->
+
+### E8 the default's trade: the accumulator in host memory
 
 What `attention()` picks from about 1M tokens up when the monolithic call does not fit: Q/K/V on the device,
 the fp32 accumulator (the forward's output, the backward's three gradients) in host memory, against E1's
-device accumulator at the same N (time cost, device memory saved, host memory added). The E4 measurement that
-led to the default: at 1M the host accumulator costs 10-14% of the forward's wall time for 41% less device
-memory (classic_CUDA 9.5 -> 5.6 GiB; FA-2 holds 4.0); the host-resident configuration (E2) 1.21x / 1.11x /
-1.10x at 1M / 2M / 4M for 3-3.6x less.
+device accumulator at the same N. The time cost shrinks with N while the device saving stays at 40%: the
+classic CUDA forward costs 1.30x / 1.16x / 1.06x / 1.03x of the device-accumulator run at 512K / 1M / 2M /
+4M, the forward+backward 1.19x / 1.11x / 1.06x / 1.01x, for 2.8 / 5.6 / 11.2 / 22.4 GiB of device memory
+instead of 4.8 / 9.5 / 19.0 / 37.9 (forward) and 5.7 / 11.4 / 22.7 / 45.4 instead of 9.5 / 19.1 / 38.1 / 64.1
+(forward+backward; E1's 4M row needed depth 2). Against FA-2 itself that is 1.0-1.1x the time in 0.7x
+(forward) to 1.1x (forward+backward) of its device memory, plus host RAM of about 7 GiB per million tokens
+forward and 14 forward+backward. The wave backward keeps its accumulator on the device (its rows ran with
+acc=gpu in the backward, as recorded).
+
+<!-- v3-tables:E8 -->
+| arm | N | dir | E1 wall s (itr) | E8 wall s (itr) | E8/E1 | E1 dev GiB | E8 dev GiB | saved | E8 host GiB (VmHWM) | E8 acc ran |
+|---|---|---|---|---|---|---|---|---|---|---|
+| classic_CUDA | 512K | bwd | 5.31 (1) | 6.34 (1) | 1.193 | 9.54 | 5.69 | 40% | 6.8 (8.0) | cpu |
+| classic_CUDA | 1M | bwd | 20.88 (1) | 23.08 (1) | 1.105 | 19.06 | 11.37 | 40% | 14.3 (15.5) | cpu |
+| classic_CUDA | 2M | bwd | 83.08 (1) | 87.92 (1) | 1.058 | 38.12 | 22.71 | 40% | 28.4 (29.5) | cpu |
+| classic_CUDA | 4M | bwd | 340.95 (2) | 344.53 (1) | 1.011 | 64.13 | 45.42 | 29% | 52.5 (53.7) | cpu |
+| wave_CUDA | 512K | bwd | 5.40 (1) | 5.39 (1) | 0.997 | 10.00 | 10.00 | 0% | 0.0 (1.3) | gpu |
+| wave_CUDA | 1M | bwd | 21.13 (1) | 21.16 (1) | 1.001 | 19.99 | 19.99 | 0% | 0.1 (1.3) | gpu |
+| wave_CUDA | 2M | bwd | 83.85 (1) | 84.21 (1) | 1.004 | 39.95 | 39.95 | 0% | 0.2 (1.4) | gpu |
+| wave_CUDA | 4M | bwd | 379.99 (4) | 380.07 (4) | 1.000 | 76.26 | 76.26 | 0% | 5.2 (6.4) | gpu |
+| classic_CUDA | 512K | fwd | 1.48 (1) | 1.92 (1) | 1.300 | 4.75 | 2.81 | 41% | 3.4 (4.5) | cpu |
+| classic_CUDA | 1M | fwd | 5.85 (1) | 6.76 (1) | 1.155 | 9.49 | 5.61 | 41% | 7.8 (8.9) | cpu |
+| classic_CUDA | 2M | fwd | 23.30 (1) | 24.72 (1) | 1.061 | 18.97 | 11.20 | 41% | 13.6 (14.7) | cpu |
+| classic_CUDA | 4M | fwd | 92.67 (1) | 95.49 (1) | 1.031 | 37.93 | 22.38 | 41% | 26.8 (27.9) | cpu |
+| wave_CUDA | 512K | fwd | 1.54 (1) | 1.99 (1) | 1.291 | 5.22 | 3.05 | 42% | 4.3 (5.4) | cpu |
+| wave_CUDA | 1M | fwd | 6.03 (1) | 6.85 (1) | 1.136 | 10.43 | 6.08 | 42% | 8.4 (9.5) | cpu |
+| wave_CUDA | 2M | fwd | 23.98 (1) | 25.50 (1) | 1.063 | 20.84 | 12.14 | 42% | 16.7 (17.8) | cpu |
+| wave_CUDA | 4M | fwd | 96.16 (1) | 98.87 (1) | 1.028 | 41.68 | 24.28 | 42% | 32.8 (33.9) | cpu |
+<!-- /v3-tables:E8 -->
 
 ### E7 automatic mode under device budgets **[E7: pending]**
 
@@ -252,7 +457,7 @@ v2.2.3 was 1.7x behind the rivals because of its backward kernel, which v3 repla
 
 ### v2.2.3 reference: one parameter at a time (`results/profile_sweep/`, forward, A100-SXM4-80GB)
 
-Kept until E3 replaces it. Vary c at N=512K, itr=1, acc=GPU (time in s / peak device memory in GiB):
+The v2.2.3 kernels, for the record (E3 above is the v3 measurement). Vary c at N=512K, itr=1, acc=GPU (time in s / peak device memory in GiB):
 
 | c | 3 | 7 | 13 | 21 | 31 | 57 | 73 | 91 | 133 |
 |---|---|---|---|---|---|---|---|---|---|

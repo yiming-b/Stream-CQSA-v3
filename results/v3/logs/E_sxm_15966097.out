@@ -1,0 +1,38 @@
+== v3 job 15966097 on della-l08g7  Wed Oct 21 09:04:03 PM EDT 2026
+NVIDIA A100-SXM4-80GB, 210 MHz, 1410 MHz, 81920 MiB
+code /scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-34b67bf | v13 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2 | native_v2 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/native_v2/frozen/b2 | results /scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/v3 | parts: E0 E1:fwd E3:fwd E4 E1:bwd E6 E3:bwd E5 E2:fwd E2:bwd | part budget 1700s | total 3540s
+/scratch/gpfs/AKEY/yb2807/VENVs/CQSA311/bin/python
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-34b67bf/stream_cqsa/__init__.py 2.10.0+cu130 flash_attn 2.8.3
+classic module cqsa_cuda_v13 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2/cqsa_cuda_v13.cpython-311-x86_64-linux-gnu.so backward cuda
+wave module cqsa_native_v2 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/native_v2/frozen/b2/cqsa_native_v2.cpython-311-x86_64-linux-gnu.so WAVE_API 2
+1af3b98c3d2a61c0212d45f695e9fb1a  /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2/cqsa_cuda_v13.cpython-311-x86_64-linux-gnu.so
+8a070db8d7a22391fcbce5a0a75c422c  /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/native_v2/frozen/b2/cqsa_native_v2.cpython-311-x86_64-linux-gnu.so
+== part E0: budget 1700s, timeout 2000s, starts 21:04:17 -> /scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/v3/logs/15966097_E0.log
+== part E0: exit 0 (124 = timeout)  21:25:46
+== done: 128 rows run, 0 already present, 0 deferred by the budget, 1288 s
+== part E1:fwd: budget 1700s, timeout 2000s, starts 21:25:46 -> /scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/v3/logs/15966097_E1_fwd.log
+== part E1:fwd: exit 0 (124 = timeout)  21:52:49
+E1:fwd      wave_Triton    N= 4194304 D= 64 fp16 fwd c=  7 itr=min acc=gpu qkv=device: deferred (budget: 1623 s elapsed + ~281 s estimated > 1700 s)
+== done: 35 rows run, 0 already present, 1 deferred by the budget, 1623 s
+== part E3:fwd: budget 434s, timeout 554s, starts 21:52:49 -> /scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/v3/logs/15966097_E3_fwd.log
+== part E3:fwd: exit 0 (124 = timeout)  21:59:10
+E3:fwd      wave_Triton    N= 1048576 D= 64 fp16 fwd c= 31 itr=  1 acc=gpu qkv=device: deferred (budget: 381 s elapsed + ~66 s estimated > 434 s)
+E3:fwd      wave_Triton    N= 1048576 D= 64 fp16 fwd c= 57 itr=  1 acc=gpu qkv=device: deferred (budget: 381 s elapsed + ~66 s estimated > 434 s)
+E3:fwd      wave_Triton    N= 1048576 D= 64 fp16 fwd c= 73 itr=  1 acc=gpu qkv=device: deferred (budget: 381 s elapsed + ~66 s estimated > 434 s)
+E3:fwd      wave_Triton    N= 1048576 D= 64 fp16 fwd c= 91 itr=  1 acc=gpu qkv=device: deferred (budget: 381 s elapsed + ~66 s estimated > 434 s)
+E3:fwd      wave_Triton    N= 1048576 D= 64 fp16 fwd c=133 itr=  1 acc=gpu qkv=device: deferred (budget: 381 s elapsed + ~66 s estimated > 434 s)
+== done: 11 rows run, 0 already present, 25 deferred by the budget, 381 s
+== part E4: skipped, only 53 s of the job left  21:59:10
+== part E1:bwd: skipped, only 53 s of the job left  21:59:11
+== part E6: skipped, only 52 s of the job left  21:59:11
+== part E3:bwd: skipped, only 52 s of the job left  21:59:11
+== part E5: skipped, only 52 s of the job left  21:59:11
+== part E2:fwd: skipped, only 52 s of the job left  21:59:11
+== part E2:bwd: skipped, only 52 s of the job left  21:59:11
+== report  21:59:11
+report: /scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/v3/report.md (236 lines), figures ['E0.png', 'E1.png', 'E3.png'], fits.json, STATUS.md (missing 270)
+MISSING 270
+15966097||00:55:17
+15966097.batch||00:55:17
+15966097.extern||00:55:17
+== v3 job done  Wed Oct 21 09:59:16 PM EDT 2026

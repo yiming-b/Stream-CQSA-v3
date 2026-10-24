@@ -639,12 +639,15 @@ def _patch_classic_autograd(capture):
     NA.stream_cqsa_forward, NA.stream_cqsa_backward = fwd, bwd
 
 
-def smallest_depth_that_fits(q, k, v, kernel, c, iset, acc, max_itr=4):
-    """PLAN.md's depth rule for E1 / E2: the smallest itr >= 1 whose plan (the planner with this series' engine and
-    the pinned c, at this residency) fits the device. Returns (itr, plan name, reason); the deepest depth tried
-    when nothing fits (the row then runs and records its OOM)."""
+def smallest_depth_that_fits(q, k, v, kernel, c, iset, acc, max_itr=4, direction="fwd"):
+    """PLAN.md's depth rule for E1 / E2 / E8: the smallest itr >= 1 whose plan (the planner with this series' engine
+    and the pinned c, at this residency) fits the device. Returns (itr, plan name, reason); the deepest depth tried
+    when nothing fits (the row then runs and records its OOM). The wave backward keeps its accumulator on the
+    device whatever `acc` says, so a wave fwd+bwd row is judged on the device-accumulator candidates (before
+    2026-10-24 an acc=cpu wave backward row found no candidate at any depth and ran at the deepest one)."""
     import stream_cqsa
     last = None
+    acc_eff = "gpu" if (direction == "bwd" and kernel.startswith("wave") and q.is_cuda) else acc
     for itr in range(1, max_itr + 1):
         try:
             p = stream_cqsa.attention(q, k, v, is_causal=True, kernel=kernel, plan_only=True, itr=itr, c=c, interest_set=iset,
@@ -653,7 +656,7 @@ def smallest_depth_that_fits(q, k, v, kernel, c, iset, acc, max_itr=4):
             last = (itr, None, f"planner: {e}")
             continue
         host = not q.is_cuda
-        fits = any(x["ok"] and x["mode"] == "cqsa" and x["itr"] == itr and x["c"] == c and x["acc"] == acc
+        fits = any(x["ok"] and x["mode"] == "cqsa" and x["itr"] == itr and x["c"] == c and x["acc"] == acc_eff
                    and bool(x["stream_from_host"]) == host for x in p.candidates)
         last = (itr, p.name(), p.reason)
         if fits:
@@ -814,7 +817,7 @@ def _worker(row, res):
             _patch_classic_autograd(capture)
         # the depth: pinned, or PLAN.md's rule for E1 / E2 (the smallest depth >= 1 whose plan fits)
         if row["itr"] == "min":
-            itr, pname, preason, fits = smallest_depth_that_fits(q, k, v, kernel, c, iset, acc)
+            itr, pname, preason, fits = smallest_depth_that_fits(q, k, v, kernel, c, iset, acc, direction=("bwd" if bwd else "fwd"))
             res.update(itr_planned=itr, plan_name=pname, plan_reason=(preason or "")[:600], plan_fits=fits)
         else:
             itr = int(row["itr"])

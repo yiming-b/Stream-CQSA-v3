@@ -124,6 +124,19 @@ def fit(rows, B=1, H=8, D=64):
             ts = n * L * (B * H * D) / 512.0
             f.append(((e2b[N] - e1b[N]) - setup) / (ts * (h_acc + h_g) * (1 - ov)))
     cm.bwd_host_factor = float(statistics.median(f))
+    # 7. ... and with Q/K/V on the device (E4 fwd+bwd acc=cpu vs acc=gpu, classic engine, both depths), once those
+    #    rows exist with the v3 backward (the pre-5bb74b2 rows measured a no-op and were retired)
+    e4b = {(r["arm"], r["itr"], r["acc"]): r["wall_s"] for r in rows if r["exp"] == "E4" and r["direction"] == "bwd"
+           and r["engine"] == "classic" and r.get("acc_ran") == r["acc"]}
+    fd = []
+    for arm in ("classic_CUDA", "classic_Triton", "wave_Triton"):
+        for itr in (1, 2):
+            if (arm, itr, "cpu") in e4b and (arm, itr, "gpu") in e4b:
+                p_, n, L = pairs_of(M, 7, 3, itr, B=B, H=H)
+                ts = n * L * (B * H * D) / 512.0
+                fd.append((e4b[(arm, itr, "cpu")] - e4b[(arm, itr, "gpu")]) / (ts * h_acc * (1 - ov)))
+    if fd:
+        cm.bwd_host_factor_dev = float(statistics.median(fd))
     return cm
 
 
@@ -184,7 +197,7 @@ def main():
     cm = fit(rows)
     print("fitted:")
     for k_ in ("pair_rate", "kernel_ratio", "task_overhead_s", "depth_factor", "bwd_ratio", "merge_cpu_s_per_tok", "d2h_s_per_tok",
-               "gather_s_per_tok", "host_stream_setup_s", "bwd_host_factor", "overlap", "overlap_npar2"):
+               "gather_s_per_tok", "host_stream_setup_s", "bwd_host_factor", "bwd_host_factor_dev", "overlap", "overlap_npar2"):
         print(f"  {k_:22s} {getattr(cm, k_):.4g}")
     validate(cm, rows)
     picks(cm)
@@ -202,7 +215,7 @@ def main():
         p = os.path.join(ROOT, "stream_cqsa", "autoconfig.py")
         s = open(p).read()
         for k_ in ("pair_rate", "kernel_ratio", "task_overhead_s", "depth_factor", "bwd_ratio", "merge_cpu_s_per_tok",
-                   "d2h_s_per_tok", "gather_s_per_tok", "host_stream_setup_s", "bwd_host_factor", "overlap", "overlap_npar2"):
+                   "d2h_s_per_tok", "gather_s_per_tok", "host_stream_setup_s", "bwd_host_factor", "bwd_host_factor_dev", "overlap", "overlap_npar2"):
             v = getattr(cm, k_)
             s, n = re.subn(rf"^(    {k_}: float = )([^#\n]+?)(\s*#.*)?$", lambda m: f"{m.group(1)}{v:.4g}{m.group(3) or ''}", s, flags=re.M)
             assert n == 1, k_

@@ -259,10 +259,10 @@ class CostModel:
     the 4 x A100-PCIe scheduler job.
     """
     pair_rate: float = 7.207e+11        # monolithic FA-2: score pairs per second over all heads (causal 2M-4M, H=8; E1 baselines)
-    kernel_ratio: float = 0.9482       # Stream-CQSA kernel time per pair / FA-2 time per pair (v13, itr=1 rows of E1 and E3)
+    kernel_ratio: float = 0.947       # Stream-CQSA kernel time per pair / FA-2 time per pair (v13, itr=1 rows of E1 and E3)
     masked_frac: float = 0.22        # kept for calibrate(); the planner uses (l-1)/l^2 per quorum set
-    depth_factor: float = 1.009        # residual per-depth factor (E4 itr=2 vs itr=1; the per-task overhead is explicit below)
-    task_overhead_s: float = 0.002807  # fixed cost per subproblem (launch, scheduling, small-L kernel inefficiency); E1 128K-4M and E3 c=3..133
+    depth_factor: float = 1.006        # residual per-depth factor (E4 itr=2 vs itr=1; the per-task overhead is explicit below)
+    task_overhead_s: float = 0.001848  # fixed cost per subproblem (launch, scheduling, small-L kernel inefficiency); E1 128K-4M and E3 c=3..133
     # Wave engine: one launch per wave of several subproblems. Per subproblem only its grid tail remains
     # (wave_task_s); the launch gap is paid once per wave (wave_launch_s). The two sum to task_overhead_s, so a
     # W=1 wave costs what a classic subproblem costs (measured equal within 0.6%, bit-identical; layout_ab), and
@@ -270,11 +270,14 @@ class CostModel:
     wave_launch_s: float = 1.5e-3
     wave_task_s: float = 1.5e-3
     inplace_ratio: float = 1.045     # kernel time reading Q/K/V in place through the block map / gathered copies (+3-6%, layout_ab)
-    bwd_ratio: float = 3.587           # backward (fwd+bwd of a subproblem) / forward time per pair
+    bwd_ratio: float = 3.576           # backward (fwd+bwd of a subproblem) / forward time per pair
     # host-stage work of a training call (fwd+bwd) relative to the forward's: the forward moves one output
     # out and three inputs in, the backward three gradients out and five operands in, and the streamed
     # backward's scatter is not overlapped (fitted on E2/E1 of results/v3: 5.0 at 512K-2M)
     bwd_host_factor: float = 5.112
+    # ... and with Q/K/V on the device (only the gradients cross the bus, the host add runs on a worker under the
+    # next kernel): fitted on E4's fwd+bwd acc=cpu rows against their acc=gpu rows
+    bwd_host_factor_dev: float = 1.894
     # Host-stage costs per gathered token of H*D = 512 fp16 elements (the
     # measured shape); scaled by (B*H*D)/512 for other shapes.
     gather_s_per_tok: float = 3.287e-07     # host gather per gathered token, host-resident inputs (E2-E1 forward)
@@ -347,7 +350,7 @@ class CostModel:
             # a training call's host work (the forward's output and the backward's three gradients out, dO and
             # O in as well) relative to the forward's unhidden share; the backward's compute is 3-4x the
             # forward's, so its host stages never dominate the way a small forward's do (fitted on E2-E1)
-            t = compute + host * (1 - ov) * self.bwd_host_factor
+            t = compute + host * (1 - ov) * (self.bwd_host_factor if stream_from_host else self.bwd_host_factor_dev)
         else:
             t = compute + host * (1 - ov) + max(0.0, host * ov - compute)   # hidden part cannot exceed compute
         if stream_from_host:

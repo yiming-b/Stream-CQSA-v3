@@ -128,6 +128,15 @@ PLAN = {
         grid=dict(N=[M], c=[7], itr=[1], acc=["gpu"], dtype=["fp16", "bf16"], D=[64, 128], direction=["fwd", "bwd"]),
         arms=SERIES + BASELINES, qkv="device", warmup=1, reps=3, ref="fa2", node="sxm",
         parts={"all": {}}),
+    "E9": dict(
+        question="chunk reuse in the host-resident forward: the shared chunk between consecutive subproblems kept on the device "
+                 "(the classic engine's pool of 3 / 4 / 7 slots) against a flush-and-reload of every subproblem's chunks, and the "
+                 "wave engine's pool at the minimum (3) against all chunks resident (7, what it sizes itself to with room): "
+                 "transfers, time and device memory vs N and head dim",
+        grid=dict(N=[256 * K, M, 4 * M], c=[7], itr=[1], acc=["cpu"], dtype=["fp16"], D=[64, 128], direction=["fwd"],
+                  extra=["pool=flush", "pool=3", "pool=4", "pool=7"]),
+        arms=("classic_CUDA", "wave_CUDA"), qkv="host", warmup=1, reps=1, ref="spot", node="sxm",
+        parts={"all": {}}),
     "E8": dict(
         question="the v3 default: Q/K/V on the device with the accumulator in host memory (what attention() picks from "
                  "1M up) against E1's device accumulator at the same N (time cost vs device memory saved)",
@@ -155,6 +164,8 @@ def _rows_of_grid(exp, spec, grid, arms, node):
                     continue                                   # the planner refuses it (c**itr > 4096 tasks)
                 if arm not in ("wave_CUDA", "wave_Triton") and g["extra"] and str(g["extra"]).startswith("W="):
                     continue
+                if arm in ("wave_CUDA", "wave_Triton") and g["extra"] in ("pool=flush", "pool=4"):
+                    continue                                   # the wave pool has no flush mode; 3 (one wave's chunks) or all
             else:
                 r.update(c=None, itr=None, acc=None, qkv="device")
             yield r
@@ -840,6 +851,15 @@ def _worker(row, res):
             floor = wave_token_floor(N, itr, c, iset, H=H, D=D, itemsize=q.element_size())
             extra["max_wave_tokens"] = int(mult * floor)
             res.update(wave_floor_tokens=int(floor), max_wave_tokens_requested=extra["max_wave_tokens"])
+        if row.get("extra") and str(row["extra"]).startswith("pool="):
+            pv = str(row["extra"])[5:]
+            if pv == "flush":
+                extra["shared_chunks"] = False                   # every subproblem gathers its own chunks (no pool)
+            elif arm.startswith("wave"):
+                extra["pool_slots"] = int(pv)
+            else:
+                extra["shared_chunks"] = True
+                extra["chunk_pool_slots"] = int(pv)
         res["engine_expected"] = ("wave" if (arm.startswith("wave") and (not bwd or (arm == "wave_CUDA" and not host)))
                                   else "classic")
         res["kernel_requested"] = kernel

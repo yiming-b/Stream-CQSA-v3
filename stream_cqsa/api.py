@@ -483,6 +483,8 @@ def _run(q, k, v, p, *, is_causal, scale, direction, on_cuda, out_el, overrides,
     if use_wave:
         from .native_wave import wave_attention, wave_forward, wave_token_floor, in_place_possible, default_wave_tokens
         wkw = dict(itr=int(kw.get("itr", 1)), c=int(kw.get("c", 7)), interest_set=tuple(kw.get("interest_set", (0, 1, 3))))
+        # host-resident: chunk-pool slots (default: what the free memory allows); the engine's knob, not the planner's
+        wpool = {"pool_slots": int(kw["pool_slots"])} if kw.get("pool_slots") is not None else {}
         wkern = WAVE_KERNELS.get(kernel, "auto")
         floor = wave_token_floor(N, H=H, D=D, itemsize=q.element_size(), **wkw)
         retries = 0
@@ -495,12 +497,12 @@ def _run(q, k, v, p, *, is_causal, scale, direction, on_cuda, out_el, overrides,
                     binfo: dict = {}
                     out = wave_attention(q, k, v, causal=bool(is_causal), scale=scale, verbose=verbose, max_wave_tokens=wave_tokens,
                                          gather=gather, bwd_itr=(bwd_itr if isinstance(bwd_itr, int) else None),
-                                         classic_fallback=kernel not in WAVE_KERNELS, bwd_info=binfo, **wkw)
+                                         classic_fallback=kernel not in WAVE_KERNELS, bwd_info=binfo, **wkw, **wpool)
                     info = {"engine": "wave", "kernel": wkern, "max_wave_tokens": wave_tokens,
                             "gather": binfo["forward_gather"], "backward": binfo, **wkw}
                 else:
                     out, info = wave_forward(q, k, v, causal=bool(is_causal), scale=scale, verbose=verbose, max_wave_tokens=wave_tokens,
-                                             gather=gather, accumulate_on_gpu=acc_gpu, kernel=wkern, **wkw)
+                                             gather=gather, accumulate_on_gpu=acc_gpu, kernel=wkern, **wkw, **wpool)
                     info = {k_: v_ for k_, v_ in info.items() if k_ != "lse"}; info["engine"] = "wave"
                 info["wave_oom_retries"] = retries
                 break

@@ -14,9 +14,9 @@ v2 repo (released, PyPI `stream-cqsa` 2.2.3): [yiming-b/Stream-CQSA-v2](https://
 work of the "ultimate A100 kernel" program (`docs/ultimate/`): new forward and backward kernels that remove
 the decomposition's overhead on the live tiles, a wave kernel with the same design, 128-aligned chunk
 layouts, routing by a memory model, a multi-device scheduler for mixed GPUs, and one experiment plan
-(`experiments/v3/PLAN.md`) whose results are the measurement sections below (E0-E6, E8 measured on
-A100-SXM4-80GB in jobs 15966097-16119471, E2's 4M/8M rows on A100 80GB PCIe; `results/v3/STATUS.md` says which
-rows exist; E7 is still **[E7: pending]**).
+(`experiments/v3/PLAN.md`) whose results are the measurement sections below (E0-E6 and E8 complete on
+A100-SXM4-80GB, E2's 4M/8M rows on A100 80GB PCIe; E0b running; E7 not run; `results/v3/STATUS.md` has the
+row counts and job ids; the section "Missing, and what deserves to be done" lists the rest).
 
 ## How it works
 
@@ -43,8 +43,9 @@ kept query–key pair is counted exactly once, so the result is exact.
 | **routing by a memory model** | the planner models the wave's peak (`a*N + b*W`) and chooses the engine, the wave budget W and gathered-vs-in-place reads; the subproblem-count rule is gone | — |
 | **async host fold** | the wave engine's host accumulator folds on a worker under the next wave | host-streamed 1M: 9.0 s (classic 9.3 s); 2M: 34.2 vs 34.6 s |
 | **multi-device scheduler** | per-GPU rates (calibrated per model), exact live-tile work per task, LPT with a cost-aware split, reduce_scatter merge; identical schedule on every rank; heterogeneous devices supported (`stream_cqsa/scheduler.py`) | model within 2% rms of the measured 4x A100 job; the measured winner reproduced on every shape (`results/ultimate/dist_sched.md`); on 2 SXM + 2 PCIe A100s (job 15949746, `results/ultimate/dist_het.md`) LPT reaches 2.91x one GPU forward and 3.5-3.7x forward+backward at 2M where round-robin reaches 2.75x / 2.88x |
-| **correctness discipline** | every comparison against SDPA / FA-2 / fp64 forces a decomposition and asserts it ran (`tests/_decomp.py`; an unpinned call that fits is SDPA itself) | 745 tests |
-| **fixes** | a pinned `c=` without `interest_set=` silently used the c=7 quorum set in v2.1-v2.2.3 (wrong results for every c != 7; v3 re-plans the set and the engine refuses a non-perfect-difference-set pair); the autograd forward moved an 8 GiB fp32 host result to the device at 4M tokens (the 10 GiB-budget backward OOM in the OOC study) | `docs/ultimate/progress/BUG_v223_c73.md` |
+| **the accumulator in host memory by default where it is cheap** | the planner enumerates "Q/K/V on the device, accumulator on the host" and takes the smallest device peak among the residency choices predicted within 15% of the fastest (`tol=`, `CQSA_PLAN_TOL`; the monolithic call whenever it fits is unchanged); the device-resident backward keeps its fp32 dQ/dK/dV in pinned host memory when asked (it silently did not before); the cost model refit on the v3 rows (99 of 104 within 10%) | E4 / E8: 10-14% of the forward's time and 6-10% of the forward+backward's at 1M for 40% less device memory, 3% / 1% at 4M; chosen from about 1M tokens up on an A100 |
+| **correctness discipline** | every comparison against SDPA / FA-2 / fp64 forces a decomposition and asserts it ran (`tests/_decomp.py`; an unpinned call that fits is SDPA itself); every measured row pins `itr >= 1` | 852 tests collected |
+| **fixes** | a pinned `c=` without `interest_set=` silently used the c=7 quorum set in v2.1-v2.2.3 (wrong results for every c != 7; v3 re-plans the set and the engine refuses a non-perfect-difference-set pair); the autograd forward moved an 8 GiB fp32 host result to the device at 4M tokens (the 10 GiB-budget backward OOM in the OOC study); the device-resident backward ignored `accumulate_on_gpu=False` (acc=cpu saved nothing in a training call; E4 found it) | `docs/ultimate/progress/BUG_v223_c73.md`, CHANGELOG |
 
 ### What v2 brought (released as 2.2.x)
 
@@ -193,26 +194,53 @@ Stream-CQSA continues, exact.
 ## Measurements
 
 All v3 numbers come from one plan, `experiments/v3/PLAN.md`, one harness (`experiments/v3/bench.py`) and one
-results directory, `results/v3/` (`results.jsonl` = every row; `report.md` = the tables and fits; `STATUS.md` =
-which rows exist; `E*.png` = the figures). Every row records the GPU, the engine and kernel that ran, the
-subproblem count, wall-clock (median of 3 after a warm-up), peak device memory, peak host memory and the
-error against FlashAttention-2 and against float64. Every Stream-CQSA row pins the depth and asserts that
-the decomposition ran. Node types are never mixed within a table: E0-E6 are **A100-SXM4-80GB**, the 8M rows
-and E7 are **A100 80GB PCIe**.
+results directory, `results/v3/` (`results.jsonl` = every row; `report.md` = the tables, fits and figures;
+`STATUS.md` = which rows exist and which were excluded, with the job ids). Every row records the GPU, the
+engine and kernel that ran, the subproblem count, wall-clock (the median of 3 timed runs after a warm-up for
+the parameter sweeps, one timed run for the scaling ladders), peak device memory, peak host memory and the
+error against FlashAttention-2 and against float64. Node types are never mixed within a table: everything is
+**A100-SXM4-80GB** except E2's 4M / 8M rows, which are **A100 80GB PCIe** with their own baselines.
 
-### Headline (job 15958597, A100-SXM4-80GB, fp16, B=1 H=8 D=64, causal, device-resident Q/K/V, 7 subproblems)
+**The decomposition is always real.** Every Stream-CQSA row pins its depth to at least 1 (`itr=`) and the
+harness asserts that a decomposition ran: in all 400 rows the engine was the classic or the wave engine, the
+subproblem count was exactly c^itr (7 to 2,401), and none took the monolithic path. The near-FlashAttention
+ratios below are therefore the cost of the decomposition itself. (The shipped `attention()` with nothing
+pinned runs the monolithic kernel whenever it fits, which at these sizes on an 80 GB device would make the
+row FlashAttention-2 itself; that automatic mode is not what these tables measure.) Baselines are one
+FlashAttention-2 call and one SDPA call on the same device-resident tensors.
 
-| N | direction | flash_attn (one call) | v2.2.3 | v3 | v3 / flash_attn |
-|---|---|---|---|---|---|
-| 1M | forward | 5.99 s | 7.79 s (1.30x) | **5.84 s** | **0.98x** |
-| 1M | forward + backward | 15.1 s | 39.2 s CUDA / 29.0 s Triton | **15.2 s** | **1.01x** |
-| 131K | forward | 90 ms | 152 ms (1.69x) | 110 ms | 1.22x |
-| 131K | forward + backward | 238 ms | 643 ms CUDA / 503 ms Triton | 268 ms | 1.13x |
+### What was measured
+
+| id | question | status | the answer in one line |
+|---|---|---|---|
+| **E0** correctness | every series x c in {3, 7, 31, 133} x itr {1, 2} x accumulator x direction at 256K, plus bf16 and D=128 | done, 126 rows (job 15966097) | all exact: output error vs float64 0.91-1.00x FA-2's own, gradients at most 1.24x |
+| **E0b** correctness of the default's training path | the device-resident backward with the host accumulator at every c and both depths | **running** (job 16328779, 14 rows) | the c=7 rows of E4 / E8 are exact (gradient error 1.02-1.10x FA-2's) |
+| **E1** scaling, device-resident | wall and peak memory vs N in 128K..4M, c=7, both directions, four series vs FA-2 and SDPA | done, 72 rows | classic CUDA 0.95-1.00x FA-2 forward and 0.99-1.01x forward+backward from 512K up (1.27x / 1.14x at 128K); Triton 1.45-2.0x; 2-2.4x FA-2's device memory |
+| **E2** scaling, host-resident | the same ladder with Q/K/V and the accumulator in host memory, plus 4M / 8M on PCIe | done, 72 rows; the PCIe fwd+bwd rows (12) not run by decision | 1.17x / 1.06x / 1.04x FA-2 forward at 1M / 2M / 4M, 1.29x / 1.14x / 1.07x forward+backward, in 0.55-0.65x FA-2's device memory; 8M forward 0.97x FA-2 in 21 GiB |
+| **E3** c | c in {3..133} at 1M | done, 72 rows | time flat in c (0.97x to 1.03x FA-2), device memory 11.9 -> 7.2 GiB: c is the memory knob |
+| **E4** itr x accumulator | depth 1 / 2 x device / host accumulator at 1M | done, 32 rows (6 re-measured after the backward fix) | depth 2 costs 4% and saves 24%; the host accumulator costs 10-14% forward, 6-10% forward+backward, and saves 40% |
+| **E5** wave budget | 5 to 73 waves per call at c=73 | done, 20 rows | 1% of time across the range, 2.2x the memory |
+| **E6** precision, head dim | fp16 / bf16 x D 64 / 128 at 1M | done, 44 rows; the Triton D=128 backward excluded as a finding | bf16 costs what fp16 costs; D=128 0.93-0.99x FA-2's D=128 on the CUDA series |
+| **E8** the default's trade | device Q/K/V with the host accumulator vs E1 across N | done, 16 rows | 1.30x / 1.16x / 1.06x / 1.03x of the device-accumulator time at 512K / 1M / 2M / 4M forward, 1.19x / 1.11x / 1.06x / 1.01x forward+backward, for 40% less device memory at every N |
+| **E7** automatic mode vs out-of-core rivals | `attention()` with nothing pinned under device budgets, against two rectangular rivals | not run | measures the automatic path, which the paper does not present (the pinned rows above are the decomposition's cost); the v2.2.3 run of this grid is in `results/ooc_rivals/report.md` |
+
+### Headline (from E1 and E4; A100-SXM4-80GB, fp16, B=1 H=8 D=64, causal, Q/K/V on the device)
+
+| N | direction | FlashAttention-2 (one call) | Stream-CQSA, 7 subproblems, device accumulator | Stream-CQSA, 7 subproblems, host accumulator |
+|---|---|---|---|---|
+| 128K | forward | 0.09 s / 0.5 GiB | 0.11 s (1.27x) / 1.2 GiB | — |
+| 128K | forward + backward | 0.33 s / 1.3 GiB | 0.37 s (1.14x) / 2.4 GiB | — |
+| 1M | forward | 6.03 s / 4.0 GiB | 5.85 s (**0.97x**) / 9.5 GiB | 6.69 s (1.11x) / 5.6 GiB |
+| 1M | forward + backward | 21.03 s / 10.1 GiB | 20.88 s (**0.99x**) / 19.1 GiB | 23.09 s (1.10x) / 11.4 GiB |
+| 4M | forward | 97.7 s / 16.1 GiB | 92.7 s (**0.95x**) / 37.9 GiB | 95.5 s (0.98x) / 22.4 GiB |
+| 4M | forward + backward | 337.8 s / 40.3 GiB | 341.0 s (**1.01x**, depth 2) / 64.1 GiB | 344.5 s (1.02x) / 45.4 GiB |
 
 The decomposition does no extra attention work (perfect-difference-set quorums cover every chunk pair
-exactly once), so at 1M the launches, gathers and the merge are the whole overhead and vanish next to seven
-0.8-s kernels; at 131K they are a visible share. Full rows (bf16, c=73, itr=2, the wave engine, SDPA):
-`results/ultimate/engine_ab.md`; the kernel-level numbers: `docs/ultimate/03_kernels_report.md`.
+exactly once), so from 512K up the launches, gathers and the merge vanish next to the kernels; at 128K they
+are a visible share of a 90 ms call. v2.2.3's engine on the same shape was 1.30x FA-2 forward and 2.6x
+forward+backward (the engine A/B job 15958597, `results/ultimate/engine_ab.md`; the kernel-level numbers:
+`docs/ultimate/03_kernels_report.md`). The host-accumulator column is what `attention()` chooses by default
+from about 1M tokens when the monolithic call does not fit (E8).
 
 ### E0 correctness (job 15966097, A100-SXM4-80GB)
 
@@ -232,6 +260,17 @@ rounding of the gradient accumulation at c=133, itr=2), bf16 ~8e-4 as the format
 | classic_Triton | 32 | 2.4e-03 | 2.9e-03 | 2.2e-04 | 1.00 | 2.6e-03 | 1.24 |
 | wave_Triton | 32 | 2.4e-03 | 2.9e-03 | 2.2e-04 | 1.00 | 2.6e-03 | 1.24 |
 <!-- /v3-tables:E0 -->
+
+### E0b correctness of the default's training path **[E0b: running, job 16328779]**
+
+The device-resident backward with the host accumulator (Q/K/V on the device, dQ/dK/dV accumulated in host
+memory: the path the default takes for training from about 1M tokens, added in v3.0) at c in {3, 7, 31, 133}
+x itr {1, 2} at 256K, classic CUDA and Triton, against FlashAttention-2 and float64. E0's host-accumulator
+rows streamed Q/K/V from the host, a different code path; E4 and E8 cover this one at c=7 only (exact,
+gradient error 1.02-1.10x FA-2's own).
+
+<!-- v3-tables:E0b -->
+<!-- /v3-tables:E0b -->
 
 ### E1 scaling, device-resident
 
@@ -449,85 +488,47 @@ acc=gpu in the backward, as recorded).
 | wave_CUDA | 4M | fwd | 96.16 (1) | 98.87 (1) | 1.028 | 41.68 | 24.28 | 42% | 32.8 (33.9) | cpu |
 <!-- /v3-tables:E8 -->
 
-### E7 automatic mode under device budgets **[E7: pending]**
+### E7 automatic mode under device budgets (not run)
 
 `attention()` with nothing pinned against FA-2 resident and two rectangular out-of-core rivals at budgets of
-10/20/40/80 GiB (the v2.2.3 run of this grid: `results/ooc_rivals/report.md`; on the 1M backward at 10 GiB
-v2.2.3 was 1.7x behind the rivals because of its backward kernel, which v3 replaces).
+10/20/40/80 GiB. Not run on v3: it measures the automatic path (monolithic when it fits, the planner's choice
+otherwise), which is the shipped default but not what the paper presents; the pinned rows above are the
+decomposition's cost. The v2.2.3 run of this grid is in `results/ooc_rivals/report.md` (on the 1M backward
+at 10 GiB v2.2.3 was 1.7x behind the rivals because of its backward kernel, which v3 replaced). Worth
+running if the rivals comparison is to be re-stated for v3.
 
-### v2.2.3 reference: one parameter at a time (`results/profile_sweep/`, forward, A100-SXM4-80GB)
+### Missing, and what deserves to be done
 
-The v2.2.3 kernels, for the record (E3 above is the v3 measurement). Vary c at N=512K, itr=1, acc=GPU (time in s / peak device memory in GiB):
+Measurements:
 
-| c | 3 | 7 | 13 | 21 | 31 | 57 | 73 | 91 | 133 |
-|---|---|---|---|---|---|---|---|---|---|
-| classic, CUDA | 1.98 / 5.97 | 1.99 / 4.74 | 2.01 / 4.12 | 2.04 / 3.76 | 2.08 / 3.58 | 2.16 / 3.58 | 2.19 / 3.58 | 2.24 / 3.58 | 2.32 / 3.58 |
-| classic, Triton | 2.23 / 5.97 | 2.24 / 4.74 | 2.26 / 4.12 | 2.29 / 3.76 | 2.35 / 3.58 | 2.44 / 3.58 | 2.50 / 3.58 | 2.59 / 3.58 | 2.79 / 3.58 |
-| wave, CUDA | 2.01 / 5.61 | 2.02 / 6.64 | 2.00 / 7.68 | 2.02 / 7.48 | 2.04 / 7.56 | 2.08 / 7.61 | 2.09 / 7.64 | 2.08 / 7.64 | 2.13 / 7.67 |
-| wave, Triton | 2.32 / 10.8 | 2.34 / 13.9 | 2.37 / 17.0 | 2.42 / 17.6 | 2.45 / 18.8 | 2.50 / 18.9 | 2.55 / 19.0 | 2.57 / 20.0 | 2.63 / 20.1 |
+- **E0b** is running (job 16328779); its table replaces the placeholder above when it lands.
+- **E2's PCIe forward+backward rows** (4M and 8M host-resident with their baselines, 12 rows) are a recorded
+  decision, not run: 1.5-3 h per row at 150 GB of host RAM on a queue measured in days, and the SXM 4M rows
+  plus the PCIe forward rows already show the host-resident backward's behaviour. Run them if the paper wants
+  the 8M forward+backward line (`slurm/v3/E_pcie.slurm`, part `E2:pcie_bwd`).
+- **E7** as above.
+- **The Triton backward at D=128** does not finish at 1M (a known 128-wide key-tile pathology, recorded as a
+  finding in `results/v3/STATUS.md`). The CUDA backward is the default and unaffected; this only matters for a
+  Triton-only installation at head dim 128.
+- **H100**: `dist_cita/` is the offline bundle for an H100 node (setup, the test and experiment notebook);
+  its results would be the first non-A100 numbers and decide whether an FA-3-based sm90 kernel is worth
+  building.
+- **Multi-GPU**: the heterogeneous job (2 SXM + 2 PCIe, `results/ultimate/dist_het.md`) measured all_reduce
+  faster than reduce_scatter + all_gather for a replicated output; the default is still reduce_scatter and
+  needs one 4-GPU job to settle.
 
-The classic engine pays per launch (17% from c=3 to c=133 on CUDA, 25% on Triton); the wave engine
-is nearly flat (6% and 13%) and wins from c=21 up on CUDA and from c=91 on Triton. The classic
-engine's memory falls with c to the floor of Q/K/V plus the fp32 output; the wave engine packs a
-whole wave (up to 2M tokens) of partial outputs, so its peak is higher and set by the wave budget.
+Engineering leads the measurements point at (each a few rows to measure):
 
-Vary N at c=7 (x = N / 1e6; quadratic fit of the time over 64K..2M, R² >= 0.998 throughout):
+- The host-streamed backward (E2) costs 1.29x at 1M where the device-resident host-accumulator backward
+  (E8) costs 1.11x: the streamed path's host scatter is synchronous by design (`CQSA_SCATTER_ASYNC`, off);
+  an A/B at 1M and 2M would say whether the async fold closes the gap.
+- The W=1 wave forward is 1.7-2.6% behind the classic engine per task (E1, E5); the target was 1%.
+- v3.0.0 itself: the release build has been exercised module by module; one full build and the suite on the
+  result is the remaining gate, then the CHANGELOG's numbers and the wheel matrix.
 
-| series | classic, CUDA | classic, Triton | wave, CUDA | wave, Triton |
-|---|---|---|---|---|
-| itr=1, acc=GPU | 7.22x² − 0.15x + 0.06 | 8.05x² − 0.04x + 0.03 | 7.43x² − 0.13x + 0.03 | 8.40x² − 0.09x + 0.05 |
-| itr=1, acc=CPU | 7.16x² + 1.02x + 0.25 | 8.13x² + 0.48x + 0.20 | 7.68x² + 0.86x + 0.00 | 8.65x² + 1.41x + 0.02 |
-| itr=2, acc=GPU | 7.21x² + 0.40x + 0.06 | 7.89x² + 0.31x + 0.07 | 7.36x² + 0.03x + 0.05 | 8.26x² + 0.43x + 0.02 |
-| itr=2, acc=CPU | 6.12x² + 3.09x + 1.10 | 7.58x² + 0.76x + 1.11 | 7.95x² + 1.92x − 0.11 | 8.91x² + 2.78x − 0.08 |
-
-The quadratic coefficient is the kernel: Triton is 11-16% behind CUDA at this head dim (the known
-ratio of Triton's FlashAttention-2 forward), and the wave engine is within 3-4% of the classic
-engine on the same kernel. The linear and constant terms are the engine overheads: acc=CPU adds
-about 1 s per M tokens; itr=2 adds the launches, which the wave engine removes (its itr=2, acc=GPU
-linear term is 0.03 against 0.40). At 2M tokens with acc=CPU the classic engine is 5-7% faster
-than the wave engine in this sweep because its per-subproblem host transfers overlap with compute while
-the wave engine then merged each wave on the host synchronously (the fold now runs on a worker under
-the next wave and the wave is 1-3% ahead, `results/ultimate/wave_merge_ab.json`). `attention()` now
-routes by the memory model (`autoconfig.plan`, engines axis): the wave engine runs every device-resident,
-device-accumulator call whenever its wave fits (a W=1 wave costs what a classic subproblem costs), with
-the wave budget W halved down to one subproblem per wave before the depth grows and gathered Q/K/V copies
-(3-6% faster than in-place reads) given up only when they do not fit; host-resident inputs are enumerated
-on both engines and the smaller device footprint wins a tie; host-accumulator backwards stay on the classic
-pipeline. Peak device memory is linear in N for the classic engine
-(9.0 GiB per M tokens at itr=1 acc=GPU, 5.3 at acc=CPU, 6.8 / 4.8 at itr=2). The wave engine's is
-not: it holds a whole wave of packed partial outputs, and the wave is capped by a token budget (2M
-packed tokens by default), so the fit is `peak = a*N + b*W_wave + c` with W_wave the largest wave the
-planner forms: wave CUDA 6.98*N + 1.92*W (R² 0.9998; Q/K/V + fp32 output + accumulator per resident
-token, one fp32 partial output per packed token), wave Triton 4.84*N + 7.79*W (R² 0.978; the wave is
-gathered into packed fp16 Q/K/V copies as well; both pooled over the c sweep and the N series, per-series
-fits in `fits.json`). W_wave rises with N and with c until it hits the
-budget (1.6M packed tokens at 512K, 1.8M from 1M on), which is the plateau in the plots. The sweep ran with
-the v2.2.0 default budget of 2M; since v2.2.1 the default is min(2M, max(512K, N)), which at 512K, itr=1
-gives 4 waves and a 4.8 GiB peak instead of 6.6 at a time cost of at most 1.3%. Within a
-wave the subproblems run in one batched launch, so the GPU schedules all of them together; waves run
-one after another.
-
-![profile sweep](results/profile_sweep/profile_sweep.png)
-
-## v2.2.3 paper re-run (A100 80GB PCIe, `results/paper_rerun/`)
-
-The paper's single-GPU experiments re-run with the v2.2.3 engine (E1/E2 of the v3 plan supersede this table) (B=1 H=8 D=64, causal, fp16 / bf16, 262K-16.8M
-tokens, automatic depth with a floor of 1, every measurement in its own process). Baselines run on
-device-resident Q/K/V; Stream-CQSA streams Q/K/V from host memory (acc=GPU / acc=CPU = where the fp32
-accumulator lives). Native CUDA kernel, fp16 (time / peak device memory; ratio = Stream-CQSA's faster arm
-over FlashAttention-2):
-
-| N | FA-2 fwd | Stream-CQSA fwd | ratio | FA-2 fwd+bwd | Stream-CQSA fwd+bwd | ratio |
-|---|---|---|---|---|---|---|
-| 1.0M | 7.7 s / 5.0 GiB | 11.2 s / 6.5 GiB | 1.45x | 24.9 s / 10.1 GiB | 52.1 s / 13.6 GiB | 2.10x |
-| 4.2M | 128.4 s / 20.1 GiB | 153.2 s / 25.9 GiB | 1.19x | 405.1 s / 40.3 GiB | 799.2 s / 46.5 GiB | 1.97x |
-| 8.4M | 534.2 s / 40.3 GiB | 595.6 s / 51.8 GiB | 1.12x | not run (> 79.3 GiB) | 3189.8 s / 44.8 GiB (acc=CPU) | only Stream-CQSA |
-| 16.8M | not run (> 79.3 GiB) | 2536.2 s / 32.0 GiB (acc=CPU) | only Stream-CQSA | not run | 14353.0 s / 38.4 GiB (acc=CPU) | only Stream-CQSA |
-
-Full tables (both dtypes, SDPA mem-efficient, accuracy against float64, the Triton kernel set as its own
-table, not-run reasons): `results/paper_rerun/tables_native.md`, `tables_triton.md`; regenerate with
-`python results/paper_rerun/make_tables.py`. The forward+backward cost (~2x) is the v11 backward kernel
-this release ships; the Triton backward is already faster (732 s at 4.2M).
+v2.2.3's own measurements (the profile sweep and the paper re-run on the v2 kernels) remain in
+`results/profile_sweep/` and `results/paper_rerun/`, described in the v2 repository's README; E1-E4 above
+supersede them.
 
 ## License
 

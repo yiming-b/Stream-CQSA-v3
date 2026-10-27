@@ -142,6 +142,9 @@ def sections(rows):
     e0 = by(rows, exp="E0")
     S["E0"] = [f"{sum(r.get('status') == 'ok' for r in e0)} of {len(e0)} rows ran and are exact; the worst errors per series (the reference is FlashAttention-2's output and gradients; "
                "the fp64 columns compare both to a float64 SDPA):", ""] + summary_e0(e0)[2:]
+    e0b = by(rows, exp="E0b")
+    S["E0b"] = ([f"{sum(r.get('status') == 'ok' for r in e0b)} of {len(e0b)} rows ran and are exact (the reference is FlashAttention-2; fp64 = a float64 SDPA):", ""]
+                + summary_e0(e0b)[2:]) if e0b else ["_no E0b rows yet_", ""]
     S["E1"] = table_scaling("E1", rows, base)
     S["E2"] = (["**A100-SXM4-80GB**, Q/K/V in pinned host memory and the accumulator in host memory (ratios against E1's resident FA-2 rows of the same N):", ""]
                + table_scaling("E2", rows, base, host_col=True)

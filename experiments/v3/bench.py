@@ -87,6 +87,12 @@ PLAN = {
                      dict(N=[256 * K], c=[7], itr=[1], acc=["gpu"], dtype=["fp16"], D=[128], direction=["fwd", "bwd"])],
         arms=SERIES, qkv="by_acc", warmup=0, reps=1, ref="fa2", node="sxm",
         parts={"all": {}}),
+    "E0b": dict(
+        question="correctness of the device-resident host-accumulator backward (the training path the default takes from 1M up): "
+                 "Q/K/V on the device, dQ/dK/dV accumulated in host memory, at every quorum size and both depths",
+        grid=dict(N=[256 * K], c=[3, 7, 31, 133], itr=[1, 2], acc=["cpu"], dtype=["fp16"], D=[64], direction=["bwd"]),
+        arms=("classic_CUDA", "classic_Triton"), qkv="device", warmup=0, reps=1, ref="fa2", node="sxm",
+        parts={"all": {}}),
     "E1": dict(
         question="scaling: wall and peak memory vs N, device-resident, at the depth the memory allows",
         grid=dict(N=N_LADDER, c=[7], itr=["min"], acc=["gpu"], dtype=["fp16"], D=[64], direction=["fwd", "bwd"]),
@@ -1549,7 +1555,7 @@ def cmd_report(a):
                     figure_scaling(exp + " (PCIe)", pcie, {}, png2)
                     figs.append(png2)
                     lines += [f"![{exp} PCIe]({os.path.basename(png2)})", ""]
-            elif exp == "E0":
+            elif exp in ("E0", "E0b"):
                 lines += summary_e0(ex)
                 figure_errors(exp, ex, png)
                 worst = [r for r in ex if r.get("status") == "ok" and (r.get("fp64_ratio_fa2") or 0) > 1.2 or (r.get("fp64_dq_ratio_fa2") or 0) > 1.2]

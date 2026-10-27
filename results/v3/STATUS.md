@@ -1,10 +1,11 @@
-# results/v3 status (2026-10-24 01:21)
+# results/v3 status (2026-10-27 13:22)
 
-`/scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/v3/results.jsonl`: 444 distinct configurations recorded (last row per key).
+`/scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/v3/results.jsonl`: 458 distinct configurations recorded (last row per key).
 
 | experiment | part | planned | ok | oom | error | missing | jobs |
 |---|---|---|---|---|---|---|---|
 | E0 | all | 126 | 126 | 0 | 0 | 0 | 15966097 |
+| E0b | all | 14 | 14 | 0 | 0 | 0 | 16328779 |
 | E1 | fwd | 36 | 36 | 0 | 0 | 0 | 15966097, 16003186 |
 | E1 | bwd | 36 | 36 | 0 | 0 | 0 | 16005563, 16007771, 16011674, 16056869, 16092420 |
 | E2 | fwd | 24 | 24 | 0 | 0 | 0 | 16072865, 16074280, 16074929 |

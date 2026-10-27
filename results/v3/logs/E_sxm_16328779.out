@@ -1,0 +1,20 @@
+== v3 job 16328779 on della-l09g2  Tue Oct 27 01:18:42 PM EDT 2026
+NVIDIA A100-SXM4-80GB, 210 MHz, 1410 MHz, 81920 MiB
+code /scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-e7ca00f | v13 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2 | native_v2 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/native_v2/frozen/b2 | results /scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/v3 | parts: E0b | part budget 0s | total 3540s
+/scratch/gpfs/AKEY/yb2807/VENVs/CQSA311/bin/python
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-e7ca00f/stream_cqsa/__init__.py 2.10.0+cu130 flash_attn 2.8.3
+classic module cqsa_cuda_v13 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2/cqsa_cuda_v13.cpython-311-x86_64-linux-gnu.so backward cuda
+wave module cqsa_native_v2 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/native_v2/frozen/b2/cqsa_native_v2.cpython-311-x86_64-linux-gnu.so WAVE_API 2
+1af3b98c3d2a61c0212d45f695e9fb1a  /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2/cqsa_cuda_v13.cpython-311-x86_64-linux-gnu.so
+8a070db8d7a22391fcbce5a0a75c422c  /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/native_v2/frozen/b2/cqsa_native_v2.cpython-311-x86_64-linux-gnu.so
+== part E0b: budget 3347s, timeout 3467s, starts 13:18:55 -> /scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/v3/logs/16328779_E0b.log
+== part E0b: exit 0 (124 = timeout)  13:22:04
+== done: 14 rows run, 0 already present, 0 deferred by the budget, 187 s
+== report  13:22:04
+report: /scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/v3/report.md (594 lines), figures ['E0.png', 'E0b.png', 'E1.png', 'E2_pcie.png', 'E2.png', 'E3.png', 'E4.png', 'E5.png', 'E6.png', 'E8.png'], fits.json, STATUS.md (missing 0)
+MISSING 0
+16328779||00:03:33
+16328779.batch||00:03:33
+16328779.extern||00:03:33
+== v3 job done  Tue Oct 27 01:22:11 PM EDT 2026
+== chain ends: missing=0 deferred=0 hop=0

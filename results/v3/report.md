@@ -1,6 +1,6 @@
 # Stream-CQSA v3 experiments (experiments/v3/PLAN.md): report
 
-Generated 2026-10-24 01:21 by `experiments/v3/bench.py report` from `results/v3/results.jsonl` (466 rows, 444 configurations; the last row per key). GPUs: NVIDIA A100 80GB PCIe, NVIDIA A100-SXM4-80GB. Jobs: 15966097, 16003186, 16005563, 16007771, 16011674, 16056869, 16057173, 16059599, 16061624, 16061811, 16063609, 16070367, 16072865, 16074280, 16074929, 16075878, 16077768, 16079116, 16079918, 16092420, 16094767, 16113653, 16115186, 16115960, 16116751, 16119471. Modules: cqsa_cuda_v13 / cqsa_native_v2.
+Generated 2026-10-27 13:22 by `experiments/v3/bench.py report` from `results/v3/results.jsonl` (480 rows, 458 configurations; the last row per key). GPUs: NVIDIA A100 80GB PCIe, NVIDIA A100-SXM4-80GB. Jobs: 15966097, 16003186, 16005563, 16007771, 16011674, 16056869, 16057173, 16059599, 16061624, 16061811, 16063609, 16070367, 16072865, 16074280, 16074929, 16075878, 16077768, 16079116, 16079918, 16092420, 16094767, 16113653, 16115186, 16115960, 16116751, 16119471, 16328779. Modules: cqsa_cuda_v13 / cqsa_native_v2.
 
 B=1 H=8 causal; wall = median of the timed runs (fwd: one attention() call; bwd: forward + torch.autograd.grad), min alongside; peak = torch.cuda.max_memory_allocated over the call, workspace = peak minus what was resident before it; host = VmHWM delta over the timed runs; /FA-2 and /SDPA = wall ratios against the resident monolithic baselines of the same (node type, N, D, dtype, direction) (the experiment's own first, E1's / E6's otherwise); ref = the reference arm of the row (FA-2 = flash_attn, or SDPA-flash = torch SDPA on its flash backend where flash_attn is not installed); rel = norm-relative error against that arm on the same inputs (grads: the worst of dq/dk/dv); fp64 = norm-relative error on 128 sampled rows against an fp64 reference, with the ratio to the reference arm's own fp64 error on the same rows in parentheses (PLAN.md asks <= 1.2). Every Stream-CQSA row pins itr and c and asserts the decomposition it reports; `[*]` marks an engine other than the series' nominal one (documented routing: the wave backward runs on the CUDA kernel and on device-resident inputs only, so wave_Triton fwd+bwd and host-resident wave backwards run on the classic engine; the wave backward keeps a device accumulator, so wave_CUDA acc=cpu fwd+bwd rows ran with acc=gpu in the backward).
 
@@ -149,6 +149,36 @@ Worst case per series over all E0 rows (ok rows only; the reference arm is FA-2)
 Rows above 1.2x FA-2's own fp64 error: 16 -- E0:all      classic_CUDA   N=  262144 D= 64 fp16 bwd c= 31 itr=  2 acc=cpu qkv=host; E0:all      classic_CUDA   N=  262144 D= 64 fp16 bwd c= 31 itr=  2 acc=gpu qkv=device; E0:all      classic_CUDA   N=  262144 D= 64 fp16 bwd c=133 itr=  1 acc=cpu qkv=host; E0:all      classic_CUDA   N=  262144 D= 64 fp16 bwd c=133 itr=  1 acc=gpu qkv=device; E0:all      wave_CUDA      N=  262144 D= 64 fp16 bwd c= 31 itr=  2 acc=cpu qkv=host; E0:all      wave_CUDA      N=  262144 D= 64 fp16 bwd c= 31 itr=  2 acc=gpu qkv=device; E0:all      wave_CUDA      N=  262144 D= 64 fp16 bwd c=133 itr=  1 acc=cpu qkv=host; E0:all      wave_CUDA      N=  262144 D= 64 fp16 bwd c=133 itr=  1 acc=gpu qkv=device
 
 ![E0](E0.png)
+
+## E0b: correctness of the device-resident host-accumulator backward (the training path the default takes from 1M up): Q/K/V on the device, dQ/dK/dV accumulated in host memory, at every quorum size and both depths
+
+| N | D | dtype | dir | c | itr | acc | qkv | W | arm | engine that ran | wall s | min s | peak GiB | workspace | host GiB | /FA-2 | /SDPA | ref | rel vs ref | grads | fp64 (x ref) | fp64 dq (x ref) | status |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 256K | 64 | fp16 | bwd | 3 | 1 | cpu | device | - | classic_CUDA | classic/cuda itr=1 n_sub=3 | 3.252 | 3.252 | 3.45 | 2.44 | 4.43 | 2.492 | 2.318 | FA-2 | 1.1e-04 | 3.6e-04 | 2.7e-05 (0.96) | 3.2e-04 (1.05) | ok |
+| 256K | 64 | fp16 | bwd | 3 | 2 | cpu | device | - | classic_CUDA | classic/cuda itr=2 n_sub=9 | 3.243 | 3.243 | 2.89 | 1.88 | 3.32 | 2.486 | 2.312 | FA-2 | 1.4e-04 | 3.6e-04 | 2.7e-05 (0.94) | 3.3e-04 (1.06) | ok |
+| 256K | 64 | fp16 | bwd | 7 | 1 | cpu | device | - | classic_CUDA | classic/cuda itr=1 n_sub=7 | 2.921 | 2.921 | 2.85 | 1.84 | 3.36 | 2.239 | 2.082 | FA-2 | 1.5e-04 | 3.6e-04 | 2.7e-05 (0.94) | 3.3e-04 (1.08) | ok |
+| 256K | 64 | fp16 | bwd | 7 | 2 | cpu | device | - | classic_CUDA | classic/cuda itr=2 n_sub=49 | 4.936 | 4.936 | 2.52 | 1.51 | 3.26 | 3.783 | 3.519 | FA-2 | 1.9e-04 | 3.6e-04 | 2.6e-05 (0.93) | 3.4e-04 (1.10) | ok |
+| 256K | 64 | fp16 | bwd | 31 | 1 | cpu | device | - | classic_CUDA | classic/cuda itr=1 n_sub=31 | 3.644 | 3.644 | 2.52 | 1.51 | 3.06 | 2.793 | 2.598 | FA-2 | 2.0e-04 | 3.6e-04 | 2.6e-05 (0.92) | 3.5e-04 (1.13) | ok |
+| 256K | 64 | fp16 | bwd | 31 | 2 | cpu | device | - | classic_CUDA | classic/cuda itr=2 n_sub=961 | 17.710 | 17.710 | 2.52 | 1.51 | 2.70 | 13.574 | 12.625 | FA-2 | 2.5e-04 | 3.6e-04 | 2.6e-05 (0.92) | 3.8e-04 (1.24) | ok |
+| 256K | 64 | fp16 | bwd | 133 | 1 | cpu | device | - | classic_CUDA | classic/cuda itr=1 n_sub=133 | 6.150 | 6.150 | 2.52 | 1.51 | 2.69 | 4.713 | 4.384 | FA-2 | 2.4e-04 | 3.6e-04 | 2.6e-05 (0.91) | 3.7e-04 (1.21) | ok |
+| 256K | 64 | fp16 | bwd | 3 | 1 | cpu | device | - | classic_Triton | classic/triton itr=1 n_sub=3 | 4.103 | 4.103 | 3.61 | 2.60 | 4.42 | 3.145 | 2.925 | FA-2 | 3.2e-04 | 5.6e-04 | 2.7e-05 (0.96) | 3.3e-04 (1.07) | ok |
+| 256K | 64 | fp16 | bwd | 3 | 2 | cpu | device | - | classic_Triton | classic/triton itr=2 n_sub=9 | 4.072 | 4.072 | 3.00 | 1.99 | 3.34 | 3.121 | 2.903 | FA-2 | 3.2e-04 | 4.6e-04 | 2.7e-05 (0.94) | 3.3e-04 (1.08) | ok |
+| 256K | 64 | fp16 | bwd | 7 | 1 | cpu | device | - | classic_Triton | classic/triton itr=1 n_sub=7 | 3.725 | 3.725 | 2.95 | 1.94 | 3.34 | 2.855 | 2.655 | FA-2 | 3.2e-04 | 4.5e-04 | 2.7e-05 (0.94) | 3.4e-04 (1.09) | ok |
+| 256K | 64 | fp16 | bwd | 7 | 2 | cpu | device | - | classic_Triton | classic/triton itr=2 n_sub=49 | 5.882 | 5.882 | 2.52 | 1.51 | 3.05 | 4.508 | 4.193 | FA-2 | 3.2e-04 | 3.8e-04 | 2.6e-05 (0.93) | 3.4e-04 (1.10) | ok |
+| 256K | 64 | fp16 | bwd | 31 | 1 | cpu | device | - | classic_Triton | classic/triton itr=1 n_sub=31 | 4.555 | 4.555 | 2.52 | 1.51 | 3.03 | 3.491 | 3.247 | FA-2 | 3.2e-04 | 3.8e-04 | 2.6e-05 (0.93) | 3.5e-04 (1.13) | ok |
+| 256K | 64 | fp16 | bwd | 31 | 2 | cpu | device | - | classic_Triton | classic/triton itr=2 n_sub=961 | 23.462 | 23.462 | 2.52 | 1.51 | 2.70 | 17.983 | 16.726 | FA-2 | 3.2e-04 | 3.7e-04 | 2.6e-05 (0.91) | 3.8e-04 (1.24) | ok |
+| 256K | 64 | fp16 | bwd | 133 | 1 | cpu | device | - | classic_Triton | classic/triton itr=1 n_sub=133 | 7.718 | 7.718 | 2.52 | 1.51 | 2.71 | 5.915 | 5.502 | FA-2 | 3.2e-04 | 3.7e-04 | 2.6e-05 (0.92) | 3.7e-04 (1.21) | ok |
+
+Worst case per series over all E0 rows (ok rows only; the reference arm is FA-2):
+
+| series | rows | max rel vs FA-2 (output) | max rel vs FA-2 (grads) | max fp64 err (output) | max fp64 err / FA-2's | max fp64 err (dQ) | max fp64 dQ err / FA-2's |
+|---|---|---|---|---|---|---|---|
+| classic_CUDA | 7 | 2.5e-04 | 3.6e-04 | 2.7e-05 | 0.96 | 3.8e-04 | 1.24 |
+| classic_Triton | 7 | 3.2e-04 | 5.6e-04 | 2.7e-05 | 0.96 | 3.8e-04 | 1.24 |
+
+Rows above 1.2x FA-2's own fp64 error: 4 -- E0b:all      classic_CUDA   N=  262144 D= 64 fp16 bwd c= 31 itr=  2 acc=cpu qkv=device; E0b:all      classic_CUDA   N=  262144 D= 64 fp16 bwd c=133 itr=  1 acc=cpu qkv=device; E0b:all      classic_Triton N=  262144 D= 64 fp16 bwd c= 31 itr=  2 acc=cpu qkv=device; E0b:all      classic_Triton N=  262144 D= 64 fp16 bwd c=133 itr=  1 acc=cpu qkv=device
+
+![E0b](E0b.png)
 
 ## E1: scaling: wall and peak memory vs N, device-resident, at the depth the memory allows
 

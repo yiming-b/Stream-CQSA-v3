@@ -15,7 +15,7 @@ work of the "ultimate A100 kernel" program (`docs/ultimate/`): new forward and b
 the decomposition's overhead on the live tiles, a wave kernel with the same design, 128-aligned chunk
 layouts, routing by a memory model, a multi-device scheduler for mixed GPUs, and one experiment plan
 (`experiments/v3/PLAN.md`) whose results are the measurement sections below (E0-E6 and E8 complete on
-A100-SXM4-80GB, E2's 4M/8M rows on A100 80GB PCIe; E0b running; E7 not run; `results/v3/STATUS.md` has the
+A100-SXM4-80GB, E2's 4M/8M rows on A100 80GB PCIe; E7 not run; `results/v3/STATUS.md` has the
 row counts and job ids; the section "Missing, and what deserves to be done" lists the rest).
 
 ## How it works
@@ -214,7 +214,7 @@ FlashAttention-2 call and one SDPA call on the same device-resident tensors.
 | id | question | status | the answer in one line |
 |---|---|---|---|
 | **E0** correctness | every series x c in {3, 7, 31, 133} x itr {1, 2} x accumulator x direction at 256K, plus bf16 and D=128 | done, 126 rows (job 15966097) | all exact: output error vs float64 0.91-1.00x FA-2's own, gradients at most 1.24x |
-| **E0b** correctness of the default's training path | the device-resident backward with the host accumulator at every c and both depths | **running** (job 16328779, 14 rows) | the c=7 rows of E4 / E8 are exact (gradient error 1.02-1.10x FA-2's) |
+| **E0b** correctness of the default's training path | the device-resident backward with the host accumulator at every c and both depths | done, 14 rows (job 16328779) | all exact: output error vs float64 0.96x FA-2's own, gradients at most 1.24x (c=31 and 133, as in E0) |
 | **E1** scaling, device-resident | wall and peak memory vs N in 128K..4M, c=7, both directions, four series vs FA-2 and SDPA | done, 72 rows | classic CUDA 0.95-1.00x FA-2 forward and 0.99-1.01x forward+backward from 512K up (1.27x / 1.14x at 128K); Triton 1.45-2.0x; 2-2.4x FA-2's device memory |
 | **E2** scaling, host-resident | the same ladder with Q/K/V and the accumulator in host memory, plus 4M / 8M on PCIe | done, 72 rows; the PCIe fwd+bwd rows (12) not run by decision | 1.17x / 1.06x / 1.04x FA-2 forward at 1M / 2M / 4M, 1.29x / 1.14x / 1.07x forward+backward, in 0.55-0.65x FA-2's device memory; 8M forward 0.97x FA-2 in 21 GiB |
 | **E3** c | c in {3..133} at 1M | done, 72 rows | time flat in c (0.97x to 1.03x FA-2), device memory 11.9 -> 7.2 GiB: c is the memory knob |
@@ -261,7 +261,7 @@ rounding of the gradient accumulation at c=133, itr=2), bf16 ~8e-4 as the format
 | wave_Triton | 32 | 2.4e-03 | 2.9e-03 | 2.2e-04 | 1.00 | 2.6e-03 | 1.24 |
 <!-- /v3-tables:E0 -->
 
-### E0b correctness of the default's training path **[E0b: running, job 16328779]**
+### E0b correctness of the default's training path (job 16328779)
 
 The device-resident backward with the host accumulator (Q/K/V on the device, dQ/dK/dV accumulated in host
 memory: the path the default takes for training from about 1M tokens, added in v3.0) at c in {3, 7, 31, 133}
@@ -270,6 +270,12 @@ rows streamed Q/K/V from the host, a different code path; E4 and E8 cover this o
 gradient error 1.02-1.10x FA-2's own).
 
 <!-- v3-tables:E0b -->
+14 of 14 rows ran and are exact (the reference is FlashAttention-2; fp64 = a float64 SDPA):
+
+| series | rows | max rel vs FA-2 (output) | max rel vs FA-2 (grads) | max fp64 err (output) | max fp64 err / FA-2's | max fp64 err (dQ) | max fp64 dQ err / FA-2's |
+|---|---|---|---|---|---|---|---|
+| classic_CUDA | 7 | 2.5e-04 | 3.6e-04 | 2.7e-05 | 0.96 | 3.8e-04 | 1.24 |
+| classic_Triton | 7 | 3.2e-04 | 5.6e-04 | 2.7e-05 | 0.96 | 3.8e-04 | 1.24 |
 <!-- /v3-tables:E0b -->
 
 ### E1 scaling, device-resident
@@ -501,7 +507,6 @@ running if the rivals comparison is to be re-stated for v3.
 
 Measurements:
 
-- **E0b** is running (job 16328779); its table replaces the placeholder above when it lands.
 - **E2's PCIe forward+backward rows** (4M and 8M host-resident with their baselines, 12 rows) are a recorded
   decision, not run: 1.5-3 h per row at 150 GB of host RAM on a queue measured in days, and the SXM 4M rows
   plus the PCIe forward rows already show the host-resident backward's behaviour. Run them if the paper wants

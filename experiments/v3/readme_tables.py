@@ -135,6 +135,30 @@ def table_e6(rows, base):
     return out + ["", "excluded: the Triton backward at D=128 does not finish at 1M (a known 128-wide key-tile pathology; the CUDA backward is the default), see `results/v3/STATUS.md`.", ""]
 
 
+def table_e9(rows, base):
+    ex = by(rows, exp="E9")
+    out = ["Host-resident forward (Q/K/V in pinned host memory, accumulator on the host), c=7, itr=1. Classic engine: chunk pool of 3 / 4 / 7 "
+           "slots (3 = the current subproblem's chunks; the pool keeps a chunk the next subproblem shares) against `flush` = no pool, every "
+           "subproblem gathered on the host; wave engine: pool of 3 (one wave's chunks) against 7 (all chunks resident, what it sized itself "
+           "to before v3.0). Wall s (x FA-2 where a resident FA-2 row exists) / peak device GiB; classic rows add H2D chunk transfers / hits of 21 loads.", "",
+           "| N | D | classic flush | classic pool 3 | classic pool 4 | classic pool 7 | wave pool 3 | wave pool 7 |", "|---|---|---|---|---|---|---|---|"]
+    for N in sorted({r["N"] for r in ex}):
+        for D in sorted({r["D"] for r in ex}):
+            cells = []
+            for arm, pool in (("classic_CUDA", "pool=flush"), ("classic_CUDA", "pool=3"), ("classic_CUDA", "pool=4"), ("classic_CUDA", "pool=7"),
+                              ("wave_CUDA", "pool=3"), ("wave_CUDA", "pool=7")):
+                r = one(ex, arm=arm, N=N, D=D, extra=pool)
+                c_ = cell(r, base)
+                info = (r or {}).get("info") or {}
+                if r and r.get("status") == "ok" and info.get("chunk_transfers") is not None:
+                    c_ += f" / {info['chunk_transfers']}t {info['chunk_hits']}h"
+                if r and r.get("status") == "ok" and (r.get("reps") or 1) > 1:
+                    c_ += f" (median of {r['reps']})"
+                cells.append(c_)
+            out.append(f"| {n_label(N)} | {D} | " + " | ".join(cells) + " |")
+    return out + [""]
+
+
 def sections(rows):
     ok = [r for r in rows if r.get("status") == "ok"]
     base = baseline_lookup(ok)
@@ -155,6 +179,7 @@ def sections(rows):
     S["E5"] = table_e5(rows, base)
     S["E6"] = table_e6(rows, base)
     S["E8"] = summary_e8(by(rows, exp="E8"), ok)[2:] or ["_no E8 rows yet_", ""]
+    S["E9"] = table_e9(rows, base) if by(rows, exp="E9") else ["_no E9 rows yet_", ""]
     return S
 
 

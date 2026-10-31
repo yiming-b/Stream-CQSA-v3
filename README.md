@@ -222,6 +222,7 @@ FlashAttention-2 call and one SDPA call on the same device-resident tensors.
 | **E5** wave budget | 5 to 73 waves per call at c=73 | done, 20 rows | 1% of time across the range, 2.2x the memory |
 | **E6** precision, head dim | fp16 / bf16 x D 64 / 128 at 1M | done, 44 rows; the Triton D=128 backward excluded as a finding | bf16 costs what fp16 costs; D=128 0.93-0.99x FA-2's D=128 on the CUDA series |
 | **E8** the default's trade | device Q/K/V with the host accumulator vs E1 across N | done, 16 rows | 1.30x / 1.16x / 1.06x / 1.03x of the device-accumulator time at 512K / 1M / 2M / 4M forward, 1.19x / 1.11x / 1.06x / 1.01x forward+backward, for 40% less device memory at every N |
+| **E9** chunk reuse (host-resident) | the classic engine's device chunk pool (3 / 4 / 7 slots) against flush-and-reload, the wave engine's pool at one wave's chunks against all chunks resident, at 256K / 1M / 4M x D 64 / 128 | done, 36 rows (jobs 16333022, 16334737; the 256K / 1M rows re-timed with 3 runs: job 16499791) | the pool matters (the no-pool host gather costs 13-41%), its size barely does (3 vs 7 slots: <= 1.4% of time for 1.7-7 GiB more device memory); the wave pool at 3 slots costs <= 6% at <= 1M and 0% at 4M for 36-45% less memory, and is the default now |
 | **E7** automatic mode vs out-of-core rivals | `attention()` with nothing pinned under device budgets, against two rectangular rivals | not run | measures the automatic path, which the paper does not present (the pinned rows above are the decomposition's cost); the v2.2.3 run of this grid is in `results/ooc_rivals/report.md` |
 
 ### Headline (from E1 and E4; A100-SXM4-80GB, fp16, B=1 H=8 D=64, causal, Q/K/V on the device)
@@ -493,6 +494,67 @@ acc=gpu in the backward, as recorded).
 | wave_CUDA | 2M | fwd | 23.98 (1) | 25.50 (1) | 1.063 | 20.84 | 12.14 | 42% | 16.7 (17.8) | cpu |
 | wave_CUDA | 4M | fwd | 96.16 (1) | 98.87 (1) | 1.028 | 41.68 | 24.28 | 42% | 32.8 (33.9) | cpu |
 <!-- /v3-tables:E8 -->
+
+### E9 chunk reuse in the host-resident forward
+
+What is on the GPU when Q/K/V and the accumulator live in host memory: the classic engine's device chunk pool
+holds `min(c, n_par x l)` chunk slots (3 at c=7 with one subproblem in flight: the current subproblem's Q, K
+and V), the subproblem's fp32 partial output and log-sum-exp (copied to a pinned host slot and merged into the
+host accumulator on a worker), and the kernel's workspace. The full output never exists on the device; it is
+assembled on the CPU and stays there (a device caller receives the fp16 copy at the end). The pool is
+reference-counted, not flushed: when S_0 = {0,1,3} finishes and S_1 = {1,2,4} starts, chunk 1 is a hit and only
+chunks 0 and 3 are replaced; the E2 rows recorded 21 chunk loads, 15 transfers and 6 hits per call with the
+3-slot pool. Each extra slot keeps one more chunk alive across subproblems (4 slots: 10 transfers; 7: every chunk
+sent once, Q/K/V effectively resident). The wave engine's pool keeps resident chunks across waves too, so with
+all c chunks resident nothing is re-sent; until v3.0 it sized that pool from the free memory, which on an 80 GB
+card at 1M meant all 7 chunks (3 GiB of Q/K/V) and is why its host-resident memory exceeded FA-2's in E2. It
+now holds one wave's chunks (`pool_slots=` overrides).
+
+What E9 measured: the pool against no pool (every subproblem gathered on the host) is worth 13-19% at 256K and
+up to 41% at 1M (D=64), nothing at 4M where the gather hides under the kernels; beyond the minimal pool, more
+slots buy at most 1.4% of time (1M: 7.12 / 7.07 / 7.02 s for 3 / 4 / 7 slots) for 1.7 GiB (1M) to 7 GiB (4M)
+more device memory, because a chunk transfer is about 27 ms per 0.43 GiB at 1M and the kernels scale as N^2
+while the transfers scale as N. The wave engine's 3-slot pool costs 4-6% at 256K-1M (D=64), under 1% at D=128
+and nothing at 4M, for 36-45% less device memory. Both engines therefore default to the minimal pool. One open
+observation: the classic engine's host-resident forward at D=128, 1M is 23 s (2.1x FA-2) in every pool setting
+where the wave engine's is 12.9 s (1.2x) and the classic engine itself is 1.2x at D=64 and 4M; the re-timing
+job and a run with one subproblem in flight will say whether it is the two-in-flight schedule the planner chose
+for these rows.
+
+<!-- v3-tables:E9 -->
+Host-resident forward (Q/K/V in pinned host memory, accumulator on the host), c=7, itr=1. Classic engine: chunk pool of 3 / 4 / 7 slots (3 = the current subproblem's chunks; the pool keeps a chunk the next subproblem shares) against `flush` = no pool, every subproblem gathered on the host; wave engine: pool of 3 (one wave's chunks) against 7 (all chunks resident, what it sized itself to before v3.0). Wall s (x FA-2 where a resident FA-2 row exists) / peak device GiB; classic rows add H2D chunk transfers / hits of 21 loads.
+
+| N | D | classic flush | classic pool 3 | classic pool 4 | classic pool 7 | wave pool 3 | wave pool 7 |
+|---|---|---|---|---|---|---|---|
+| 256K | 64 | 1.09 s (3.00x) / 0.7 GiB | 0.95 s (2.61x) / 0.7 GiB / 15t 6h | 0.94 s (2.59x) / 0.8 GiB / 10t 11h | 0.94 s (2.60x) / 1.1 GiB / 7t 14h | 0.77 s (2.11x) / 0.8 GiB | 0.74 s (2.03x) / 1.2 GiB |
+| 256K | 128 | 2.10 s / 1.3 GiB | 1.71 s / 1.3 GiB / 15t 6h | 1.69 s / 1.5 GiB / 10t 11h | 1.71 s / 2.2 GiB / 7t 14h | 1.36 s / 1.5 GiB | 1.34 s / 2.4 GiB |
+| 1M | 64 | 12.02 s (1.99x) / 2.6 GiB | 7.12 s (1.18x) / 2.6 GiB / 15t 6h | 7.07 s (1.17x) / 3.0 GiB / 10t 11h | 7.02 s (1.16x) / 4.3 GiB / 7t 14h | 9.66 s (1.60x) / 3.1 GiB | 9.11 s (1.51x) / 4.8 GiB |
+| 1M | 128 | 23.19 s (2.13x) / 5.2 GiB | 25.33 s (2.33x) / 5.2 GiB / 15t 6h | 22.71 s (2.09x) / 6.0 GiB / 10t 11h | 23.01 s (2.12x) / 8.6 GiB / 7t 14h | 12.93 s (1.19x) / 6.1 GiB | 13.05 s (1.20x) / 9.5 GiB |
+| 4M | 64 | 102.73 s (1.05x) / 10.4 GiB | 102.76 s (1.05x) / 10.4 GiB / 15t 6h | 102.37 s (1.05x) / 12.1 GiB / 10t 11h | 102.16 s (1.05x) / 17.2 GiB / 7t 14h | 103.46 s (1.06x) / 12.2 GiB | 103.69 s (1.06x) / 19.1 GiB |
+| 4M | 128 | 186.53 s / 20.7 GiB | 176.70 s / 20.7 GiB / 15t 6h | 175.64 s / 24.1 GiB / 10t 11h | 175.22 s / 34.4 GiB / 7t 14h | 177.07 s / 24.2 GiB | 178.27 s / 38.0 GiB |
+<!-- /v3-tables:E9 -->
+
+### Where the memory goes
+
+Three mechanisms set the device memory of a decomposed call, and the experiments separate them.
+
+- **A subproblem is l/c of the sequence, not 1/c.** It is the union of the l chunks of its quorum, and for a
+  perfect difference set c = l^2 - l + 1, so l/c is 3/7, 4/13, 6/31, 12/133: about 1/sqrt(c). One classic
+  subproblem at c=7 holds 3 fp16 gathers and an fp32 partial over 43% of the tokens, 10 bytes per token of N
+  against FA-2's 8 (Q, K, V, O), i.e. 0.54x FA-2 by itself and 0.65x with the prefetched chunk and workspace
+  (E2: 2.6 vs 4.0 GiB at 1M).
+- **Device-resident calls have a floor that c cannot touch.** With Q/K/V on the device the call holds them (3
+  GiB at 1M) plus the fp32 accumulator (2 GiB) and the fp16 output copy (1 GiB) for its whole duration; the
+  backward adds dO, the saved fp32 output, three fp32 gradient accumulators and their fp16 casts (15 GiB at
+  1M). Only the in-flight transient shrinks with c, which is why E3's curve stops at 7.2 GiB (forward) and 16.0
+  GiB (forward+backward) from c=31 on, and why FA-2, which accumulates in registers and has no output copy,
+  sits below that floor at 4.0 GiB. Residency removes floor terms: the host accumulator takes 3 GiB (E8, -40%),
+  host-resident inputs the other 3 (E2), and in that configuration the device holds the transient alone.
+- **The wave engine's footprint is the wave's.** Per packed token it carries the fp32 partial plus tables and
+  sort/merge scratch, with a host accumulator a per-wave merged buffer, and on the Triton kernel packed fp16
+  copies of Q/K/V (it cannot read the pool in place). More subproblems per wave grow this with W, not with c
+  (E5: 9.5 to 21 GiB from 1 to 16 subproblems per wave at c=73, for 1% of time), which is why the planner
+  shrinks W before the depth and one subproblem per wave is its usual pick.
 
 ### E7 automatic mode under device budgets (not run)
 

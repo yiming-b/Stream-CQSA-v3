@@ -619,13 +619,22 @@ def wave_forward(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *, causal: b
         pool = ChunkPool(N, c, H, D, q.dtype, dev)
         n_slots = pool_slots
         if n_slots is None:
-            # split the budget between the pool and the packed partial outputs:
-            # a wave of w subproblems needs about l*w chunks (fewer when they share) and w*L tokens
             L = max(int(t.local_size) for t in tasks)
             l = len(interest_set)
-            free = int(effective_free_bytes(dev) * memory_fraction) - acc_bytes - (256 << 20)
-            per_task = l * pool.slot_bytes + L * per_tok
-            w = max(1, min(len(tasks), free // max(1, per_task)))
+            if max_wave_tokens:
+                # the pool holds the chunks of one wave: l per subproblem, w subproblems per wave from the wave
+                # budget (the planner's W; estimate_wave_peak_bytes counts the same slots). Resident chunks a
+                # later wave needs stay where they are (ChunkPool.load), so the shared chunks are not re-sent.
+                # Before v3.0 the pool took what the free memory allowed (all c chunks of a 1M call on an 80 GB
+                # card: Q/K/V fully resident, 4.8 instead of 3.1 GiB), which E9 measured at <= 6% of time at
+                # <= 1M and 0% at 4M for 36-45% more device memory.
+                w = max(1, min(len(tasks), int(max_wave_tokens) // max(1, L)))
+            else:
+                # no budget given (the engine called on its own): split the free memory between the pool and
+                # the packed partial outputs, a wave of w subproblems needing about l*w chunks and w*L tokens
+                free = int(effective_free_bytes(dev) * memory_fraction) - acc_bytes - (256 << 20)
+                per_task = l * pool.slot_bytes + L * per_tok
+                w = max(1, min(len(tasks), free // max(1, per_task)))
             n_slots = min(c, l * w)
         pool.allocate(n_slots)
         max_tokens = _budget_tokens(dev, per_tok, acc_bytes + pool.bytes + (256 << 20), memory_fraction, max_wave_tokens)

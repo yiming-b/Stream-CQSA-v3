@@ -1353,6 +1353,34 @@ def figure_vs_c(exp, rows, path):
     plt.close(fig)
 
 
+def figure_pool(exp, rows, path):
+    """E9: wall and peak device memory vs N per (engine, chunk pool setting), one column per head dim."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    Ds = sorted({r["D"] for r in rows})
+    fig, axes = plt.subplots(2, len(Ds), figsize=(6.5 * len(Ds), 9), squeeze=False)
+    styles = {"pool=flush": ":", "pool=3": "-", "pool=4": "--", "pool=7": "-."}
+    for j, D in enumerate(Ds):
+        for arm in ("classic_CUDA", "wave_CUDA"):
+            for pool, ls in styles.items():
+                rs = sorted((r for r in rows if r["arm"] == arm and r["D"] == D and r.get("extra") == pool and r.get("status") == "ok"), key=lambda r: r["N"])
+                if not rs:
+                    continue
+                axes[0, j].plot([r["N"] for r in rs], [r["wall_s"] for r in rs], ls, marker="o", color=COLORS[arm], label=f"{arm} {pool}")
+                axes[1, j].plot([r["N"] for r in rs], [r["peak_dev_gib"] for r in rs], ls, marker="o", color=COLORS[arm], label=f"{arm} {pool}")
+        for i, yl in enumerate(("wall s", "peak device GiB")):
+            ax = axes[i, j]
+            ax.set_xscale("log", base=2); ax.set_yscale("log")
+            ax.set_xlabel("N"); ax.set_ylabel(yl); ax.set_title(f"D={D}, host-resident forward, c=7")
+            ax.grid(True, which="both", alpha=0.3)
+            ax.legend(fontsize=7)
+    fig.suptitle(f"{exp}: {PLAN[exp]['question'][:110]}...", fontsize=10)
+    fig.tight_layout()
+    fig.savefig(path, dpi=110)
+    plt.close(fig)
+
+
 def figure_bars(exp, rows, path, group_of, group_label, group_order):
     """Grouped bars (one group per configuration, one bar per arm): wall time and peak memory, fwd and bwd."""
     import matplotlib
@@ -1589,6 +1617,8 @@ def cmd_report(a):
                 base_rows = [r for r in ok if r["exp"] == "E1" and r["arm"] in BASELINES and r["node"] == "sxm"]
                 lines += summary_e8(ex, ok)
                 figure_scaling(exp, ex, {}, png, base_rows=base_rows)
+            elif exp == "E9":
+                figure_pool(exp, ex, png)
             elif exp == "E5":
                 figure_wave_budget(exp, ex, png)
             elif exp == "E6":

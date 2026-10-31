@@ -140,13 +140,15 @@ def table_e9(rows, base):
     out = ["Host-resident forward (Q/K/V in pinned host memory, accumulator on the host), c=7, itr=1. Classic engine: chunk pool of 3 / 4 / 7 "
            "slots (3 = the current subproblem's chunks; the pool keeps a chunk the next subproblem shares) against `flush` = no pool, every "
            "subproblem gathered on the host; wave engine: pool of 3 (one wave's chunks) against 7 (all chunks resident, what it sized itself "
-           "to before v3.0). Wall s (x FA-2 where a resident FA-2 row exists) / peak device GiB; classic rows add H2D chunk transfers / hits of 21 loads.", "",
-           "| N | D | classic flush | classic pool 3 | classic pool 4 | classic pool 7 | wave pool 3 | wave pool 7 |", "|---|---|---|---|---|---|---|---|"]
+           "to before v3.0). Wall s (x FA-2 where a resident FA-2 row exists) / peak device GiB; classic rows add H2D chunk transfers / hits of 21 loads. "
+           "The 1M rows are medians of 3 timed runs (job 16500372); the 256K and 4M rows single runs, which for this host-streamed path vary by 7-13% "
+           "between jobs (the gpu-test nodes' host is shared with other jobs), so differences below that at those sizes are not resolved.", "",
+           "| N | D | classic flush | classic pool 3 | classic pool 3, 1 in flight | classic pool 4 | classic pool 7 | wave pool 3 | wave pool 7 |", "|---|---|---|---|---|---|---|---|---|"]
     for N in sorted({r["N"] for r in ex}):
         for D in sorted({r["D"] for r in ex}):
             cells = []
-            for arm, pool in (("classic_CUDA", "pool=flush"), ("classic_CUDA", "pool=3"), ("classic_CUDA", "pool=4"), ("classic_CUDA", "pool=7"),
-                              ("wave_CUDA", "pool=3"), ("wave_CUDA", "pool=7")):
+            for arm, pool in (("classic_CUDA", "pool=flush"), ("classic_CUDA", "pool=3"), ("classic_CUDA", "pool=3-np1"), ("classic_CUDA", "pool=4"),
+                              ("classic_CUDA", "pool=7"), ("wave_CUDA", "pool=3"), ("wave_CUDA", "pool=7")):
                 r = one(ex, arm=arm, N=N, D=D, extra=pool)
                 c_ = cell(r, base)
                 info = (r or {}).get("info") or {}

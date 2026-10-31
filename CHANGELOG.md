@@ -22,9 +22,9 @@
 * Wave engine, host-resident inputs: the device chunk pool holds one wave's chunks (`l` per subproblem, the
   subproblems per wave from the wave budget W; `pool_slots=` overrides, also through `attention()`). It used to
   take what the free memory allowed, which at 1M on an 80 GB card was all 7 chunks: Q/K/V fully resident on
-  the device, 4.8 GiB instead of 3.1 (E9 measured the larger pool at <= 6% of time at <= 1M and 0% at 4M). The
-  classic engine's pool keeps `min(c, n_par * l)` slots as before (E9: 3 vs 7 slots is <= 1.4% of time for 1.7-7
-  GiB; the pool itself against a host gather of every subproblem is worth 13-41%).
+  the device, 4.8 GiB instead of 3.1 (E9: the larger pool is within 1% of time at 1M-4M and 4% ahead at 256K).
+  The classic engine's pool keeps `min(c, n_par * l)` slots as before (E9: 3 vs 7 slots is <= 2% of time for
+  1.7-7 GiB; the pool itself against a host gather of every subproblem is worth 4-19%, 0-5% at 4M).
 * Cost model refit on the v3 rows (`benchmarks/v3/refit_cost_model.py`, `results/v3/cost_model_a100_sxm4_80gb.json`,
   shipped as the defaults): kernel_ratio 0.95 (the v2 calibration said 1.83); the live pair count is the whole
   problem's at every depth (the pair sets partition; the per-subproblem count overstated itr=2 by 29%, so the

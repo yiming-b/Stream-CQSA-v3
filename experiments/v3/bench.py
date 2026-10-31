@@ -134,7 +134,7 @@ PLAN = {
                  "wave engine's pool at the minimum (3) against all chunks resident (7, what it sizes itself to with room): "
                  "transfers, time and device memory vs N and head dim",
         grid=dict(N=[256 * K, M, 4 * M], c=[7], itr=[1], acc=["cpu"], dtype=["fp16"], D=[64, 128], direction=["fwd"],
-                  extra=["pool=flush", "pool=3", "pool=4", "pool=7"]),
+                  extra=["pool=flush", "pool=3", "pool=4", "pool=7", "pool=3-np1"]),      # 3-np1: 3 slots, one subproblem in flight
         arms=("classic_CUDA", "wave_CUDA"), qkv="host", warmup=1, reps=1, ref="spot", node="sxm",
         parts={"all": {}}),
     "E8": dict(
@@ -164,8 +164,8 @@ def _rows_of_grid(exp, spec, grid, arms, node):
                     continue                                   # the planner refuses it (c**itr > 4096 tasks)
                 if arm not in ("wave_CUDA", "wave_Triton") and g["extra"] and str(g["extra"]).startswith("W="):
                     continue
-                if arm in ("wave_CUDA", "wave_Triton") and g["extra"] in ("pool=flush", "pool=4"):
-                    continue                                   # the wave pool has no flush mode; 3 (one wave's chunks) or all
+                if arm in ("wave_CUDA", "wave_Triton") and g["extra"] in ("pool=flush", "pool=4", "pool=3-np1"):
+                    continue                                   # the wave pool has no flush mode nor n_par; 3 (one wave's chunks) or all
             else:
                 r.update(c=None, itr=None, acc=None, qkv="device")
             yield r
@@ -859,7 +859,9 @@ def _worker(row, res):
                 extra["pool_slots"] = int(pv)
             else:
                 extra["shared_chunks"] = True
-                extra["chunk_pool_slots"] = int(pv)
+                extra["chunk_pool_slots"] = int(pv.split("-")[0])
+                if pv.endswith("-np1"):
+                    extra["max_parallel"] = 1                    # one subproblem in flight (the planner picked two for these rows)
         res["engine_expected"] = ("wave" if (arm.startswith("wave") and (not bwd or (arm == "wave_CUDA" and not host)))
                                   else "classic")
         res["kernel_requested"] = kernel

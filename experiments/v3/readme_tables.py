@@ -161,6 +161,59 @@ def table_e9(rows, base):
     return out + [""]
 
 
+def table_e10(rows, base):
+    ex = by(rows, exp="E10")
+    out = ["N=1M, itr=1, Q/K/V in pinned host memory and the accumulator on the host (ratios against E1's resident FA-2 rows; medians of 3 runs; "
+           "wall s (x FA-2) / peak device GiB; the classic column adds peak host GiB):", "",
+           "| c | l | subproblem l/c | fwd classic CUDA | fwd wave CUDA | fwd+bwd classic CUDA | fwd+bwd wave CUDA (classic engine) |", "|---|---|---|---|---|---|---|"]
+    from stream_cqsa.reference import QUORUM_SETS
+    for c in sorted({r["c"] for r in ex}):
+        l = len(QUORUM_SETS[c])
+        cells = []
+        for d in ("fwd", "bwd"):
+            for a in ("classic_CUDA", "wave_CUDA"):
+                r = one(ex, arm=a, c=c, direction=d)
+                c_ = cell(r, base)
+                if r and r.get("status") == "ok" and a == "classic_CUDA":
+                    c_ += f" / host {r['peak_host_gib']:.1f}"
+                cells.append(c_)
+        out.append(f"| {c} | {l} | {l / c:.2f} | " + " | ".join(cells) + " |")
+    return out + [""]
+
+
+def table_e11(rows, base):
+    ex = by(rows, exp="E11")
+    out = ["Host-resident forward+backward, classic CUDA, c=7, itr=1 (medians of 3 runs; wall s (x FA-2) / peak device GiB / peak host GiB):", "",
+           "| N | scatter synchronous (default) | scatter asynchronous (`CQSA_SCATTER_ASYNC=1`) | async / sync |", "|---|---|---|---|"]
+    for N in sorted({r["N"] for r in ex}):
+        a = one(ex, N=N, extra="scatter=sync"); b = one(ex, N=N, extra="scatter=async")
+        ca, cb = cell(a, base), cell(b, base)
+        for r, c_ in ((a, ca), (b, cb)):
+            pass
+        ha = f" / host {a['peak_host_gib']:.1f}" if a and a.get("status") == "ok" else ""
+        hb = f" / host {b['peak_host_gib']:.1f}" if b and b.get("status") == "ok" else ""
+        ratio = f"{b['wall_s'] / a['wall_s']:.3f}" if (a and b and a.get("status") == "ok" and b.get("status") == "ok") else "-"
+        out.append(f"| {n_label(N)} | {ca}{ha} | {cb}{hb} | {ratio} |")
+    return out + [""]
+
+
+def table_e12(rows, base):
+    ex = by(rows, exp="E12")
+    out = ["N=1M, c=73, itr=1, host-resident forward, the wave budget as a multiple of the largest subproblem (medians of 3 runs; wall s (x FA-2) / peak device GiB / waves / pool slots):", "",
+           "| W | wave CUDA | wave Triton |", "|---|---|---|"]
+    for w in ("W=1x", "W=2x", "W=4x", "W=8x", "W=16x"):
+        cells = []
+        for a in ("wave_CUDA", "wave_Triton"):
+            r = one(ex, arm=a, extra=w)
+            c_ = cell(r, base)
+            info = (r or {}).get("info") or {}
+            if r and r.get("status") == "ok":
+                c_ += f" / {r.get('n_waves')} waves / pool {info.get('pool_slots')}"
+            cells.append(c_)
+        out.append(f"| {w[2:]} | " + " | ".join(cells) + " |")
+    return out + [""]
+
+
 def sections(rows):
     ok = [r for r in rows if r.get("status") == "ok"]
     base = baseline_lookup(ok)
@@ -182,6 +235,9 @@ def sections(rows):
     S["E6"] = table_e6(rows, base)
     S["E8"] = summary_e8(by(rows, exp="E8"), ok)[2:] or ["_no E8 rows yet_", ""]
     S["E9"] = table_e9(rows, base) if by(rows, exp="E9") else ["_no E9 rows yet_", ""]
+    S["E10"] = table_e10(rows, base) if by(rows, exp="E10") else ["_no E10 rows yet_", ""]
+    S["E11"] = table_e11(rows, base) if by(rows, exp="E11") else ["_no E11 rows yet_", ""]
+    S["E12"] = table_e12(rows, base) if by(rows, exp="E12") else ["_no E12 rows yet_", ""]
     return S
 
 

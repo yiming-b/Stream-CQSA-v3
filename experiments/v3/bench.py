@@ -137,6 +137,27 @@ PLAN = {
                   extra=["pool=flush", "pool=3", "pool=4", "pool=7", "pool=3-np1"]),      # 3-np1: 3 slots, one subproblem in flight
         arms=("classic_CUDA", "wave_CUDA"), qkv="host", warmup=1, reps=1, ref="spot", node="sxm",
         parts={"all": {}}),
+    "E10": dict(
+        question="parameters, host-resident: how the quorum size c shapes device memory and time when Q/K/V and the accumulator "
+                 "live in host memory (E3 was device-resident, where the O(N) floor hides the l/c scaling of the subproblem)",
+        grid=dict(N=[M], c=C_LIST, itr=[1], acc=["cpu"], dtype=["fp16"], D=[64], direction=["fwd", "bwd"]),
+        extra_grids=[],
+        arms=("classic_CUDA", "wave_CUDA"), qkv="host", warmup=1, reps=3, ref="spot", node="sxm",
+        parts={"fwd": dict(direction="fwd"), "bwd": dict(direction="bwd")}),
+    "E11": dict(
+        question="the host-streamed backward's scatter: synchronous (the shipped default, CQSA_SCATTER_ASYNC=0) against the "
+                 "asynchronous fold on a worker (=1), host-resident forward+backward at 1M and 2M",
+        grid=dict(N=[M, 2 * M], c=[7], itr=[1], acc=["cpu"], dtype=["fp16"], D=[64], direction=["bwd"],
+                  extra=["scatter=sync", "scatter=async"]),
+        arms=("classic_CUDA",), qkv="host", warmup=1, reps=3, ref="spot", node="sxm",
+        parts={"all": {}}),
+    "E12": dict(
+        question="the wave budget W in the host-resident forward (the chunk pool now follows W): launches against device memory "
+                 "at c=73, as E5 measured device-resident",
+        grid=dict(N=[M], c=[73], itr=[1], acc=["cpu"], dtype=["fp16"], D=[64], direction=["fwd"],
+                  extra=["W=1x", "W=2x", "W=4x", "W=8x", "W=16x"]),
+        arms=("wave_CUDA", "wave_Triton"), qkv="host", warmup=1, reps=3, ref="spot", node="sxm",
+        parts={"all": {}}),
     "E8": dict(
         question="the v3 default: Q/K/V on the device with the accumulator in host memory (what attention() picks from "
                  "1M up) against E1's device accumulator at the same N (time cost vs device memory saved)",
@@ -865,6 +886,7 @@ def _worker(row, res):
         res["engine_expected"] = ("wave" if (arm.startswith("wave") and (not bwd or (arm == "wave_CUDA" and not host)))
                                   else "classic")
         res["kernel_requested"] = kernel
+        res["scatter_async"] = os.environ.get("CQSA_SCATTER_ASYNC", "0") != "0"   # E11: the streamed backward's scatter mode in this worker
 
         def make_call(itr_):
             pins = dict(itr=itr_, c=c, interest_set=iset, accumulate_on_gpu=(acc == "gpu"), low_memory=(acc == "cpu"), **extra)
@@ -978,8 +1000,11 @@ def worker_env():
 def run_worker(row, log_dir=None):
     cmd = [sys.executable, "-P", os.path.abspath(__file__), "worker", json.dumps(row)]
     t0 = time.time()
+    env = worker_env()
+    if row.get("extra") and str(row["extra"]).startswith("scatter="):
+        env["CQSA_SCATTER_ASYNC"] = "1" if str(row["extra"]) == "scatter=async" else "0"   # read at import by stable_stream
     try:
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=worker_env(), cwd=ROOT)
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env, cwd=ROOT)
     except KeyboardInterrupt:
         return None
     line = next((ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT ")), None)
@@ -1610,8 +1635,11 @@ def cmd_report(a):
                 figure_errors(exp, ex, png)
                 worst = [r for r in ex if r.get("status") == "ok" and (r.get("fp64_ratio_fa2") or 0) > 1.2 or (r.get("fp64_dq_ratio_fa2") or 0) > 1.2]
                 lines.append(f"Rows above 1.2x FA-2's own fp64 error: {len(worst)}" + (" -- " + "; ".join(describe(r).strip() for r in worst[:8]) if worst else "") + "\n")
-            elif exp == "E3":
+            elif exp in ("E3", "E10"):
                 figure_vs_c(exp, ex, png)
+            elif exp == "E11":
+                figure_bars(exp, ex, png, lambda r: (r.get("extra"), r["N"]), lambda g: f"{g[0]} {n_label(g[1])}",
+                            [("scatter=sync", M), ("scatter=async", M), ("scatter=sync", 2 * M), ("scatter=async", 2 * M)])
             elif exp == "E4":
                 figure_bars(exp, ex, png, lambda r: (r.get("itr"), r.get("acc")), lambda g: f"itr={g[0]} acc={g[1]}",
                             [(1, "gpu"), (1, "cpu"), (2, "gpu"), (2, "cpu")])
@@ -1621,7 +1649,7 @@ def cmd_report(a):
                 figure_scaling(exp, ex, {}, png, base_rows=base_rows)
             elif exp == "E9":
                 figure_pool(exp, ex, png)
-            elif exp == "E5":
+            elif exp in ("E5", "E12"):
                 figure_wave_budget(exp, ex, png)
             elif exp == "E6":
                 figure_bars(exp, ex, png, lambda r: (r["dtype"], r["D"]), lambda g: f"{g[0]} D={g[1]}",

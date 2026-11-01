@@ -223,6 +223,9 @@ FlashAttention-2 call and one SDPA call on the same device-resident tensors.
 | **E6** precision, head dim | fp16 / bf16 x D 64 / 128 at 1M | done, 44 rows; the Triton D=128 backward excluded as a finding | bf16 costs what fp16 costs; D=128 0.93-0.99x FA-2's D=128 on the CUDA series |
 | **E8** the default's trade | device Q/K/V with the host accumulator vs E1 across N | done, 16 rows | 1.30x / 1.16x / 1.06x / 1.03x of the device-accumulator time at 512K / 1M / 2M / 4M forward, 1.19x / 1.11x / 1.06x / 1.01x forward+backward, for 40% less device memory at every N |
 | **E9** chunk reuse (host-resident) | the classic engine's device chunk pool (3 / 4 / 7 slots, 1 or 2 in flight) against flush-and-reload, the wave engine's pool at one wave's chunks against all chunks resident, at 256K / 1M / 4M x D 64 / 128 | done, 42 rows (jobs 16333022, 16334737, 16500372 with 3 runs at 1M, 16500373) | the pool matters (the no-pool host gather costs 4-19%, 0-5% at 4M), its size barely does (3 vs 7 slots: <= 2% of time for 1.7-7 GiB more device memory); the wave pool at 3 slots is within 1% at 1M-4M for 36-45% less memory and is the default now; host-streamed rows vary 7-13% between jobs |
+| **E10** c, host-resident | the c sweep of E3 with Q/K/V and the accumulator in host memory, where the floor is gone and the subproblem's l/c scaling sets the device memory | **running** (job 16559720, 36 rows, 3 runs each) | |
+| **E11** streamed backward scatter | the host-streamed backward's synchronous scatter (default) against the asynchronous fold, 1M and 2M | **running** (job 16559720, 4 rows, 3 runs each) | |
+| **E12** wave budget, host-resident | E5's W sweep with Q/K/V and the accumulator on the host (the pool follows W) | **running** (job 16559720, 10 rows, 3 runs each) | |
 | **E7** automatic mode vs out-of-core rivals | `attention()` with nothing pinned under device budgets, against two rectangular rivals | not run | measures the automatic path, which the paper does not present (the pinned rows above are the decomposition's cost); the v2.2.3 run of this grid is in `results/ooc_rivals/report.md` |
 
 ### Headline (from E1 and E4; A100-SXM4-80GB, fp16, B=1 H=8 D=64, causal, Q/K/V on the device)
@@ -536,6 +539,35 @@ Host-resident forward (Q/K/V in pinned host memory, accumulator on the host), c=
 | 4M | 64 | 102.73 s (1.05x) / 10.4 GiB | 102.76 s (1.05x) / 10.4 GiB / 15t 6h | 113.69 s (1.16x) / 10.4 GiB / 15t 6h | 102.37 s (1.05x) / 12.1 GiB / 10t 11h | 102.16 s (1.05x) / 17.2 GiB / 7t 14h | 103.46 s (1.06x) / 12.2 GiB | 103.69 s (1.06x) / 19.1 GiB |
 | 4M | 128 | 186.53 s / 20.7 GiB | 176.70 s / 20.7 GiB / 15t 6h | 200.31 s / 20.7 GiB / 15t 6h | 175.64 s / 24.1 GiB / 10t 11h | 175.22 s / 34.4 GiB / 7t 14h | 177.07 s / 24.2 GiB | 178.27 s / 38.0 GiB |
 <!-- /v3-tables:E9 -->
+
+### E10 the quorum size c, host-resident **[E10: running, job 16559720]**
+
+E3's c sweep (N=1M, itr=1) with Q/K/V in pinned host memory and the accumulator on the host. E3 was
+device-resident, where the O(N) floor hides the subproblem's l/c scaling; here the device holds the in-flight
+subproblem alone, so the peak should fall from about 3.3 GiB at c=3 (l/c = 2/3) to about 0.5 GiB at c=133 (12/133).
+
+<!-- v3-tables:E10 -->
+<!-- /v3-tables:E10 -->
+
+### E11 the streamed backward's scatter **[E11: running, job 16559720]**
+
+E2's forward+backward costs 1.29x FA-2 at 1M where E8's device-resident host-accumulator backward costs 1.11x.
+The streamed path's host scatter (each subproblem's dQ/dK/dV added into the host accumulators) is synchronous by
+design (`CQSA_SCATTER_ASYNC`, off: an earlier measurement found two bandwidth-bound streams contending); the
+asynchronous fold on a worker is the same mechanism the device-resident backward uses. Classic CUDA, c=7, 1M and
+2M, both settings.
+
+<!-- v3-tables:E11 -->
+<!-- /v3-tables:E11 -->
+
+### E12 the wave budget, host-resident **[E12: running, job 16559720]**
+
+E5's W sweep (N=1M, c=73) with Q/K/V and the accumulator in host memory. With the pool following W (one wave's
+chunks: l=9 slots per subproblem in the wave, all 73 chunks from W=16x), the trade is launches against the
+pool's and the packed partials' memory.
+
+<!-- v3-tables:E12 -->
+<!-- /v3-tables:E12 -->
 
 ### Where the memory goes
 

@@ -1,0 +1,47 @@
+code: /scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-fa30280
+della-l09g2
+/scratch/gpfs/AKEY/yb2807/VENVs/CQSA311/bin/python
+NVIDIA A100-SXM4-80GB
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-fa30280/stream_cqsa/__init__.py 2.10.0+cu130
+{'cuda_extension': True, 'cuda_extension_noncausal': True, 'cuda_extension_unified': True, 'native_wave': True, 'triton': True, 'flash_attn': True} cqsa_cuda_v13 cqsa_cuda_v13 cuda
+714975b954ad34336f97015124f6784e  /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/frozen_suite/2026-10-21/cqsa_cuda_next_v11x.cpython-311-x86_64-linux-gnu.so
+08b0c1c5fbddd3a76a9a72af7b1f78df  /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/frozen_suite/2026-10-21/cqsa_cuda_next_v12b.cpython-311-x86_64-linux-gnu.so
+a18202316d2fb38fb2640641c9aadb45  /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/frozen_suite/2026-10-21/cqsa_cuda_next_v12f.cpython-311-x86_64-linux-gnu.so
+1af3b98c3d2a61c0212d45f695e9fb1a  /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2/cqsa_cuda_v13.cpython-311-x86_64-linux-gnu.so
+0fb2e4b1a4a3ce9a44e65d0bbd9722cc  /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/native_v2/frozen/gqa1/cqsa_native_v2.cpython-311-x86_64-linux-gnu.so
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/native_v2/frozen/gqa1/cqsa_native_v2.cpython-311-x86_64-linux-gnu.so WAVE_API 2
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/stable/cqsa_cuda_next_v11.cpython-311-x86_64-linux-gnu.so
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/stable/cqsa_cuda_next_v9.cpython-311-x86_64-linux-gnu.so
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/frozen_suite/2026-10-21/cqsa_cuda_next_v11x.cpython-311-x86_64-linux-gnu.so
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/frozen_suite/2026-10-21/cqsa_cuda_next_v12f.cpython-311-x86_64-linux-gnu.so
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/frozen_suite/2026-10-21/cqsa_cuda_next_v12b.cpython-311-x86_64-linux-gnu.so
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2/cqsa_cuda_v13.cpython-311-x86_64-linux-gnu.so
+........................................................................ [  8%]
+........................................................................ [ 16%]
+........................................................................ [ 24%]
+........................................................................ [ 33%]
+........................................................................ [ 41%]
+........................................................................ [ 49%]
+........................................................................ [ 57%]
+........................................................................ [ 66%]
+........................................................................ [ 74%]
+........................................................................ [ 82%]
+........................................................................ [ 91%]
+........................................................................ [ 99%]
+.....                                                                    [100%]
+=============================== warnings summary ===============================
+tests/test_api.py::test_attention_host_inputs_and_memory_cap
+  /scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-fa30280/stream_cqsa/api.py:560: RuntimeWarning: Stream-CQSA: host-resident Q/K/V are stored head-major ([B,H,N,D] contiguous); streaming needs them token-major, so a 0.4 GiB copy is made per call. Keep host tensors token-major (x.trans
+    out, info = stream_cqsa_forward(q, k, v, causal=bool(is_causal), scale=scale, verbose=verbose, out_device="acc", **kw)
+tests/test_devkit_autoconfig.py: 14 warnings
+    warnings.warn(
+tests/test_devkit_autoconfig.py::test_flex_adapter_positions
+    _warn_once(
+tests/test_ultimate_kernel_rows.py::test_recomposed_layouts_agree_and_match_fp64[1]
+    _warn_once(
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+869 passed, 17 warnings in 363.22s (0:06:03)
+exit 0  00:11:16
+16565187||00:06:20
+16565187.batch||00:06:20
+16565187.extern||00:06:20

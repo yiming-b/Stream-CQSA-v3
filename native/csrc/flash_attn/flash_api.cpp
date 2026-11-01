@@ -2669,7 +2669,12 @@ mha_fwd_wave(const at::Tensor &q,            // [R, H, D] token-major, last dim 
     TORCH_CHECK(q.stride(-1) == 1 && k.stride(-1) == 1 && v.stride(-1) == 1, "last dim must be contiguous");
     const int num_heads = q.size(1);
     const int head_size = q.size(2);
-    TORCH_CHECK(k.size(1) == num_heads && v.size(1) == num_heads, "wave mode: H_k must equal H");
+    // grouped-query / multi-query attention: K/V carry num_heads_k heads, a divisor of num_heads; query
+    // head h reads K/V head h / (num_heads / num_heads_k) (the kernels index by params.h_h_k_ratio)
+    const int num_heads_k = k.size(1);
+    TORCH_CHECK(v.size(1) == num_heads_k, "wave mode: k and v must have the same number of heads");
+    TORCH_CHECK(num_heads_k >= 1 && num_heads % num_heads_k == 0,
+                "wave mode: the K/V heads must divide the query heads (grouped-query attention)");
     TORCH_CHECK(k.size(2) == head_size && v.size(2) == head_size, "head dim mismatch");
     TORCH_CHECK(head_size == 64 || head_size == 128, "the wave kernels exist for head dims 64 and 128");
     const WaveLens wl = wave_check_tables(lens, lens_even, S, bits, blk_or, blk_and, q.device());
@@ -2707,7 +2712,7 @@ mha_fwd_wave(const at::Tensor &q,            // [R, H, D] token-major, last dim 
     const int head_size_rounded = round_multiple(head_size, head_size <= 128 ? 32 : 64);
     auto out4 = out_acc.view({W, S, num_heads, head_size});   // lends the batch/row/head strides
     Flash_fwd_params params;
-    set_params_fprop(params, W, S, S, S, S, num_heads, num_heads, head_size, head_size_rounded,
+    set_params_fprop(params, W, S, S, S, S, num_heads, num_heads_k, head_size, head_size_rounded,
                      q, k, v, out4, nullptr, nullptr, nullptr, nullptr, softmax_lse.data_ptr(),
                      0.f, softmax_scale, -1, is_causal ? 0 : -1, 0.f, /*seqlenq_ngroups_swapped=*/false, /*unpadded_lse=*/false);
     // batch stride: the packed wave advances S rows per subproblem; in place, every
@@ -2756,15 +2761,20 @@ mha_bwd_wave(const at::Tensor &dout,         // [W*S, H, D] packed (0 on padding
     TORCH_CHECK(q_dtype == torch::kFloat16 || q_dtype == torch::kBFloat16, "fp16/bf16 only");
     TORCH_CHECK(k.dtype() == q_dtype && v.dtype() == q_dtype && dout.dtype() == q_dtype, "dtype mismatch");
     CHECK_DEVICE(q); CHECK_DEVICE(k); CHECK_DEVICE(v); CHECK_DEVICE(dout); CHECK_DEVICE(softmax_lse); CHECK_DEVICE(dpsum);
-    TORCH_CHECK(q.dim() == 3, "q [W*S, H, D]");
+    TORCH_CHECK(q.dim() == 3 && k.dim() == 3 && v.dim() == 3, "q/k/v [W*S, H, D]");
     const int num_heads = q.size(1);
     const int head_size = q.size(2);
+    // grouped-query attention: K/V (and dK/dV) carry num_heads_k heads; the kernel forms dK/dV per
+    // query head into expanded buffers, summed over each group below (FlashAttention's scheme)
+    const int num_heads_k = k.size(1);
+    TORCH_CHECK(num_heads_k >= 1 && num_heads % num_heads_k == 0,
+                "wave mode: the K/V heads must divide the query heads (grouped-query attention)");
     TORCH_CHECK(head_size == 64 || head_size == 128, "the wave kernels exist for head dims 64 and 128");
     const WaveLens wl = wave_check_tables(lens, lens_even, S, bits, blk_or, blk_and, q.device());
     const int W = wl.W;
     const int64_t total = (int64_t)W * S;
-    CHECK_SHAPE(q, total, num_heads, head_size); CHECK_SHAPE(k, total, num_heads, head_size);
-    CHECK_SHAPE(v, total, num_heads, head_size); CHECK_SHAPE(dout, total, num_heads, head_size);
+    CHECK_SHAPE(q, total, num_heads, head_size); CHECK_SHAPE(k, total, num_heads_k, head_size);
+    CHECK_SHAPE(v, total, num_heads_k, head_size); CHECK_SHAPE(dout, total, num_heads, head_size);
     TORCH_CHECK(q.stride(-1) == 1 && k.stride(-1) == 1 && v.stride(-1) == 1 && dout.stride(-1) == 1, "last dim contiguous");
     CHECK_CONTIGUOUS(softmax_lse); CHECK_SHAPE(softmax_lse, W, num_heads, S);
     CHECK_CONTIGUOUS(dpsum); CHECK_SHAPE(dpsum, W, num_heads, S);
@@ -2774,8 +2784,16 @@ mha_bwd_wave(const at::Tensor &dout,         // [W*S, H, D] packed (0 on padding
     at::Tensor dq = dq_.has_value() ? dq_.value() : torch::empty_like(q);
     at::Tensor dk = dk_.has_value() ? dk_.value() : torch::empty_like(k);
     at::Tensor dv = dv_.has_value() ? dv_.value() : torch::empty_like(v);
-    CHECK_SHAPE(dq, total, num_heads, head_size); CHECK_SHAPE(dk, total, num_heads, head_size); CHECK_SHAPE(dv, total, num_heads, head_size);
+    CHECK_SHAPE(dq, total, num_heads, head_size); CHECK_SHAPE(dk, total, num_heads_k, head_size); CHECK_SHAPE(dv, total, num_heads_k, head_size);
     TORCH_CHECK(dq.stride(-1) == 1 && dk.stride(-1) == 1 && dv.stride(-1) == 1, "grad last dim contiguous");
+    at::Tensor dk_expanded, dv_expanded;
+    if (num_heads_k != num_heads) {
+        dk_expanded = torch::empty({total, num_heads, head_size}, opts);
+        dv_expanded = torch::empty({total, num_heads, head_size}, opts);
+    } else {
+        dk_expanded = dk;
+        dv_expanded = dv;
+    }
 
     auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
     const int head_size_rounded = round_multiple(head_size, head_size <= 128 ? 32 : 64);
@@ -2783,12 +2801,13 @@ mha_bwd_wave(const at::Tensor &dout,         // [W*S, H, D] packed (0 on padding
     // preprocess pass -- which would have zeroed it -- is skipped, so zero it here.
     auto dq_accum = torch::zeros({total, num_heads, head_size_rounded}, opts.dtype(at::kFloat));
     // [W, S, H, D] views lend the batch strides of the uniform layout.
-    auto q4 = q.view({W, S, num_heads, head_size}), k4 = k.view({W, S, num_heads, head_size}), v4 = v.view({W, S, num_heads, head_size});
+    auto q4 = q.view({W, S, num_heads, head_size}), k4 = k.view({W, S, num_heads_k, head_size}), v4 = v.view({W, S, num_heads_k, head_size});
     auto do4 = dout.view({W, S, num_heads, head_size});
-    auto dq4 = dq.view({W, S, num_heads, head_size}), dk4 = dk.view({W, S, num_heads, head_size}), dv4 = dv.view({W, S, num_heads, head_size});
+    auto dq4 = dq.view({W, S, num_heads, head_size});
+    auto dk4 = dk_expanded.view({W, S, num_heads, head_size}), dv4 = dv_expanded.view({W, S, num_heads, head_size});
 
     Flash_bwd_params params;
-    set_params_dgrad(params, W, S, S, S, S, num_heads, num_heads, head_size, head_size_rounded,
+    set_params_dgrad(params, W, S, S, S, S, num_heads, num_heads_k, head_size, head_size_rounded,
                      q4, k4, v4, do4 /* stands in for `out`, never read */,
                      do4, dq4, dk4, dv4,
                      nullptr, nullptr,
@@ -2809,6 +2828,11 @@ mha_bwd_wave(const at::Tensor &dout,         // [W*S, H, D] packed (0 on padding
     }
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     run_mha_bwd(params, stream);
+    if (num_heads_k != num_heads) {
+        // sum dK/dV over each group of query heads (query head h belongs to K/V head h / ratio)
+        at::sum_out(dk, at::reshape(dk_expanded, {total, num_heads_k, num_heads / num_heads_k, head_size}), {2});
+        at::sum_out(dv, at::reshape(dv_expanded, {total, num_heads_k, num_heads / num_heads_k, head_size}), {2});
+    }
     return {dq, dk, dv};
 }
 #endif

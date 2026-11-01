@@ -2,6 +2,23 @@
 
 ## v3.0.0 (unreleased, development in Stream-CQSA-v3)
 
+* **Grouped-query / multi-query attention.** `attention(q, k, v)` accepts `k`/`v` with `H_kv` heads dividing
+  `q`'s `H` (query head `h` attends K/V head `h // (H // H_kv)`, FlashAttention's convention; SDPA's
+  `enable_gqa=True` is accepted and not required; `patch_sdpa` routes such calls). It was rejected before
+  ("repeat k/v heads first", which multiplied K and V by `H / H_kv`). Every default route handles it on the CUDA
+  kernels: the monolithic call (SDPA with `enable_gqa`), the classic engine (device-resident and host-streamed,
+  the chunk pool, forward and backward, device or host accumulator; the pinned staging and the accumulators carry
+  each tensor's own head count) and the wave engine (gathered, in place, chunk pool; the wave backward). The
+  classic CUDA kernel (`cqsa_cuda_v13`) inherits FlashAttention-2's K/V head ratio and dK/dV group sum unchanged;
+  the wave extension's entry points (`fwd_wave` / `bwd_wave`, `native/`) now take `H_kv != H` (they checked
+  `H_k == H`), the forward through the same head ratio, the backward by forming dK/dV per query head and summing
+  each group (one rebuilt translation unit). The memory model counts K, V, dK, dV with `H_kv` heads (`Hk=` on
+  `autoconfig.plan` and the estimators), so the monolithic threshold and the depth follow the smaller K/V. The
+  Triton kernels (the no-build fallback) reject it with a message. `tests/test_v3_gqa.py` (17 tests): 4:1 and
+  8:1 within the fp16 kernels' error of SDPA and within 1e-4 of the same call on repeated heads, on every route.
+* Fix: `attention(kernel="triton")` wrote `CQSA_FORWARD` / `CQSA_BACKWARD` into the process environment for
+  good, so every later call of the process ran the Triton kernels whatever `kernel=` said (the tests popped the
+  variables by hand). The choice is scoped to the call now; the autograd function carries it to the backward.
 * **The accumulator in host memory by default where it is cheap.** The v3 experiments (E4 / E2, A100-SXM4-80GB)
   measured the host accumulator (`acc=cpu`) at 10-14% of the wall time at 1M tokens and 5-10% above for 40-70%
   less device memory, and 1.4-4x below 512K. The planner now enumerates "Q/K/V on the device, accumulator on the

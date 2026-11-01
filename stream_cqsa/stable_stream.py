@@ -109,10 +109,13 @@ _CPU_MERGE_THREADS_DEFAULT = 8
 # bandwidth-bound streams contend rather than hiding either, and the thread
 # handoff adds latency on top. Default off; the toggle stays so the claim can be
 # re-checked on hardware with more host bandwidth, where it may flip.
-# next/: default ON. The docstring of flush() below measured the scatter at
-# 1685 ms against 5115 ms of compute at N=262144, "entirely hideable", yet it
-# shipped off. "0" restores the shipped behaviour for A/B.
-_SCATTER_ASYNC = os.environ.get("CQSA_SCATTER_ASYNC", "0") != "0"
+# v3 (E11, results/v3, A100-SXM4-80GB, classic CUDA, c=7, itr=1, host-resident
+# forward+backward, medians of 3 runs in one job): asynchronous 0.93x the
+# synchronous wall time at 1M (28.4 vs 30.5 s) and 0.98x at 2M (118.6 vs
+# 121.0 s), the same device and host peaks. The contention argument above did
+# not hold at these sizes, so the default is ON; "0" restores the synchronous
+# scatter for A/B.
+_SCATTER_ASYNC = os.environ.get("CQSA_SCATTER_ASYNC", "1") != "0"
 # next/: forward host-accumulator merge on a worker thread, with a
 # non-blocking D2H into pinned slots. Default ON here; "0" restores the
 # shipped blocking path for A/B measurement.
@@ -310,6 +313,20 @@ class SubproblemTask:
     status: str = "queued"
     stream_id: int = -1
     extra: dict[str, Any] = field(default_factory=dict)
+
+
+def check_kv_heads(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> int:
+    """The number of K/V heads of a ``[B, H, N, D]`` triple: ``H``, or a divisor of it
+    (grouped-query / multi-query attention: query head ``h`` attends K/V head
+    ``h // (H // Hk)``, FlashAttention's convention). Raises on anything else."""
+    H, Hk = int(q.shape[1]), int(k.shape[1])
+    if Hk < 1 or H % Hk != 0:
+        raise ValueError(f"K/V heads must divide the query heads (grouped-query attention): q has {H} heads, k has {Hk}")
+    if tuple(k.shape) != tuple(v.shape):
+        raise ValueError(f"k and v must have the same shape (got {tuple(k.shape)} and {tuple(v.shape)})")
+    if (int(k.shape[0]), int(k.shape[2]), int(k.shape[3])) != (int(q.shape[0]), int(q.shape[2]), int(q.shape[3])):
+        raise ValueError(f"q and k/v must agree in [B, ., N, D] (got {tuple(q.shape)} and {tuple(k.shape)})")
+    return Hk
 
 
 def estimate_task_bytes(local_size: int, B: int, H: int, D: int, itemsize: int) -> int:
@@ -734,9 +751,13 @@ def per_el_floor(itemsize: int, stream_from_host: bool,
 def estimate_peak_bytes(N: int, itr: int, *, B: int, H: int, D: int, itemsize: int,
                        n_par: int = 2, c: int = 7, l: int = 3,
                        stream_from_host: bool = False,
-                       accumulate_on_gpu: bool = True, out_bytes_per_el: int = 4) -> int:
+                       accumulate_on_gpu: bool = True, out_bytes_per_el: int = 4,
+                       Hk: int | None = None) -> int:
     """
     Predicted peak device memory for a Stream-CQSA forward.
+
+    ``Hk``: the number of K/V heads (grouped-query attention); ``None`` = ``H``. K and V, and
+    nothing else, carry ``Hk`` heads: the terms below subtract ``2 * (H - Hk)`` head-rows of K/V.
 
     Two parts, and only the second shrinks with ``itr``:
 
@@ -761,11 +782,14 @@ def estimate_peak_bytes(N: int, itr: int, *, B: int, H: int, D: int, itemsize: i
     1.02x at itr=2, flat across N = 32768 .. 131072. The ratio does *not* improve
     with N because both terms are linear in N.
     """
+    Hk = H if Hk is None else int(Hk)
     floor = per_el_floor(itemsize, stream_from_host, accumulate_on_gpu, out_bytes_per_el) * N * H * D
+    if not stream_from_host:
+        floor -= 2 * itemsize * N * (H - Hk) * D                  # K and V have Hk heads, not H
     L = N
     for _ in range(int(itr)):
         L = int(L * l / c)
-    transient = int(n_par) * (3 * itemsize + 4) * L * H * D
+    transient = int(n_par) * ((3 * itemsize + 4) * L * H * D - 2 * itemsize * L * (H - Hk) * D)
     return int(floor + transient)
 
 
@@ -811,7 +835,7 @@ def _memory_fraction(device) -> float:
 def estimate_peak_bytes_bwd(N: int, itr: int, *, B: int, H: int, D: int, itemsize: int,
                            n_par: int = 1, c: int = 7, l: int = 3,
                            stream_from_host: bool = False,
-                           accumulate_on_gpu: bool = True) -> int:
+                           accumulate_on_gpu: bool = True, Hk: int | None = None) -> int:
     """
     Predicted peak device memory for a Stream-CQSA BACKWARD (dq/dk/dv of a
     forward already computed). Same shape as `estimate_peak_bytes` but with the
@@ -823,24 +847,35 @@ def estimate_peak_bytes_bwd(N: int, itr: int, *, B: int, H: int, D: int, itemsiz
       transient per in-flight subproblem: q_i/k_i/v_i/dout_i/out_i (5*itemsize),
                 the kernel's dq/dk/dv (3*4), its dq accumulation scratch (4)
                 and lse/delta (8 per row).
+
+    ``Hk`` (grouped-query attention, ``None`` = ``H``): the resident k/v and the dk/dv
+    accumulators carry ``Hk`` heads. The per-subproblem transient keeps ``H`` for the
+    gradients: the kernel forms dk/dv per query head and sums the group afterwards.
     """
+    Hk = H if Hk is None else int(Hk)
     per_el = 0
     if not stream_from_host:
         per_el += 5 * itemsize
     if accumulate_on_gpu:
         per_el += 3 * 4
     floor = per_el * N * B * H * D + N * B * H * 4
+    if not stream_from_host:
+        floor -= 2 * itemsize * N * B * (H - Hk) * D               # k, v
+    if accumulate_on_gpu:
+        floor -= 2 * 4 * N * B * (H - Hk) * D                      # dk, dv
     L = N
     for _ in range(int(itr)):
         L = int(L * l / c)
-    transient = int(n_par) * ((5 * itemsize + 3 * 4 + 4) * L * B * H * D + 8 * L * B * H)
+    transient = int(n_par) * ((5 * itemsize + 3 * 4 + 4) * L * B * H * D + 8 * L * B * H
+                              - 2 * itemsize * L * B * (H - Hk) * D)
     return int(floor + transient)
 
 
 def plan_decomposition_bwd(N: int, *, B: int, H: int, D: int, itemsize: int, device,
                            safety: float = 0.75, reserve_gib: float = 0.0, c: int = 7,
                            interest_set: Sequence[int] = (0, 1, 3), max_itr: int = 3,
-                           stream_from_host: bool = False, accumulate_on_gpu: bool = True) -> tuple[int, str]:
+                           stream_from_host: bool = False, accumulate_on_gpu: bool = True,
+                           Hk: int | None = None) -> tuple[int, str]:
     """
     Depth for the backward, chosen from free memory with the backward's own
     estimate -- independent of the depth the forward used. Returns (itr, reason);
@@ -852,19 +887,21 @@ def plan_decomposition_bwd(N: int, *, B: int, H: int, D: int, itemsize: int, dev
     budget = int(max(0.0, free_b - reserve_gib * _GIB) * float(safety))
     l = len(interest_set)
     for itr in range(1, int(max_itr) + 1):
-        need = estimate_peak_bytes_bwd(N, itr, B=B, H=H, D=D, itemsize=itemsize, c=c, l=l,
+        need = estimate_peak_bytes_bwd(N, itr, B=B, H=H, D=D, itemsize=itemsize, c=c, l=l, Hk=Hk,
                                        stream_from_host=stream_from_host, accumulate_on_gpu=accumulate_on_gpu)
         if need <= budget:
             return itr, f"backward itr={itr} fits ({need / _GIB:.2f} GiB <= {budget / _GIB:.2f} GiB budget)"
     return max_itr, f"no backward depth fits the {budget / _GIB:.2f} GiB budget; using itr={max_itr}"
 
 
-def estimate_monolithic_bytes(N: int, *, B: int, H: int, D: int, itemsize: int) -> int:
+def estimate_monolithic_bytes(N: int, *, B: int, H: int, D: int, itemsize: int, Hk: int | None = None) -> int:
     """
     Predicted peak for a single monolithic FlashAttention call: Q/K/V, the
     output, the fp32 lse, plus a modest allowance for kernel workspace.
+    ``Hk``: K/V heads (grouped-query attention); ``None`` = ``H``.
     """
-    qkv = 3 * N * H * D * itemsize
+    Hk = H if Hk is None else int(Hk)
+    qkv = (H + 2 * Hk) * N * D * itemsize
     out = N * H * D * itemsize
     lse = N * H * 4
     return int((qkv + out + lse) * 1.15)
@@ -885,6 +922,7 @@ def plan_decomposition(
     max_itr: int = 3,
     stream_from_host: bool = False,
     accumulate_on_gpu: bool = True,
+    Hk: int | None = None,
 ) -> tuple[int, str]:
     """
     Choose the decomposition depth from measured free memory.
@@ -909,7 +947,7 @@ def plan_decomposition(
     free_b = effective_free_bytes(device)
     budget = int(max(0.0, free_b - reserve_gib * _GIB) * float(safety))
 
-    mono = estimate_monolithic_bytes(N, B=B, H=H, D=D, itemsize=itemsize)
+    mono = estimate_monolithic_bytes(N, B=B, H=H, D=D, itemsize=itemsize, Hk=Hk)
     if mono <= budget:
         return 0, (f"monolithic fits ({mono / _GIB:.2f} GiB <= {budget / _GIB:.2f} GiB budget): "
                    "not decomposing is both faster and more accurate")
@@ -922,7 +960,7 @@ def plan_decomposition(
         # 4900 s) where itr=2 runs in 42 GiB (the paper's 3277 s).
         need = estimate_peak_bytes(N, itr, B=B, H=H, D=D, itemsize=itemsize, c=c, l=l, n_par=1,
                                    stream_from_host=stream_from_host,
-                                   accumulate_on_gpu=accumulate_on_gpu)
+                                   accumulate_on_gpu=accumulate_on_gpu, Hk=Hk)
         if need <= budget:
             return itr, (f"monolithic needs {mono / _GIB:.2f} GiB > budget "
                          f"{budget / _GIB:.2f} GiB; itr={itr} fits at {need / _GIB:.2f} GiB")
@@ -953,16 +991,19 @@ class DeviceChunkPool:
     at pool rows -- no gather and no contiguous per-subsequence buffer.
     """
 
-    def __init__(self, n_slots, chunk_tokens, *, B, H, D, dtype, device, align=128):
+    def __init__(self, n_slots, chunk_tokens, *, B, H, D, dtype, device, align=128, Hk=None):
         self.n_slots = int(n_slots)
         self.chunk_tokens = int(chunk_tokens)
         self.align = int(align)
         # One [B, n_slots*chunk_tokens, H, D] buffer per tensor, token-major so
-        # the block map indexes rows directly.
+        # the block map indexes rows directly. K and V carry Hk heads (grouped-
+        # query attention; Hk = H otherwise).
+        Hk = H if Hk is None else int(Hk)
+        self.heads = (int(H), Hk, Hk)
         self.buf = [
-            torch.empty((B, self.n_slots * self.chunk_tokens, H, D),
+            torch.empty((B, self.n_slots * self.chunk_tokens, h, D),
                         dtype=dtype, device=device)
-            for _ in range(3)
+            for h in self.heads
         ]
         self.slot_of: dict[int, int] = {}
         self.refcount: dict[int, int] = {}
@@ -1293,6 +1334,8 @@ def stream_cqsa_forward(
     retries, rather than failing the run.
     """
     B, H, N, D = q.shape
+    Hk = check_kv_heads(q, k, v)       # K/V heads: H, or a divisor of it (grouped-query attention)
+    heads = (H, Hk, Hk)                # per tensor, for the staging views and the pool
     device = q.device
     if scale is None:
         scale = float(D) ** -0.5
@@ -1358,7 +1401,7 @@ def stream_cqsa_forward(
             raise ValueError(f"itr must be an int or 'auto', got {itr!r}")
         itr, plan_reason = plan_decomposition(
             N, B=B, H=H, D=D, itemsize=q.element_size(), device=device,
-            safety=safety, c=c, interest_set=interest_set,
+            safety=safety, c=c, interest_set=interest_set, Hk=Hk,
             # Tell the planner where this call's O(N) terms will actually live.
             # Without these it estimates every configuration as if Q/K/V and the
             # accumulator were device-resident, which is exactly the
@@ -1566,12 +1609,12 @@ def stream_cqsa_forward(
         if shared_chunks:
             chunk_pool = DeviceChunkPool(
                 slots, max_chunk, B=B, H=H, D=D, dtype=q.dtype,
-                device=device, align=seg_align,
+                device=device, align=seg_align, Hk=Hk,
             )
-        max_el = B * max((t.local_size for t in tasks), default=1) * H * D
+        max_L_tok = max((t.local_size for t in tasks), default=1)
         for _ in range(max(1, len(streams))):
             pinned_slots.append(tuple(
-                torch.empty(max_el, dtype=q.dtype, pin_memory=True) for _ in range(3)
+                torch.empty(B * max_L_tok * h * D, dtype=q.dtype, pin_memory=True) for h in heads
             ))
 
     # The merge is a read-modify-write of shared global state (acc/l/m). Running
@@ -1673,7 +1716,7 @@ def stream_cqsa_forward(
                 Lloc = int(task.local_size)
                 pool_rows = chunk_pool.n_slots * chunk_pool.chunk_tokens
                 q_i, k_i, v_i = (
-                    b.as_strided((B, Lloc, H, D), b.stride()) for b in chunk_pool.buf
+                    b.as_strided((B, Lloc, h, D), b.stride()) for b, h in zip(chunk_pool.buf, heads)
                 )
             elif host_resident:
                 # Host-resident Q/K/V: gather on the CPU and stream only this
@@ -1688,8 +1731,7 @@ def stream_cqsa_forward(
                 # N=32768 (56x), and it dominated everything else.
                 Lloc = int(task.local_size)
                 buf = pinned_slots[slot]
-                n_el = B * Lloc * H * D
-                views = [b[:n_el].view(B, Lloc, H, D) for b in buf]
+                views = [b[:B * Lloc * h * D].view(B, Lloc, h, D) for b, h in zip(buf, heads)]
                 torch.index_select(q_tm, 1, task.token_ids, out=views[0])
                 torch.index_select(k_tm, 1, task.token_ids, out=views[1])
                 torch.index_select(v_tm, 1, task.token_ids, out=views[2])
@@ -1703,8 +1745,8 @@ def stream_cqsa_forward(
                 # to global row base[r // align] + r % align inside the kernel.
                 Lloc = int(task.local_size)
                 q_i = qt.as_strided((B, Lloc, H, D), qt.stride())
-                k_i = kt.as_strided((B, Lloc, H, D), kt.stride())
-                v_i = vt.as_strided((B, Lloc, H, D), vt.stride())
+                k_i = kt.as_strided((B, Lloc, Hk, D), kt.stride())
+                v_i = vt.as_strided((B, Lloc, Hk, D), vt.stride())
             else:
                 q_i = q.index_select(2, idx).transpose(1, 2)
                 k_i = k.index_select(2, idx).transpose(1, 2)
@@ -2168,10 +2210,13 @@ def _stream_cqsa_backward_host(
              if _BWD_USE_DPSUM else None)          # [B, H, N]
     o_tm = None if _BWD_USE_DPSUM else out.transpose(1, 2).contiguous().to(dtype)
 
+    Hk = int(k.shape[1])                          # K/V heads (grouped-query attention: a divisor of H)
+    in_heads = (H, Hk, Hk, H) if _BWD_USE_DPSUM else (H, Hk, Hk, H, H)     # q, k, v, dO[, O]
+    grad_heads = (H, Hk, Hk)                                                # dq, dk, dv
     acc_dev = device if accumulate_on_gpu else None
     dq = torch.zeros((B, N, H, D), dtype=torch.float32, device=acc_dev)
-    dk = torch.zeros((B, N, H, D), dtype=torch.float32, device=acc_dev)
-    dv = torch.zeros((B, N, H, D), dtype=torch.float32, device=acc_dev)
+    dk = torch.zeros((B, N, Hk, D), dtype=torch.float32, device=acc_dev)
+    dv = torch.zeros((B, N, Hk, D), dtype=torch.float32, device=acc_dev)
 
     if max_parallel is None:
         n_par = choose_parallelism(
@@ -2193,15 +2238,13 @@ def _stream_cqsa_backward_host(
     for _s in streams:
         _s.wait_stream(_caller)
     max_L = max((int(t.local_size) for t in tasks), default=1)
-    max_el = B * max_L * H * D
     # Pinned staging: 5 in (q,k,v,do,o) + 3 out (dq,dk,dv) + lse, per slot.
     stage_in = [
-        tuple(torch.empty(max_el, dtype=dtype, pin_memory=True)
-              for _ in range(4 if _BWD_USE_DPSUM else 5))
+        tuple(torch.empty(B * max_L * h * D, dtype=dtype, pin_memory=True) for h in in_heads)
         for _ in range(n_par)
     ]
     stage_out = [
-        tuple(torch.empty(max_el, dtype=dtype, pin_memory=True) for _ in range(3))
+        tuple(torch.empty(B * max_L * h * D, dtype=dtype, pin_memory=True) for h in grad_heads)
         for _ in range(n_par)
     ]
     stage_lse = [
@@ -2231,8 +2274,7 @@ def _stream_cqsa_backward_host(
         """Add one slot's gradients into the host accumulators."""
         if accumulate_on_gpu:
             return 0.0, 0.0          # already added on the device, in-line
-        n_el = B * Lloc * H * D
-        for acc, buf in zip((dq, dk, dv), stage_out[slot]):
+        for acc, buf, h in zip((dq, dk, dv), stage_out[slot], grad_heads):
             # The pair sets partition, so contributions simply add (algo:bwd
             # lines 17-19). Accumulate in fp32 regardless of input dtype.
             #
@@ -2241,7 +2283,7 @@ def _stream_cqsa_backward_host(
             # to .float() but skips materialising a full-size fp32 temporary
             # (measured 1.86x at L=12036, break-even once the copy is large
             # enough to be bandwidth-bound anyway).
-            src = buf[:n_el].view(B, Lloc, H, D)
+            src = buf[:B * Lloc * h * D].view(B, Lloc, h, D)
             if runs:
                 for off, start, ln in runs:
                     acc[:, start:start + ln].add_(src[:, off:off + ln])
@@ -2304,7 +2346,6 @@ def _stream_cqsa_backward_host(
 
             idx_cpu = task.token_ids
             Lloc = int(task.local_size)
-            n_el = B * Lloc * H * D
 
             def mk():
                 return (torch.cuda.Event(enable_timing=True),
@@ -2313,7 +2354,7 @@ def _stream_cqsa_backward_host(
             with torch.cuda.stream(streams[slot]):
                 t_g0 = time.perf_counter()
                 views = [
-                    b[:n_el].view(B, Lloc, H, D) for b in stage_in[slot]
+                    b[:B * Lloc * h * D].view(B, Lloc, h, D) for b, h in zip(stage_in[slot], in_heads)
                 ]   # q, k, v, dO -- O is not staged (see dps_c above)
                 lv = stage_lse[slot][: B * H * Lloc].view(B, H, Lloc)
                 dv_ = stage_dps[slot][: B * H * Lloc].view(B, H, Lloc)
@@ -2375,8 +2416,8 @@ def _stream_cqsa_backward_host(
                     for acc, g in zip((dq, dk, dv), (dq_i, dk_i, dv_i)):
                         acc.index_add_(1, idx_dev, g.to(torch.float32))
                 else:
-                    for g, buf in zip((dq_i, dk_i, dv_i), stage_out[slot]):
-                        buf[:n_el].view(B, Lloc, H, D).copy_(g, non_blocking=True)
+                    for g, buf, h in zip((dq_i, dk_i, dv_i), stage_out[slot], grad_heads):
+                        buf[:B * Lloc * h * D].view(B, Lloc, h, D).copy_(g, non_blocking=True)
                 if tr is not None:
                     e_d2h[1].record()
                 ev = torch.cuda.Event()
@@ -2489,7 +2530,7 @@ def stream_cqsa_backward(
         _dev = torch.device("cuda", torch.cuda.current_device()) if host_resident else q.device
         itr, _reason = plan_decomposition_bwd(
             N, B=B, H=H, D=D, itemsize=q.element_size(), device=_dev, c=c, interest_set=tuple(interest_set),
-            stream_from_host=host_resident, accumulate_on_gpu=bool(accumulate_on_gpu))
+            stream_from_host=host_resident, accumulate_on_gpu=bool(accumulate_on_gpu), Hk=int(k.shape[1]))
         itr = max(int(itr), int(min_itr))
         if bwd_info is not None:
             bwd_info["plan_reason"] = _reason
@@ -2626,9 +2667,11 @@ def stream_cqsa_backward(
     # on the device, so acc=cpu saved nothing in a device-resident backward).
     host_acc = not bool(accumulate_on_gpu)
     acc_dev = None if host_acc else device
+    Hk = int(k.shape[1])                          # K/V heads (grouped-query attention: a divisor of H)
+    grad_heads = (H, Hk, Hk)
     dq = torch.zeros((B, N, H, D), device=acc_dev, dtype=torch.float32)
-    dk = torch.zeros((B, N, H, D), device=acc_dev, dtype=torch.float32)
-    dv = torch.zeros((B, N, H, D), device=acc_dev, dtype=torch.float32)
+    dk = torch.zeros((B, N, Hk, D), device=acc_dev, dtype=torch.float32)
+    dv = torch.zeros((B, N, Hk, D), device=acc_dev, dtype=torch.float32)
     if host_acc:
         # Two pinned slots of the largest subproblem (refinement only makes
         # them smaller), a copy stream for the D2H, one worker for the host
@@ -2636,7 +2679,7 @@ def stream_cqsa_backward(
         # would race; one at a time, order irrelevant since addition commutes).
         _max_L = max((int(t.local_size) for t in tasks), default=1)
         _n_slots = 2
-        _stage = [tuple(torch.empty(B * _max_L * H * D, dtype=q.dtype, pin_memory=True) for _ in range(3))
+        _stage = [tuple(torch.empty(B * _max_L * h * D, dtype=q.dtype, pin_memory=True) for h in grad_heads)
                   for _ in range(_n_slots)]
         _slot_state: list[tuple | None] = [None] * _n_slots       # (event, idx_cpu, runs, L) of a slot in flight
         _slot_fut: list = [None] * _n_slots
@@ -2645,10 +2688,9 @@ def stream_cqsa_backward(
         _slot_counter = [0]
 
         def _host_add(slot: int, idx_cpu, runs, Lloc: int) -> None:
-            n_el = B * Lloc * H * D
             with _cpu_threads(cpu_threads):
-                for acc, buf in zip((dq, dk, dv), _stage[slot]):
-                    src = buf[:n_el].view(B, Lloc, H, D)
+                for acc, buf, h in zip((dq, dk, dv), _stage[slot], grad_heads):
+                    src = buf[:B * Lloc * h * D].view(B, Lloc, h, D)
                     if runs:
                         for off, start, ln in runs:
                             acc[:, start:start + ln].add_(src[:, off:off + ln])   # add_ promotes to fp32 in place
@@ -2681,12 +2723,11 @@ def stream_cqsa_backward(
                 runs = _contiguous_runs(idx_cpu)
                 if isinstance(getattr(task, "extra", None), dict):
                     task.extra["runs"] = runs
-            n_el = B * Lloc * H * D
             cur = torch.cuda.current_stream(device)
             _copy_stream.wait_stream(cur)
             with torch.cuda.stream(_copy_stream):
-                for g, buf in zip((dq_i, dk_i, dv_i), _stage[slot]):
-                    buf[:n_el].view(B, Lloc, H, D).copy_(g, non_blocking=True)
+                for g, buf, h in zip((dq_i, dk_i, dv_i), _stage[slot], grad_heads):
+                    buf[:B * Lloc * h * D].view(B, Lloc, h, D).copy_(g, non_blocking=True)
                     g.record_stream(_copy_stream)
                 ev = torch.cuda.Event()
                 ev.record(_copy_stream)

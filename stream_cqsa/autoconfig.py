@@ -495,17 +495,19 @@ class Plan:
 PLAN_TOL_DEFAULT = float(os.environ.get("CQSA_PLAN_TOL", "0.15"))
 
 
-def _host_bytes(N, B, H, D, itemsize, stream_from_host, acc, direction="fwd"):
+def _host_bytes(N, B, H, D, itemsize, stream_from_host, acc, direction="fwd", Hk=None):
+    Hk = H if Hk is None else int(Hk)             # K/V heads (grouped-query attention)
     el = N * B * H * D
+    elk = N * B * Hk * D
     b = 0
     if stream_from_host:
-        b += 3 * el * itemsize                     # pinned Q/K/V
+        b += (el + 2 * elk) * itemsize             # pinned Q/K/V
         if direction == "bwd":
             b += 2 * el * itemsize                 # ... and dO, O (the forward's output) streamed as well
     if acc == "cpu":
         b += el * 4 + N * B * H * 8                # the forward's fp32 accumulator (+ m, l)
         if direction == "bwd":
-            b += 3 * el * 4                        # the three fp32 gradient accumulators
+            b += (el + 2 * elk) * 4                # the three fp32 gradient accumulators
     return b
 
 
@@ -516,9 +518,12 @@ def plan(*, N: int, B: int = 1, H: int = 8, D: int = 64, dtype=torch.float16, ca
          safety: float = 0.85, tol: float | None = None, out_bytes_per_el: int = 4,
          resident_input_bytes: int = 0, budget_excludes_inputs: bool = True, evict_inputs: bool = False,
          engines: Sequence[str] | None = None, allow_mono: bool = True, inputs_on_host: bool = False,
-         min_itr: int = 1) -> Plan:
+         min_itr: int = 1, Hk: int | None = None) -> Plan:
     """
     Choose the configuration for one attention call on `hardware` (detected if None).
+    ``Hk``: the K/V head count (grouped-query attention), ``None`` = ``H``; it enters the memory
+    estimates only (K, V, dK, dV carry ``Hk`` heads). The time model keeps ``H``: the pair work is per
+    query head, and the host-side byte terms it scales by ``B*H*D`` are then a small over-estimate.
     ``out_bytes_per_el``: device bytes per element the delivered forward output costs when the
     accumulator is on the host (4 = classic engine default, 2 = fp16 to a device caller, 0 = host caller).
 
@@ -585,7 +590,8 @@ def plan(*, N: int, B: int = 1, H: int = 8, D: int = 64, dtype=torch.float16, ca
     cands: list[dict] = []
 
     bwd = direction == "bwd"
-    mono = estimate_monolithic_bytes(N, B=B, H=H, D=D, itemsize=itemsize) * (2.2 if bwd else 1.0)
+    Hk = H if Hk is None else int(Hk)
+    mono = estimate_monolithic_bytes(N, B=B, H=H, D=D, itemsize=itemsize, Hk=Hk) * (2.2 if bwd else 1.0)
     cands.append(dict(mode="mono", itr=0, c=7, interest_set=(0, 1, 3), acc="gpu", stream_from_host=False, n_par=1, world=1,
                       time=cm.mono_time(N, B, H, causal, direction), peak=mono / GIB, host=0.0,
                       ok=bool(allow_mono and mono <= dev_budget)))
@@ -606,7 +612,7 @@ def plan(*, N: int, B: int = 1, H: int = 8, D: int = 64, dtype=torch.float16, ca
                         # backward's three fp32 gradients) in host memory, the inputs where they are
                         if inputs_on_host and not host:
                             continue
-                        hostb = _host_bytes(N, B, H, D, itemsize, host, acc, direction)
+                        hostb = _host_bytes(N, B, H, D, itemsize, host, acc, direction, Hk=Hk)
                         evict = bool(host and R and evict_inputs)
                         stay = R if (host and R and not evict) else 0      # streaming next to the unevicted device copy
                         base = dict(mode="cqsa" if w == 1 else "cqsa_dist", itr=itr, c=c, interest_set=tuple(iset),
@@ -634,7 +640,8 @@ def plan(*, N: int, B: int = 1, H: int = 8, D: int = 64, dtype=torch.float16, ca
                                 for W in wave_token_ladder(N, itr, c, l):
                                     peak = estimate_wave_peak_bytes(N, W, B=B, H=H, D=D, itemsize=itemsize, itr=itr, c=c, l=l,
                                                                     stream_from_host=host, accumulate_on_gpu=(acc == "gpu"),
-                                                                    gather=gather, direction=direction, out_bytes_per_el=int(out_bytes_per_el))
+                                                                    gather=gather, direction=direction, out_bytes_per_el=int(out_bytes_per_el),
+                                                                    Hk=Hk)
                                     t = cm.cqsa_time(N, B, H, D, itr, causal, acc, host, 1, world=w, hw=hw, c=c, l=l, direction=direction,
                                                      engine="wave", wave_tokens=W, gather=gather)
                                     # acc=cpu: the async fold's two pinned slots, each a wave's touched tokens (<= W, <= N)
@@ -651,7 +658,7 @@ def plan(*, N: int, B: int = 1, H: int = 8, D: int = 64, dtype=torch.float16, ca
                                 continue
                             est = estimate_peak_bytes_bwd if bwd else estimate_peak_bytes
                             extra = {} if bwd else {"out_bytes_per_el": int(out_bytes_per_el)}
-                            peak = est(N, itr, B=B, H=H, D=D, itemsize=itemsize, n_par=n_par, c=c, l=l,
+                            peak = est(N, itr, B=B, H=H, D=D, itemsize=itemsize, n_par=n_par, c=c, l=l, Hk=Hk,
                                        stream_from_host=host, accumulate_on_gpu=(acc == "gpu"), **extra)
                             t = cm.cqsa_time(N, B, H, D, itr, causal, acc, host, n_par, world=w, hw=hw, c=c, l=l, direction=direction,
                                              rates=rel_rates[w])

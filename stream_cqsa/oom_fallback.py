@@ -38,7 +38,7 @@ Limitations, stated plainly
 * **Forward only.** There is no `torch.autograd.Function` wrapper yet, so the
   returned tensor does not carry a backward. Use `stream_cqsa_backward`
   explicitly (it needs `info["lse"]`, so pass `return_info=True`).
-* `dropout_p` must be 0 and GQA/MQA is unsupported, matching the kernel.
+* `dropout_p` must be 0. GQA/MQA (fewer K/V heads) runs on the CUDA kernels; the Triton kernels reject it.
 * With `release_inputs=False` (the default) recovery only succeeds if the
   transient workspace was what overflowed, not the inputs themselves.
 """

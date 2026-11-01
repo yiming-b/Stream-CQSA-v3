@@ -41,11 +41,33 @@ device for host-resident operands.
 """
 from __future__ import annotations
 
+import os
+from contextlib import contextmanager
 from typing import Any, Sequence
 
 import torch
 
 from .stable_stream import stream_cqsa_backward, stream_cqsa_forward
+
+
+@contextmanager
+def kernel_env(forward: str | None, backward: str | None):
+    """``CQSA_FORWARD`` / ``CQSA_BACKWARD`` set for the duration of a call only (``None`` = leave as is).
+    The classic engine's kernel choice is read from the environment at call time; ``attention(kernel="triton")``
+    used to write it for good, so every later call of the process ran Triton (and a GQA call then failed on it)."""
+    keys = {"CQSA_FORWARD": forward, "CQSA_BACKWARD": backward}
+    saved = {k: os.environ.get(k) for k, v in keys.items() if v is not None}
+    for k, v in keys.items():
+        if v is not None:
+            os.environ[k] = v
+    try:
+        yield
+    finally:
+        for k, old in saved.items():
+            if old is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = old
 
 __all__ = ["stream_cqsa_attn", "StreamCQSAAttention"]
 
@@ -88,6 +110,8 @@ class _StreamCQSANative(torch.autograd.Function):
             out_dtype=q.dtype,
             monolithic=bool(info.get("monolithic", False)),
             verbose=verbose,
+            # the backward runs later, from loss.backward(): carry the kernel choice of the call
+            backward_kernel=os.environ.get("CQSA_BACKWARD"),
         )
         # Match the inputs' device, not the accumulator's. The forward returns
         # its output wherever the accumulator lived, and with itr="auto" that
@@ -123,18 +147,19 @@ class _StreamCQSANative(torch.autograd.Function):
         bwd_itr = cfg["itr"]
         if cfg["monolithic"] and isinstance(bwd_itr, int) and bwd_itr == 0:
             bwd_itr = "auto"                     # the forward ran monolithically; the backward still decomposes
-        dq, dk, dv = stream_cqsa_backward(
-            q_c, k_c, v_c, dout_c, out_c, lse_c,
-            itr=bwd_itr, causal=cfg["causal"], scale=cfg["scale"],
-            sorted_gather=cfg["sorted_gather"],
-            c=cfg["c"], interest_set=cfg["interest_set"],
-            stream_from_host=host, verbose=cfg.get("verbose"),
-            # One knob for the whole call: the backward places its dQ/dK/dV the
-            # same way the forward placed its accumulator, so a caller who asked
-            # to keep O(N) terms off the device gets that in both directions.
-            accumulate_on_gpu=cfg["accumulate_on_gpu"],
-            max_parallel=cfg["max_parallel"],
-        )
+        with kernel_env(None, cfg.get("backward_kernel")):
+            dq, dk, dv = stream_cqsa_backward(
+                q_c, k_c, v_c, dout_c, out_c, lse_c,
+                itr=bwd_itr, causal=cfg["causal"], scale=cfg["scale"],
+                sorted_gather=cfg["sorted_gather"],
+                c=cfg["c"], interest_set=cfg["interest_set"],
+                stream_from_host=host, verbose=cfg.get("verbose"),
+                # One knob for the whole call: the backward places its dQ/dK/dV the
+                # same way the forward placed its accumulator, so a caller who asked
+                # to keep O(N) terms off the device gets that in both directions.
+                accumulate_on_gpu=cfg["accumulate_on_gpu"],
+                max_parallel=cfg["max_parallel"],
+            )
 
         dt = cfg["out_dtype"]
         # cast where the gradient sits (fp32 on the host with a host accumulator), then move

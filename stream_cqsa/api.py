@@ -64,10 +64,13 @@ def _check_inputs(q, k, v, attn_mask, dropout_p, enable_gqa):
                                   "attn_mask is not supported. For FlexAttention-style masks use stream_cqsa.adapters.flex_inner.")
     if dropout_p:
         raise NotImplementedError("stream_cqsa.attention does not support dropout (dropout_p must be 0).")
-    if enable_gqa or k.shape[1] != q.shape[1]:
-        raise NotImplementedError("stream_cqsa.attention needs the same number of heads for q and k/v (no GQA); repeat k/v heads first.")
-    if q.shape != k.shape or q.shape != v.shape:
-        raise ValueError("q, k and v must have the same shape [B, H, N, D] (cross-attention with N_q != N_k is not supported)")
+    if k.shape != v.shape:
+        raise ValueError(f"k and v must have the same shape [B, H_kv, N, D] (got {tuple(k.shape)} and {tuple(v.shape)})")
+    if (q.shape[0], q.shape[2], q.shape[3]) != (k.shape[0], k.shape[2], k.shape[3]):
+        raise ValueError("q and k/v must agree in [B, ., N, D] (cross-attention with N_q != N_k is not supported); "
+                         f"got {tuple(q.shape)} and {tuple(k.shape)}")
+    if k.shape[1] != q.shape[1] and (k.shape[1] < 1 or q.shape[1] % k.shape[1] != 0):
+        raise ValueError(f"grouped-query attention needs the K/V heads to divide the query heads (got {q.shape[1]} and {k.shape[1]})")
     if q.dtype not in (torch.float16, torch.bfloat16):
         raise TypeError(f"stream_cqsa.attention needs fp16 or bf16 inputs (got {q.dtype}); cast with .half() or .bfloat16(). "
                         "Accumulation is fp32 internally regardless.")
@@ -87,7 +90,10 @@ def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, attn_mask=None,
               return_plan: bool = False, return_info: bool = False, **overrides) -> torch.Tensor:
     """
     Exact attention that always fits. Drop-in for ``F.scaled_dot_product_attention``
-    (same positional signature; masks, dropout and GQA are rejected with a message).
+    (same positional signature; masks and dropout are rejected with a message). Grouped-query /
+    multi-query attention: ``k``/``v`` with ``H_kv`` heads dividing ``q``'s ``H`` (query head ``h``
+    attends K/V head ``h // (H // H_kv)``), with or without ``enable_gqa=True``; the CUDA kernels
+    (classic and wave, both directions) handle it natively, the Triton kernels reject it.
 
     q/k/v ``[B, H, N, D]`` fp16/bf16, on a device or in host memory. Returns the
     output in the inputs' dtype and device. Differentiable when the inputs require
@@ -304,6 +310,7 @@ def _attention(q, k, v, attn_mask, dropout_p, is_causal, scale, enable_gqa, *, v
     from .autoconfig import plan as _plan, hardware_from_dict, detect_hardware
     _check_inputs(q, k, v, attn_mask, dropout_p, enable_gqa)
     B, H, N, D = q.shape
+    Hk = int(k.shape[1])                                  # K/V heads (grouped-query attention: a divisor of H)
     if scale is None:
         scale = float(D) ** -0.5
     on_cuda = q.device.type == "cuda"
@@ -324,13 +331,13 @@ def _attention(q, k, v, attn_mask, dropout_p, is_causal, scale, enable_gqa, *, v
     resident = (sum(t.numel() * t.element_size() for t in (q, k, v)) if on_cuda else 0)
     # inputs_on_host: only host-streaming decompositions can run on host tensors (the planner skips the rest)
     pkw = dict(resident_input_bytes=resident, budget_excludes_inputs=hardware is None,
-               evict_inputs=bool(evict) and on_cuda, inputs_on_host=not on_cuda)
+               evict_inputs=bool(evict) and on_cuda, inputs_on_host=not on_cuda, Hk=Hk)
     if "tol" in overrides:                                # the planner's frontier tolerance (see autoconfig.PLAN_TOL_DEFAULT)
         pkw["tol"] = float(overrides.pop("tol"))
     if evict is True and on_cuda and not plan_only:
         (q, k, v), ev["state"] = _evict_inputs((q, k, v), direction == "bwd", vb)
         on_cuda = False
-        pkw = dict(resident_input_bytes=0, inputs_on_host=True, **({"tol": pkw["tol"]} if "tol" in pkw else {}))
+        pkw = dict(resident_input_bytes=0, inputs_on_host=True, Hk=Hk, **({"tol": pkw["tol"]} if "tol" in pkw else {}))
         engines = _engines_for(kernel, q.dtype, D, direction, on_host=True)
         if hardware is None:
             hw = detect_hardware()
@@ -410,7 +417,8 @@ def _run(q, k, v, p, *, is_causal, scale, direction, on_cuda, out_el, overrides,
                                acc="device", engine="monolithic", kernel="sdpa", out=f"{out_device} {str(q.dtype).replace('torch.', '')}"), flush=True)
         qd, kd, vd = ((t if on_cuda else t.to("cuda", non_blocking=True)) for t in (q, k, v))
         try:
-            out = _TRUE_SDPA(qd, kd, vd, is_causal=bool(is_causal), scale=scale)
+            out = _TRUE_SDPA(qd, kd, vd, is_causal=bool(is_causal), scale=scale,
+                             **({"enable_gqa": True} if kd.shape[1] != qd.shape[1] else {}))
             out = out if out.device == out_device else out.to(out_device)     # evicted inputs: the caller's device
             return out, {"engine": "monolithic", "kernel": "sdpa", "itr": 0, "n_subproblems": 1}
         except Exception as exc:                                     # noqa: BLE001
@@ -530,26 +538,28 @@ def _run(q, k, v, p, *, is_causal, scale, direction, on_cuda, out_el, overrides,
                         print("Stream-CQSA: the wave engine ran out of memory; retrying on the streaming engine", flush=True)
                     use_wave = False
     if not use_wave:
-        from .native_autograd import stream_cqsa_attn
+        from .native_autograd import stream_cqsa_attn, kernel_env
         from .stable_stream import stream_cqsa_forward
-        if kernel in ("triton", "wave-triton"):
-            os.environ["CQSA_FORWARD"] = "triton"; os.environ["CQSA_BACKWARD"] = "triton"
         host = not on_cuda
-        if direction == "bwd":
-            out = stream_cqsa_attn(q, k, v, causal=bool(is_causal), scale=scale, verbose=verbose,
-                                   itr=kw.get("itr", "auto"), c=kw.get("c", 7), interest_set=kw.get("interest_set", (0, 1, 3)),
-                                   stream_from_host=bool(kw.get("stream_from_host", host)),
-                                   accumulate_on_gpu=bool(kw.get("accumulate_on_gpu", True)),
-                                   max_parallel=kw.get("max_parallel"), bwd_itr=bwd_itr)
-            info = {"engine": "classic", "kernel": "triton" if os.environ.get("CQSA_FORWARD", "").lower() == "triton" else "cuda",
-                    "itr": kw.get("itr", "auto"), "c": kw.get("c", 7), "stream_from_host": bool(kw.get("stream_from_host", host)),
-                    "accumulate_on_gpu": bool(kw.get("accumulate_on_gpu", True))}
-        else:
-            kw.setdefault("stream_from_host", host)
-            # leave the fp32 result where the accumulator is; _deliver casts and moves it
-            out, info = stream_cqsa_forward(q, k, v, causal=bool(is_causal), scale=scale, verbose=verbose, out_device="acc", **kw)
-            info = {k_: v_ for k_, v_ in info.items() if k_ not in ("lse",) and not hasattr(v_, "device")}
-            info["engine"] = "classic"; info["kernel"] = "triton" if os.environ.get("CQSA_FORWARD", "").lower() == "triton" else "cuda"
+        # kernel="triton": the classic engine reads its kernel from the environment, set for this call only
+        # (the autograd function carries it to the backward); the process default is untouched
+        tri = "triton" if kernel in ("triton", "wave-triton") else None
+        with kernel_env(tri, tri):
+            if direction == "bwd":
+                out = stream_cqsa_attn(q, k, v, causal=bool(is_causal), scale=scale, verbose=verbose,
+                                       itr=kw.get("itr", "auto"), c=kw.get("c", 7), interest_set=kw.get("interest_set", (0, 1, 3)),
+                                       stream_from_host=bool(kw.get("stream_from_host", host)),
+                                       accumulate_on_gpu=bool(kw.get("accumulate_on_gpu", True)),
+                                       max_parallel=kw.get("max_parallel"), bwd_itr=bwd_itr)
+                info = {"engine": "classic", "kernel": "triton" if os.environ.get("CQSA_FORWARD", "").lower() == "triton" else "cuda",
+                        "itr": kw.get("itr", "auto"), "c": kw.get("c", 7), "stream_from_host": bool(kw.get("stream_from_host", host)),
+                        "accumulate_on_gpu": bool(kw.get("accumulate_on_gpu", True))}
+            else:
+                kw.setdefault("stream_from_host", host)
+                # leave the fp32 result where the accumulator is; _deliver casts and moves it
+                out, info = stream_cqsa_forward(q, k, v, causal=bool(is_causal), scale=scale, verbose=verbose, out_device="acc", **kw)
+                info = {k_: v_ for k_, v_ in info.items() if k_ not in ("lse",) and not hasattr(v_, "device")}
+                info["engine"] = "classic"; info["kernel"] = "triton" if os.environ.get("CQSA_FORWARD", "").lower() == "triton" else "cuda"
     if vb:
         ran_wave = info.get("engine") == "wave"
         print(_config_line(stage="ran", mode="cqsa", itr=info.get("itr", kw.get("itr")), c=info.get("c", kw.get("c", 7)),
@@ -712,20 +722,22 @@ _INSIDE = [0]                                          # re-entrancy: calls made
 
 def _patched_sdpa(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None, enable_gqa=False):
     orig = _ORIGINAL_SDPA or _TRUE_SDPA
-    supported = (attn_mask is None and not dropout_p and not enable_gqa and query.dim() == 4
-                 and query.dtype in (torch.float16, torch.bfloat16) and key.shape == query.shape == value.shape
+    gqa_ok = (key.dim() == 4 and key.shape == value.shape and key.shape[0] == query.shape[0]
+              and key.shape[2:] == query.shape[2:] and key.shape[1] >= 1 and query.shape[1] % key.shape[1] == 0)
+    supported = (attn_mask is None and not dropout_p and query.dim() == 4
+                 and query.dtype in (torch.float16, torch.bfloat16) and gqa_ok
                  and query.shape[-2] >= _PATCH_MIN_TOKENS and _INSIDE[0] == 0)
     if not supported:
         return orig(query, key, value, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal, scale=scale,
                     **({"enable_gqa": enable_gqa} if enable_gqa else {}))
-    return attention(query, key, value, is_causal=is_causal, scale=scale)
+    return attention(query, key, value, is_causal=is_causal, scale=scale, enable_gqa=bool(enable_gqa))
 
 
 def patch_sdpa(min_tokens: int = 65536) -> None:
     """
     Route ``torch.nn.functional.scaled_dot_product_attention`` through
     ``stream_cqsa.attention`` for the calls it handles (4-D fp16/bf16, no mask,
-    no dropout, no GQA, N >= ``min_tokens``); everything else goes to the original.
+    no dropout, GQA/MQA included, N >= ``min_tokens``); everything else goes to the original.
     Below the memory boundary the routed call is still the monolithic kernel, so
     the patch changes nothing until a call would have run out of memory.
     """

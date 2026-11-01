@@ -44,6 +44,7 @@ kept query–key pair is counted exactly once, so the result is exact.
 | **async host fold** | the wave engine's host accumulator folds on a worker under the next wave | host-streamed 1M: 9.0 s (classic 9.3 s); 2M: 34.2 vs 34.6 s |
 | **multi-device scheduler** | per-GPU rates (calibrated per model), exact live-tile work per task, LPT with a cost-aware split, reduce_scatter merge; identical schedule on every rank; heterogeneous devices supported (`stream_cqsa/scheduler.py`) | model within 2% rms of the measured 4x A100 job; the measured winner reproduced on every shape (`results/ultimate/dist_sched.md`); on 2 SXM + 2 PCIe A100s (job 15949746, `results/ultimate/dist_het.md`) LPT reaches 2.91x one GPU forward and 3.5-3.7x forward+backward at 2M where round-robin reaches 2.75x / 2.88x |
 | **the accumulator in host memory by default where it is cheap** | the planner enumerates "Q/K/V on the device, accumulator on the host" and takes the smallest device peak among the residency choices predicted within 15% of the fastest (`tol=`, `CQSA_PLAN_TOL`; the monolithic call whenever it fits is unchanged); the device-resident backward keeps its fp32 dQ/dK/dV in pinned host memory when asked (it silently did not before); the cost model refit on the v3 rows (99 of 104 within 10%) | E4 / E8: 10-14% of the forward's time and 6-10% of the forward+backward's at 1M for 40% less device memory, 3% / 1% at 4M; chosen from about 1M tokens up on an A100 |
+| **grouped-query attention** | `k`/`v` with fewer heads than `q` (`H_kv` dividing `H`; SDPA's `enable_gqa=True`, needed or not) on every default route: the monolithic call, the classic engine (device-resident and host-streamed, chunk pool, both directions, either accumulator) and the wave engine (gathered, in place, chunk pool, the wave backward); the CUDA kernels read K/V through FlashAttention's head ratio and the wave backward sums dK/dV over each group; the memory model counts K, V, dK, dV with their own head count; the Triton kernels reject it with a message | `tests/test_v3_gqa.py`: 4:1 and 8:1 head ratios within the fp16 kernels' error of SDPA and within 1e-4 of the same call on repeated heads |
 | **correctness discipline** | every comparison against SDPA / FA-2 / fp64 forces a decomposition and asserts it ran (`tests/_decomp.py`; an unpinned call that fits is SDPA itself); every measured row pins `itr >= 1` | 852 tests collected |
 | **fixes** | a pinned `c=` without `interest_set=` silently used the c=7 quorum set in v2.1-v2.2.3 (wrong results for every c != 7; v3 re-plans the set and the engine refuses a non-perfect-difference-set pair); the autograd forward moved an 8 GiB fp32 host result to the device at 4M tokens (the 10 GiB-budget backward OOM in the OOC study); the device-resident backward ignored `accumulate_on_gpu=False` (acc=cpu saved nothing in a training call; E4 found it) | `docs/ultimate/progress/BUG_v223_c73.md`, CHANGELOG |
 
@@ -149,6 +150,7 @@ the rest is optional:
 | describe the budget instead of detecting it | `attention(..., hardware={"cuda:0": "10GiB", "host": "64GiB"})` |
 | route an existing model without touching it | `stream_cqsa.patch_sdpa()` or `with stream_cqsa.patched_sdpa(): model(...)` |
 | pin a setting | keywords of `attention`: `itr=`, `c=`/`interest_set=`, `accumulate_on_gpu=True`｜`False`, `max_parallel=`, `bwd_itr=`, `kernel="cuda"｜"triton"｜"wave-cuda"｜"wave-triton"` |
+| use grouped-query / multi-query attention | pass `k`, `v` with `H_kv` heads (a divisor of `q`'s `H`; `enable_gqa=True` accepted, not required): the CUDA kernels handle it natively, dK/dV come back with `H_kv` heads; `kernel="triton"` rejects it |
 | trade differently between time and device memory | the planner takes the configuration with the smallest device peak among those predicted within 15% of the fastest (so from about 1M tokens on an A100 the fp32 accumulator -- the forward's output, the backward's gradients -- lives in host memory: 10-15% slower, 40-70% less device memory); `attention(..., tol=0)` or `CQSA_PLAN_TOL=0` takes the fastest, `accumulate_on_gpu=True` pins the device accumulator, `tol=0.3` leans further toward memory |
 | make the planner's times accurate for my GPU | `stream_cqsa.calibrate()` once (about a minute; cached in `~/.cache/stream_cqsa`) |
 | check an installation | `stream-cqsa-doctor` |
@@ -223,9 +225,9 @@ FlashAttention-2 call and one SDPA call on the same device-resident tensors.
 | **E6** precision, head dim | fp16 / bf16 x D 64 / 128 at 1M | done, 44 rows; the Triton D=128 backward excluded as a finding | bf16 costs what fp16 costs; D=128 0.93-0.99x FA-2's D=128 on the CUDA series |
 | **E8** the default's trade | device Q/K/V with the host accumulator vs E1 across N | done, 16 rows | 1.30x / 1.16x / 1.06x / 1.03x of the device-accumulator time at 512K / 1M / 2M / 4M forward, 1.19x / 1.11x / 1.06x / 1.01x forward+backward, for 40% less device memory at every N |
 | **E9** chunk reuse (host-resident) | the classic engine's device chunk pool (3 / 4 / 7 slots, 1 or 2 in flight) against flush-and-reload, the wave engine's pool at one wave's chunks against all chunks resident, at 256K / 1M / 4M x D 64 / 128 | done, 42 rows (jobs 16333022, 16334737, 16500372 with 3 runs at 1M, 16500373) | the pool matters (the no-pool host gather costs 4-19%, 0-5% at 4M), its size barely does (3 vs 7 slots: <= 2% of time for 1.7-7 GiB more device memory); the wave pool at 3 slots is within 1% at 1M-4M for 36-45% less memory and is the default now; host-streamed rows vary 7-13% between jobs |
-| **E10** c, host-resident | the c sweep of E3 with Q/K/V and the accumulator in host memory, where the floor is gone and the subproblem's l/c scaling sets the device memory | **running** (job 16559720, 36 rows, 3 runs each) | |
-| **E11** streamed backward scatter | the host-streamed backward's synchronous scatter (default) against the asynchronous fold, 1M and 2M | **running** (job 16559720, 4 rows, 3 runs each) | |
-| **E12** wave budget, host-resident | E5's W sweep with Q/K/V and the accumulator on the host (the pool follows W) | **running** (job 16559720, 10 rows, 3 runs each) | |
+| **E10** c, host-resident | the c sweep of E3 with Q/K/V and the accumulator in host memory, where the floor is gone and the subproblem's l/c scaling sets the device memory | 36 rows (jobs 16559720, 16562804; 3 runs each) | device peak 3.9 -> 0.6 GiB from c=7 to c=133 (l/c 0.43 -> 0.09) at a flat 1.16-1.24x FA-2 up to c=31, then 1.6-2.4x: the streamed tokens grow with l |
+| **E11** streamed backward scatter | the host-streamed backward's synchronous scatter against the asynchronous fold, 1M and 2M | 4 rows (job 16559720; 3 runs each) | asynchronous 0.93x at 1M, 0.98x at 2M, same peaks: now the default |
+| **E12** wave budget, host-resident | E5's W sweep with Q/K/V and the accumulator on the host (the pool follows W) | 10 rows (job 16559720; 3 runs each) | W=1x -> 16x: 1.57x -> 1.26x FA-2 for 0.9 -> 9.1 GiB (CUDA); the pool, not the partials, is the memory |
 | **E7** automatic mode vs out-of-core rivals | `attention()` with nothing pinned under device budgets, against two rectangular rivals | not run | measures the automatic path, which the paper does not present (the pinned rows above are the decomposition's cost); the v2.2.3 run of this grid is in `results/ooc_rivals/report.md` |
 
 ### Headline (from E1 and E4; A100-SXM4-80GB, fp16, B=1 H=8 D=64, causal, Q/K/V on the device)
@@ -540,16 +542,42 @@ Host-resident forward (Q/K/V in pinned host memory, accumulator on the host), c=
 | 4M | 128 | 186.53 s / 20.7 GiB | 176.70 s / 20.7 GiB / 15t 6h | 200.31 s / 20.7 GiB / 15t 6h | 175.64 s / 24.1 GiB / 10t 11h | 175.22 s / 34.4 GiB / 7t 14h | 177.07 s / 24.2 GiB | 178.27 s / 38.0 GiB |
 <!-- /v3-tables:E9 -->
 
-### E10 the quorum size c, host-resident **[E10: running, job 16559720]**
+### E10 the quorum size c, host-resident (jobs 16559720, 16562804)
 
 E3's c sweep (N=1M, itr=1) with Q/K/V in pinned host memory and the accumulator on the host. E3 was
 device-resident, where the O(N) floor hides the subproblem's l/c scaling; here the device holds the in-flight
 subproblem alone, so the peak should fall from about 3.3 GiB at c=3 (l/c = 2/3) to about 0.5 GiB at c=133 (12/133).
 
 <!-- v3-tables:E10 -->
+N=1M, itr=1, Q/K/V in pinned host memory and the accumulator on the host (ratios against E1's resident FA-2 rows; medians of 3 runs; wall s (x FA-2) / peak device GiB; the classic column adds peak host GiB):
+
+| c | l | subproblem l/c | fwd classic CUDA | fwd wave CUDA | fwd+bwd classic CUDA | fwd+bwd wave CUDA (classic engine) |
+|---|---|---|---|---|---|---|
+| 3 | 2 | 0.67 | 7.17 s (1.19x) / 4.0 GiB / host 12.1 | 7.08 s (1.17x) / 4.8 GiB | 31.14 s (1.48x) / 8.7 GiB / host 22.8 | 25.85 s (1.23x) / 8.7 GiB |
+| 7 | 3 | 0.43 | 6.98 s (1.16x) / 3.9 GiB / host 10.0 | 7.40 s (1.23x) / 3.1 GiB | 30.96 s (1.47x) / 5.6 GiB / host 22.3 | 25.66 s (1.22x) / 5.6 GiB |
+| 13 | 4 | 0.31 | 7.03 s (1.17x) / 2.8 GiB / host 9.1 | 7.63 s (1.26x) / 2.2 GiB | 33.20 s (1.58x) / 4.0 GiB / host 17.3 | 29.32 s (1.39x) / 4.0 GiB |
+| 21 | 5 | 0.24 | 7.35 s (1.22x) / 1.5 GiB / host 4.8 | 8.11 s (1.34x) / 1.7 GiB | 30.80 s (1.47x) / 3.1 GiB / host 14.8 | 31.42 s (1.49x) / 3.1 GiB |
+| 31 | 6 | 0.19 | 7.51 s (1.24x) / 1.2 GiB / host 4.8 | 8.40 s (1.39x) / 1.4 GiB | 33.21 s (1.58x) / 2.5 GiB / host 14.8 | 32.94 s (1.57x) / 2.5 GiB |
+| 57 | 8 | 0.14 | 9.45 s (1.57x) / 0.9 GiB / host 4.9 | 9.19 s (1.52x) / 1.0 GiB | 36.55 s (1.74x) / 1.8 GiB / host 14.9 | 36.88 s (1.75x) / 1.8 GiB |
+| 73 | 9 | 0.12 | 10.57 s (1.75x) / 0.8 GiB / host 4.2 | 9.55 s (1.58x) / 0.9 GiB | 38.11 s (1.81x) / 1.6 GiB / host 13.8 | 36.90 s (1.76x) / 1.6 GiB |
+| 91 | 10 | 0.11 | 11.98 s (1.99x) / 0.7 GiB / host 4.2 | 10.12 s (1.68x) / 0.8 GiB | 38.39 s (1.83x) / 1.4 GiB / host 13.7 | 39.21 s (1.86x) / 1.4 GiB |
+| 133 | 12 | 0.09 | 14.20 s (2.35x) / 0.6 GiB / host 4.3 | 10.26 s (1.70x) / 0.7 GiB | 42.19 s (2.01x) / 1.2 GiB / host 13.7 | 42.86 s (2.04x) / 1.2 GiB |
 <!-- /v3-tables:E10 -->
 
-### E11 the streamed backward's scatter **[E11: running, job 16559720]**
+What it shows. With nothing resident but the in-flight subproblem, the device peak follows l/c as the
+decomposition promises: 3.9 GiB at c=7 (l/c = 3/7) to 0.6 GiB at c=133 (12/133) on the classic engine, 3.1 to
+0.7 GiB on the wave engine (the pool holds l chunks of one subproblem), a 6-7x range where E3's device-resident
+sweep showed a floor. The 0.6 GiB at c=133 is the subproblems in flight themselves (94.6K tokens each: Q/K/V
+in fp16 are 0.28 GiB per subproblem, plus the fp32 partial output). The price is the streamed volume: every subproblem gathers l chunks, c
+subproblems gather l*N tokens, so c=133 moves 12 N tokens through PCIe where c=7 moves 3 N. Time is flat
+(1.16-1.24x FA-2 forward, 1.47-1.58x forward+backward) up to c=31 (l=6) and rises past it, to 2.35x / 2.01x
+at c=133 on the classic engine; the wave engine's chunk pool, which loads a chunk once per wave, holds the
+forward to 1.70x there. The forward+backward's wave column is the classic backward (the wave backward is
+device-resident only). The c=3 row (l=2, l/c = 2/3) gains nothing over c=7 on memory and loses a little on
+time: the subproblem is larger and there are only 3 of them. c=7 and c=13 remain the sensible defaults for a
+host-resident call; the larger sets buy memory that the host accumulator already gave away.
+
+### E11 the streamed backward's scatter (job 16559720)
 
 E2's forward+backward costs 1.29x FA-2 at 1M where E8's device-resident host-accumulator backward costs 1.11x.
 The streamed path's host scatter (each subproblem's dQ/dK/dV added into the host accumulators) is synchronous by
@@ -558,16 +586,45 @@ asynchronous fold on a worker is the same mechanism the device-resident backward
 2M, both settings.
 
 <!-- v3-tables:E11 -->
+Host-resident forward+backward, classic CUDA, c=7, itr=1 (medians of 3 runs; wall s (x FA-2) / peak device GiB / peak host GiB):
+
+| N | scatter synchronous (`CQSA_SCATTER_ASYNC=0`) | scatter asynchronous (default since E11) | async / sync |
+|---|---|---|---|
+| 1M | 30.49 s (1.45x) / 5.6 GiB / host 22.3 | 28.39 s (1.35x) / 5.6 GiB / host 22.3 | 0.931 |
+| 2M | 121.00 s (1.44x) / 11.2 GiB / host 33.7 | 118.57 s (1.41x) / 11.2 GiB / host 33.5 | 0.980 |
 <!-- /v3-tables:E11 -->
 
-### E12 the wave budget, host-resident **[E12: running, job 16559720]**
+What it shows. The asynchronous fold is faster at both sizes (0.93x at 1M, 0.98x at 2M) with identical device
+and host peaks; the contention argument that kept it off (two bandwidth-bound host streams) did not hold on this
+node. It is the default from this commit (`CQSA_SCATTER_ASYNC=0` restores the synchronous scatter). It does not
+close the gap to the device-resident host-accumulator backward (E8: 1.11x at 1M): the remaining 0.2-0.3x is the
+streamed inputs themselves (q, k, v, dO, O gathered on the host and sent per subproblem), which the pool-free
+backward pays in full.
+
+### E12 the wave budget, host-resident (job 16559720)
 
 E5's W sweep (N=1M, c=73) with Q/K/V and the accumulator in host memory. With the pool following W (one wave's
 chunks: l=9 slots per subproblem in the wave, all 73 chunks from W=16x), the trade is launches against the
 pool's and the packed partials' memory.
 
 <!-- v3-tables:E12 -->
+N=1M, c=73, itr=1, host-resident forward, the wave budget as a multiple of the largest subproblem (medians of 3 runs; wall s (x FA-2) / peak device GiB / waves / pool slots):
+
+| W | wave CUDA | wave Triton |
+|---|---|---|
+| 1x | 9.48 s (1.57x) / 0.9 GiB / 73 waves / pool 9 | 13.16 s (2.18x) / 2.2 GiB / 73 waves / pool 9 |
+| 2x | 9.06 s (1.50x) / 1.7 GiB / 37 waves / pool 18 | 12.39 s (2.05x) / 4.7 GiB / 37 waves / pool 18 |
+| 4x | 8.69 s (1.44x) / 3.4 GiB / 19 waves / pool 36 | 11.96 s (1.98x) / 8.0 GiB / 19 waves / pool 36 |
+| 8x | 8.14 s (1.35x) / 6.5 GiB / 10 waves / pool 72 | 11.76 s (1.95x) / 13.7 GiB / 10 waves / pool 72 |
+| 16x | 7.58 s (1.26x) / 9.1 GiB / 5 waves / pool 73 | 11.21 s (1.86x) / 19.4 GiB / 5 waves / pool 73 |
 <!-- /v3-tables:E12 -->
+
+What it shows. With the pool following W, the wave budget is a clean time-for-memory dial: from one subproblem
+per wave (73 launches, 0.9 GiB, 1.57x FA-2) to 16 per wave (5 launches, 9.1 GiB, 1.26x) on the CUDA kernel, the
+Triton kernel 1.3-1.4x slower at every rung and about twice the memory (its gathered packed copies). The memory
+is the pool, which reaches all 73 chunks (Q/K/V fully resident) at W=16x; the packed partial outputs are the
+smaller part. The planner's two-tier rule takes the largest rung that fits (the next one down is 7% slower,
+outside the 2% micro band) and walks this ladder down under a tighter budget.
 
 ### Where the memory goes
 
@@ -622,8 +679,12 @@ Measurements:
 Engineering leads the measurements point at (each a few rows to measure):
 
 - The host-streamed backward (E2) costs 1.29x at 1M where the device-resident host-accumulator backward
-  (E8) costs 1.11x: the streamed path's host scatter is synchronous by design (`CQSA_SCATTER_ASYNC`, off);
-  an A/B at 1M and 2M would say whether the async fold closes the gap.
+  (E8) costs 1.11x. E11 made the scatter asynchronous (0.93x at 1M); the rest is the streamed inputs. A
+  chunk pool for the backward (the forward's E9 mechanism: q, k, v, dO loaded once per chunk, not once per
+  subproblem) is the remaining lead, worth up to the 3x redundancy of the gathers at c=7.
+- Grouped-query attention is implemented on every default route and tested at 32K tokens (`tests/test_v3_gqa.py`);
+  no row measures it at scale. One job (1M, H=32, H_kv=8, D=128, the Llama-3 shape, classic and wave, forward and
+  backward, against SDPA with `enable_gqa=True`) would put a number on the K/V memory saving and the time.
 - The W=1 wave forward is 1.7-2.6% behind the classic engine per task (E1, E5); the target was 1%.
 - v3.0.0 itself: the release build has been exercised module by module; one full build and the suite on the
   result is the remaining gate, then the CHANGELOG's numbers and the wheel matrix.

@@ -302,6 +302,15 @@ def _summaries(bits: torch.Tensor, blk: int = 64):
     return o.contiguous(), a.contiguous()
 
 
+_GQA_MSG = ("the Triton kernels have no grouped-query attention (K/V heads != Q heads): the CUDA kernels "
+            "(cqsa_cuda / cqsa_native) support it; otherwise repeat the K/V heads before the call")
+
+
+def _reject_gqa(q, k, head_dim: int = -2) -> None:
+    if int(k.shape[head_dim]) != int(q.shape[head_dim]):
+        raise NotImplementedError(_GQA_MSG)
+
+
 def cqs_attention_forward(q, k, v, group_bits=None, *, causal: bool, scale: float | None = None,
                           blk_or=None, blk_and=None, blk_size: int = 64,
                           block_m: int = 128, block_n: int = 64, num_warps: int = 4, num_stages: int = 3):
@@ -309,6 +318,7 @@ def cqs_attention_forward(q, k, v, group_bits=None, *, causal: bool, scale: floa
     q/k/v: [B, L, H, D] (token-major; strides are honoured). Returns
     (out float32 [B, L, H, D], lse float32 [B, H, L]).
     """
+    _reject_gqa(q, k)
     B, L, H, D = q.shape
     assert k.shape == q.shape == v.shape
     assert D in (16, 32, 64, 128), "head dim must be a power of two <= 128"
@@ -394,6 +404,7 @@ def cqs_attention_forward_wave(q, k, v, bits, blk_or, blk_and, lens, *, S: int, 
     excluded by the caller's merge (token id -1). Keys beyond a subproblem's length are
     masked by the length, so the layout serves causal and non-causal alike.
     """
+    _reject_gqa(q, k)
     dev = q.device
     R_, H, D = q.shape
     W = int(lens.numel()); assert R_ == W * S and S % block_m == 0 and S % 64 == 0
@@ -638,6 +649,7 @@ def cqs_attention_backward(dout, q, k, v, lse, group_bits=None, *, causal: bool,
     [B, H, L] fp32 may be passed (the engine computes it once globally);
     otherwise it is computed here from `out`.
     """
+    _reject_gqa(q, k)
     B, L, H, D = q.shape
     if scale is None:
         scale = D ** -0.5

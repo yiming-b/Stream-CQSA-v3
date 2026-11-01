@@ -352,7 +352,7 @@ def in_place_possible(N: int, causal: bool) -> bool:
 
 def estimate_wave_peak_bytes(N: int, wave_tokens: int, *, B: int, H: int, D: int, itemsize: int, itr: int, c: int, l: int,
                              stream_from_host: bool, accumulate_on_gpu: bool, gather: bool,
-                             direction: str = "fwd", out_bytes_per_el: int = 4) -> int:
+                             direction: str = "fwd", out_bytes_per_el: int = 4, Hk: int | None = None) -> int:
     """
     Predicted peak device memory of the wave engine: ``a*N + b*W`` like the measured fits
     (results/profile_sweep/fits.json: itr=1 acc=GPU 7.149 GiB/M tokens + 1.78 GiB/M packed tokens;
@@ -370,23 +370,27 @@ def estimate_wave_peak_bytes(N: int, wave_tokens: int, *, B: int, H: int, D: int
                  always gathers (``bwd_bytes_per_token``); the peak of the fwd+bwd step is its own.
 
     ``wave_tokens`` below one task's tokens is raised to it: a wave holds at least one subproblem.
+    ``Hk`` (grouped-query attention, ``None`` = ``H``): K, V, dK and dV carry ``Hk`` heads; the per-wave
+    terms keep ``H`` (the backward forms dK/dV per query head and sums the group afterwards).
     """
+    Hk = H if Hk is None else int(Hk)
     el = int(N) * int(B) * int(H) * int(D)
+    elk = int(N) * int(B) * int(Hk) * int(D)
     L = task_tokens_estimate(N, itr, c, l)
     W = max(int(wave_tokens), L)
     if direction == "bwd":
-        floor = (3 * 4) * el + 2 * N * B * H * 4                     # fp32 gradients, lse + dpsum
+        floor = 4 * (el + 2 * elk) + 2 * N * B * H * 4               # fp32 gradients, lse + dpsum
         if not stream_from_host:
-            floor += (4 * itemsize + 4) * el                          # q, k, v, dout and the saved fp32 out
-        floor += 3 * itemsize * el                                    # the gradients cast to the input dtype at the end
+            floor += (2 * itemsize + 4) * el + 2 * itemsize * elk     # q, k, v, dout and the saved fp32 out
+        floor += itemsize * (el + 2 * elk)                            # the gradients cast to the input dtype at the end
         return int(floor + W * bwd_bytes_per_token(H, D, itemsize))
     floor = 0
     if not stream_from_host:
-        floor += 3 * itemsize * el
+        floor += itemsize * (el + 2 * elk)
     else:
         chunk = -(-math.ceil(N / c) // SEG_ALIGN) * SEG_ALIGN
         slots = min(int(c), int(l) * -(-W // L))
-        floor += slots * chunk * 3 * H * D * itemsize
+        floor += slots * chunk * (H + 2 * Hk) * D * itemsize
     if accumulate_on_gpu:
         floor += 4 * el + 4 * N * H * D + 8 * N * H
     else:
@@ -395,7 +399,7 @@ def estimate_wave_peak_bytes(N: int, wave_tokens: int, *, B: int, H: int, D: int
     if not accumulate_on_gpu:
         per_tok += 4 * H * D + 8 * H
     if gather:
-        per_tok += 3 * H * D * itemsize
+        per_tok += (H + 2 * Hk) * D * itemsize
     return int(floor + W * per_tok)
 
 
@@ -589,10 +593,14 @@ def wave_forward(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *, causal: b
     ``lse`` come back on the host and the device never holds the full fp32 output.
     """
     B, H, N, D = q.shape
+    Hk = int(k.shape[1])                        # K/V heads (grouped-query attention: a divisor of H)
     kern = resolve_wave_kernel(kernel, q.dtype, D)
     ext = native_ext() if kern == "cuda" else None
     api = wave_api(ext) if ext is not None else 0
     if kern == "triton":
+        if Hk != H:
+            raise NotImplementedError("the Triton wave kernel has no grouped-query attention (K/V heads != Q heads); "
+                                      "use the CUDA wave kernel (cqsa_native) or repeat the K/V heads")
         from .triton_kernel import cqs_attention_forward_wave
     dev = torch.device(device) if device is not None else (q.device if q.is_cuda else torch.device("cuda"))
     scale = float(D ** -0.5 if scale is None else scale)
@@ -607,7 +615,7 @@ def wave_forward(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *, causal: b
         gather = not in_place_possible(N, causal)
     per_tok = fwd_bytes_per_token(H, D) + (0 if acc_gpu else 4 * H * D + 8 * H)
     if on_device and gather:
-        per_tok += 3 * H * D * q.element_size()   # the three packed copies of a gathered wave
+        per_tok += (H + 2 * Hk) * D * q.element_size()   # the three packed copies of a gathered wave
 
     if max_wave_tokens is None:
         max_wave_tokens = default_wave_tokens(N)
@@ -616,7 +624,7 @@ def wave_forward(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *, causal: b
         waves = plan_waves(tasks, max_tokens, max_wave_subproblems)
         pool = None
     else:
-        pool = ChunkPool(N, c, H, D, q.dtype, dev)
+        pool = ChunkPool(N, c, H, D, q.dtype, dev, Hk=Hk)
         n_slots = pool_slots
         if n_slots is None:
             L = max(int(t.local_size) for t in tasks)
@@ -696,7 +704,7 @@ def wave_forward(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *, causal: b
                     src = pool.rows_of_global(tb.tok[valid].cpu()).to(dev, non_blocking=True)
                     srcs = (pool.q, pool.k, pool.v)
                 def gather_t(t):
-                    g = torch.zeros((tb.total, H, D), device=dev, dtype=t.dtype)
+                    g = torch.zeros((tb.total, t.shape[1], D), device=dev, dtype=t.dtype)
                     g[pos] = t[src]
                     return g
                 qs, ks, vs = (gather_t(t) for t in srcs)
@@ -726,7 +734,7 @@ def wave_forward(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *, causal: b
                 valid = tb.tok >= 0
                 pos = torch.nonzero(valid).squeeze(1); src = tb.tok[valid]
                 def gather_rows(t):
-                    g = torch.zeros((tb.total, H, D), device=dev, dtype=t.dtype)
+                    g = torch.zeros((tb.total, t.shape[1], D), device=dev, dtype=t.dtype)
                     g[pos] = t[src]
                     return g
                 qs, ks, vs = gather_rows(qt), gather_rows(kt), gather_rows(vt); bb = None
@@ -794,6 +802,7 @@ def wave_backward(q, k, v, out, dout, lse, *, causal: bool = True, scale: Option
     ext = native_ext()
     api = wave_api(ext)
     B, H, N, D = q.shape
+    Hk = int(k.shape[1])                        # K/V heads (grouped-query attention: a divisor of H)
     dev = torch.device(device) if device is not None else (q.device if q.is_cuda else torch.device("cuda"))
     scale = float(D ** -0.5 if scale is None else scale)
     itemsize = q.element_size()
@@ -809,8 +818,8 @@ def wave_backward(q, k, v, out, dout, lse, *, causal: bool = True, scale: Option
         dpsum[b] = (o_b.float() * do_b.float()).sum(-1)
         del o_b, do_b
     dq = torch.zeros((B, N, H, D), device=dev, dtype=torch.float32)
-    dk = torch.zeros((B, N, H, D), device=dev, dtype=torch.float32)
-    dv = torch.zeros((B, N, H, D), device=dev, dtype=torch.float32)
+    dk = torch.zeros((B, N, Hk, D), device=dev, dtype=torch.float32)
+    dv = torch.zeros((B, N, Hk, D), device=dev, dtype=torch.float32)
     lse_d = lse.to(dev, non_blocking=True)
     q_tm = k_tm = v_tm = do_tm = None
     if not on_device:
@@ -837,14 +846,14 @@ def wave_backward(q, k, v, out, dout, lse, *, causal: bool = True, scale: Option
                 pos = torch.nonzero(valid).squeeze(1); src = tb.tok[valid]
                 if on_device:
                     def gather_rows(t):
-                        g = torch.zeros((tb.total, H, D), device=dev, dtype=t.dtype)
+                        g = torch.zeros((tb.total, t.shape[1], D), device=dev, dtype=t.dtype)
                         g[pos] = t[src]
                         return g
                     qp, kp, vp, dop = (gather_rows(t) for t in (qt, kt, vt, dot))
                 else:
                     pos_cpu, src_cpu = pos.cpu(), src.cpu()
                     def gather_rows(t):
-                        g = torch.zeros((tb.total, H, D), dtype=t.dtype).pin_memory()
+                        g = torch.zeros((tb.total, t.shape[2], D), dtype=t.dtype).pin_memory()
                         with _cpu_threads(CPU_THREADS):
                             g[pos_cpu] = t[b][src_cpu]
                         return g.to(dev, non_blocking=True)
@@ -989,12 +998,14 @@ def wave_attention(q, k, v, *, causal=True, scale=None, itr=1, c=7, interest_set
 class ChunkPool:
     """Device-resident copies of the level-1 chunks a wave needs, streamed from pinned staging."""
 
-    def __init__(self, N: int, c: int, H: int, D: int, dtype, device):
+    def __init__(self, N: int, c: int, H: int, D: int, dtype, device, Hk: int | None = None):
         self.N, self.c, self.H, self.D, self.dtype, self.device = int(N), int(c), int(H), int(D), dtype, device
+        self.Hk = int(H) if Hk is None else int(Hk)                  # K/V heads (grouped-query attention)
+        self.heads = (self.H, self.Hk, self.Hk)
         sizes, starts, ends = chunk_layout(N, c, SEG_ALIGN)
         self.sizes, self.starts, self.ends = sizes, starts, ends
         self.slot_len = -(-max(sizes) // SEG_ALIGN) * SEG_ALIGN
-        self.slot_bytes = 3 * self.slot_len * H * D * torch.tensor([], dtype=dtype).element_size()
+        self.slot_bytes = sum(self.heads) * self.slot_len * D * torch.tensor([], dtype=dtype).element_size()
         self.n_slots = 0
         self.q = self.k = self.v = None
         self.slot_of: dict[int, int] = {}
@@ -1010,8 +1021,10 @@ class ChunkPool:
         R = self.n_slots * self.slot_len
         # zeros, not empty: the uniform layout reads a slot's padding rows (finite garbage is
         # harmless, NaN is not: masked P is 0 and 0 * NaN poisons the PV product)
-        self.q, self.k, self.v = (torch.zeros((R, self.H, self.D), device=self.device, dtype=self.dtype) for _ in range(3))
-        self._stage = [torch.empty((self.slot_len, self.H, self.D), dtype=self.dtype).pin_memory() for _ in range(2)]
+        self.q, self.k, self.v = (torch.zeros((R, h, self.D), device=self.device, dtype=self.dtype) for h in self.heads)
+        # two pinned staging slots, each one chunk of every tensor (K/V with their own head count)
+        self._stage = [[torch.empty((self.slot_len, h, self.D), dtype=self.dtype).pin_memory() for h in self.heads]
+                       for _ in range(2)]
         self._stage_ev = [None, None]
         self.slot_of, self.batch = {}, None
 
@@ -1056,8 +1069,8 @@ class ChunkPool:
                 continue
             s0, n = self.starts[cid], self.sizes[cid]
             slot = new[cid]
-            for src, dst in ((q_tm, self.q), (k_tm, self.k), (v_tm, self.v)):
-                st = self._stage[i % 2]
+            for j, (src, dst) in enumerate(((q_tm, self.q), (k_tm, self.k), (v_tm, self.v))):
+                st = self._stage[i % 2][j]
                 if self._stage_ev[i % 2] is not None:
                     self._stage_ev[i % 2].synchronize()
                 st[:n].copy_(src[b, s0:s0 + n])

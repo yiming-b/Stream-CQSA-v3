@@ -184,7 +184,7 @@ def table_e10(rows, base):
 def table_e11(rows, base):
     ex = by(rows, exp="E11")
     out = ["Host-resident forward+backward, classic CUDA, c=7, itr=1 (medians of 3 runs; wall s (x FA-2) / peak device GiB / peak host GiB):", "",
-           "| N | scatter synchronous (default) | scatter asynchronous (`CQSA_SCATTER_ASYNC=1`) | async / sync |", "|---|---|---|---|"]
+           "| N | scatter synchronous (`CQSA_SCATTER_ASYNC=0`) | scatter asynchronous (default since E11) | async / sync |", "|---|---|---|---|"]
     for N in sorted({r["N"] for r in ex}):
         a = one(ex, N=N, extra="scatter=sync"); b = one(ex, N=N, extra="scatter=async")
         ca, cb = cell(a, base), cell(b, base)

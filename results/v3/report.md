@@ -1,6 +1,6 @@
 # Stream-CQSA v3 experiments (experiments/v3/PLAN.md): report
 
-Generated 2026-10-30 21:42 by `experiments/v3/bench.py report` from `results/v3/results.jsonl` (535 rows, 500 configurations; the last row per key). GPUs: NVIDIA A100 80GB PCIe, NVIDIA A100-SXM4-80GB. Jobs: 15966097, 16003186, 16005563, 16007771, 16011674, 16056869, 16057173, 16059599, 16061624, 16061811, 16063609, 16070367, 16072865, 16074280, 16074929, 16075878, 16077768, 16079116, 16079918, 16092420, 16094767, 16113653, 16115186, 16115960, 16116751, 16119471, 16328779, 16333022, 16334737, 16500372, 16500373. Modules: cqsa_cuda_v13 / cqsa_native_v2.
+Generated 2026-10-31 23:33 by `experiments/v3/bench.py report` from `../../Stream-CQSA-v3/results/v3/results.jsonl` (585 rows, 550 configurations; the last row per key). GPUs: NVIDIA A100 80GB PCIe, NVIDIA A100-SXM4-80GB. Jobs: 15966097, 16003186, 16005563, 16007771, 16011674, 16056869, 16057173, 16059599, 16061624, 16061811, 16063609, 16070367, 16072865, 16074280, 16074929, 16075878, 16077768, 16079116, 16079918, 16092420, 16094767, 16113653, 16115186, 16115960, 16116751, 16119471, 16328779, 16333022, 16334737, 16500372, 16500373, 16559720, 16562804. Modules: cqsa_cuda_v13 / cqsa_native_v2.
 
 B=1 H=8 causal; wall = median of the timed runs (fwd: one attention() call; bwd: forward + torch.autograd.grad), min alongside; peak = torch.cuda.max_memory_allocated over the call, workspace = peak minus what was resident before it; host = VmHWM delta over the timed runs; /FA-2 and /SDPA = wall ratios against the resident monolithic baselines of the same (node type, N, D, dtype, direction) (the experiment's own first, E1's / E6's otherwise); ref = the reference arm of the row (FA-2 = flash_attn, or SDPA-flash = torch SDPA on its flash backend where flash_attn is not installed); rel = norm-relative error against that arm on the same inputs (grads: the worst of dq/dk/dv); fp64 = norm-relative error on 128 sampled rows against an fp64 reference, with the ratio to the reference arm's own fp64 error on the same rows in parentheses (PLAN.md asks <= 1.2). Every Stream-CQSA row pins itr and c and asserts the decomposition it reports; `[*]` marks an engine other than the series' nominal one (documented routing: the wave backward runs on the CUDA kernel and on device-resident inputs only, so wave_Triton fwd+bwd and host-resident wave backwards run on the classic engine; the wave backward keeps a device accumulator, so wave_CUDA acc=cpu fwd+bwd rows ran with acc=gpu in the backward).
 
@@ -598,6 +598,77 @@ Fits (profile_sweep's: time quadratic in N, peak linear in N; >= 3 points; SXM r
 | 4M | 128 | fp16 | fwd | 7 | 1 | cpu | host | pool=7 | wave_CUDA | wave/cuda itr=1 n_sub=7 waves=7 | 178.273 | 178.273 | 37.96 | 37.96 | 66.98 | - | - | - | - | - | 1.9e-05 | - | ok |
 
 ![E9](E9.png)
+
+## E10: parameters, host-resident: how the quorum size c shapes device memory and time when Q/K/V and the accumulator live in host memory (E3 was device-resident, where the O(N) floor hides the l/c scaling of the subproblem)
+
+| N | D | dtype | dir | c | itr | acc | qkv | W | arm | engine that ran | wall s | min s | peak GiB | workspace | host GiB | /FA-2 | /SDPA | ref | rel vs ref | grads | fp64 (x ref) | fp64 dq (x ref) | status |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1M | 64 | fp16 | fwd | 3 | 1 | cpu | host | - | classic_CUDA | classic/cuda itr=1 n_sub=3 | 7.174 | 7.150 | 4.04 | 4.03 | 12.07 | 1.189 | 1.135 | - | - | - | 1.9e-05 | - | ok |
+| 1M | 64 | fp16 | fwd | 7 | 1 | cpu | host | - | classic_CUDA | classic/cuda itr=1 n_sub=7 | 6.979 | 6.917 | 3.89 | 3.88 | 10.01 | 1.157 | 1.104 | - | - | - | 1.6e-05 | - | ok |
+| 1M | 64 | fp16 | fwd | 13 | 1 | cpu | host | - | classic_CUDA | classic/cuda itr=1 n_sub=13 | 7.026 | 7.019 | 2.80 | 2.79 | 9.12 | 1.165 | 1.112 | - | - | - | 1.5e-05 | - | ok |
+| 1M | 64 | fp16 | fwd | 21 | 1 | cpu | host | - | classic_CUDA | classic/cuda itr=1 n_sub=21 | 7.349 | 7.332 | 1.45 | 1.44 | 4.80 | 1.219 | 1.163 | - | - | - | 1.4e-05 | - | ok |
+| 1M | 64 | fp16 | fwd | 31 | 1 | cpu | host | - | classic_CUDA | classic/cuda itr=1 n_sub=31 | 7.508 | 7.506 | 1.18 | 1.17 | 4.84 | 1.245 | 1.188 | - | - | - | 1.4e-05 | - | ok |
+| 1M | 64 | fp16 | fwd | 57 | 1 | cpu | host | - | classic_CUDA | classic/cuda itr=1 n_sub=57 | 9.454 | 9.366 | 0.86 | 0.85 | 4.87 | 1.568 | 1.496 | - | - | - | 1.3e-05 | - | ok |
+| 1M | 64 | fp16 | fwd | 73 | 1 | cpu | host | - | classic_CUDA | classic/cuda itr=1 n_sub=73 | 10.568 | 10.454 | 0.76 | 0.75 | 4.19 | 1.752 | 1.673 | - | - | - | 1.3e-05 | - | ok |
+| 1M | 64 | fp16 | fwd | 91 | 1 | cpu | host | - | classic_CUDA | classic/cuda itr=1 n_sub=91 | 11.979 | 11.869 | 0.68 | 0.67 | 4.23 | 1.986 | 1.896 | - | - | - | 1.3e-05 | - | ok |
+| 1M | 64 | fp16 | fwd | 133 | 1 | cpu | host | - | classic_CUDA | classic/cuda itr=1 n_sub=133 | 14.201 | 14.036 | 0.56 | 0.55 | 4.29 | 2.355 | 2.247 | - | - | - | 1.3e-05 | - | ok |
+| 1M | 64 | fp16 | fwd | 3 | 1 | cpu | host | - | wave_CUDA | wave/cuda itr=1 n_sub=3 waves=3 | 7.079 | 7.077 | 4.77 | 4.76 | 10.72 | 1.174 | 1.120 | - | - | - | 1.9e-05 | - | ok |
+| 1M | 64 | fp16 | fwd | 7 | 1 | cpu | host | - | wave_CUDA | wave/cuda itr=1 n_sub=7 waves=7 | 7.400 | 7.394 | 3.07 | 3.06 | 8.13 | 1.227 | 1.171 | - | - | - | 1.6e-05 | - | ok |
+| 1M | 64 | fp16 | fwd | 13 | 1 | cpu | host | - | wave_CUDA | wave/cuda itr=1 n_sub=13 waves=13 | 7.628 | 7.620 | 2.21 | 2.20 | 7.91 | 1.265 | 1.207 | - | - | - | 1.5e-05 | - | ok |
+| 1M | 64 | fp16 | fwd | 21 | 1 | cpu | host | - | wave_CUDA | wave/cuda itr=1 n_sub=21 waves=21 | 8.106 | 7.909 | 1.71 | 1.70 | 6.75 | 1.344 | 1.283 | - | - | - | 1.4e-05 | - | ok |
+| 1M | 64 | fp16 | fwd | 31 | 1 | cpu | host | - | wave_CUDA | wave/cuda itr=1 n_sub=31 waves=31 | 8.401 | 8.382 | 1.39 | 1.38 | 6.77 | 1.393 | 1.329 | - | - | - | 1.4e-05 | - | ok |
+| 1M | 64 | fp16 | fwd | 57 | 1 | cpu | host | - | wave_CUDA | wave/cuda itr=1 n_sub=57 waves=57 | 9.193 | 9.128 | 1.01 | 1.00 | 6.67 | 1.524 | 1.455 | - | - | - | 1.3e-05 | - | ok |
+| 1M | 64 | fp16 | fwd | 73 | 1 | cpu | host | - | wave_CUDA | wave/cuda itr=1 n_sub=73 waves=73 | 9.548 | 9.509 | 0.89 | 0.88 | 6.11 | 1.583 | 1.511 | - | - | - | 1.3e-05 | - | ok |
+| 1M | 64 | fp16 | fwd | 91 | 1 | cpu | host | - | wave_CUDA | wave/cuda itr=1 n_sub=91 waves=91 | 10.120 | 9.680 | 0.80 | 0.79 | 6.12 | 1.678 | 1.602 | - | - | - | 1.3e-05 | - | ok |
+| 1M | 64 | fp16 | fwd | 133 | 1 | cpu | host | - | wave_CUDA | wave/cuda itr=1 n_sub=133 waves=133 | 10.255 | 10.250 | 0.66 | 0.65 | 6.10 | 1.700 | 1.623 | - | - | - | 1.3e-05 | - | ok |
+| 1M | 64 | fp16 | bwd | 3 | 1 | cpu | host | - | classic_CUDA | classic/cuda itr=1 n_sub=3 | 31.137 | 30.596 | 8.73 | 8.72 | 22.82 | 1.481 | 1.379 | - | - | - | 1.9e-05 | 4.8e-04 | ok |
+| 1M | 64 | fp16 | bwd | 7 | 1 | cpu | host | - | classic_CUDA | classic/cuda itr=1 n_sub=7 | 30.962 | 30.794 | 5.62 | 5.61 | 22.33 | 1.473 | 1.371 | - | - | - | 1.6e-05 | 4.9e-04 | ok |
+| 1M | 64 | fp16 | bwd | 13 | 1 | cpu | host | - | classic_CUDA | classic/cuda itr=1 n_sub=13 | 33.199 | 32.484 | 4.04 | 4.03 | 17.34 | 1.579 | 1.470 | - | - | - | 1.5e-05 | 4.9e-04 | ok |
+| 1M | 64 | fp16 | bwd | 21 | 1 | cpu | host | - | classic_CUDA | classic/cuda itr=1 n_sub=21 | 30.803 | 30.775 | 3.12 | 3.12 | 14.81 | 1.465 | 1.364 | - | - | - | 1.4e-05 | 5.0e-04 | ok |
+| 1M | 64 | fp16 | bwd | 31 | 1 | cpu | host | - | classic_CUDA | classic/cuda itr=1 n_sub=31 | 33.207 | 32.955 | 2.54 | 2.53 | 14.82 | 1.579 | 1.471 | - | - | - | 1.4e-05 | 5.0e-04 | ok |
+| 1M | 64 | fp16 | bwd | 57 | 1 | cpu | host | - | classic_CUDA | classic/cuda itr=1 n_sub=57 | 36.548 | 36.310 | 1.85 | 1.84 | 14.89 | 1.738 | 1.619 | - | - | - | 1.3e-05 | 5.1e-04 | ok |
+| 1M | 64 | fp16 | bwd | 73 | 1 | cpu | host | - | classic_CUDA | classic/cuda itr=1 n_sub=73 | 38.107 | 37.530 | 1.63 | 1.62 | 13.82 | 1.812 | 1.688 | - | - | - | 1.3e-05 | 5.0e-04 | ok |
+| 1M | 64 | fp16 | bwd | 91 | 1 | cpu | host | - | classic_CUDA | classic/cuda itr=1 n_sub=91 | 38.391 | 38.089 | 1.45 | 1.44 | 13.73 | 1.826 | 1.700 | - | - | - | 1.3e-05 | 5.1e-04 | ok |
+| 1M | 64 | fp16 | bwd | 133 | 1 | cpu | host | - | classic_CUDA | classic/cuda itr=1 n_sub=133 | 42.185 | 41.729 | 1.19 | 1.19 | 13.73 | 2.006 | 1.868 | - | - | - | 1.3e-05 | 5.2e-04 | ok |
+| 1M | 64 | fp16 | bwd | 3 | 1 | cpu | host | - | wave_CUDA | classic/cuda itr=1 n_sub=3 | 25.849 | 25.755 | 8.73 | 8.72 | 23.22 | 1.229 | 1.145 | - | - | - | 1.9e-05 | 4.8e-04 | ok |
+| 1M | 64 | fp16 | bwd | 7 | 1 | cpu | host | - | wave_CUDA | classic/cuda itr=1 n_sub=7 | 25.663 | 25.612 | 5.62 | 5.61 | 22.53 | 1.221 | 1.137 | - | - | - | 1.6e-05 | 4.9e-04 | ok |
+| 1M | 64 | fp16 | bwd | 13 | 1 | cpu | host | - | wave_CUDA | classic/cuda itr=1 n_sub=13 | 29.322 | 29.275 | 4.04 | 4.03 | 17.63 | 1.395 | 1.299 | - | - | - | 1.5e-05 | 4.9e-04 | ok |
+| 1M | 64 | fp16 | bwd | 21 | 1 | cpu | host | - | wave_CUDA | classic/cuda itr=1 n_sub=21 | 31.417 | 31.068 | 3.12 | 3.12 | 15.07 | 1.494 | 1.391 | - | - | - | 1.4e-05 | 5.0e-04 | ok |
+| 1M | 64 | fp16 | bwd | 31 | 1 | cpu | host | - | wave_CUDA | classic/cuda itr=1 n_sub=31 | 32.941 | 32.684 | 2.54 | 2.53 | 15.04 | 1.567 | 1.459 | - | - | - | 1.4e-05 | 5.0e-04 | ok |
+| 1M | 64 | fp16 | bwd | 57 | 1 | cpu | host | - | wave_CUDA | classic/cuda itr=1 n_sub=57 | 36.884 | 36.871 | 1.85 | 1.84 | 15.07 | 1.754 | 1.634 | - | - | - | 1.3e-05 | 5.1e-04 | ok |
+| 1M | 64 | fp16 | bwd | 73 | 1 | cpu | host | - | wave_CUDA | classic/cuda itr=1 n_sub=73 | 36.902 | 36.804 | 1.63 | 1.62 | 14.27 | 1.755 | 1.634 | - | - | - | 1.3e-05 | 5.0e-04 | ok |
+| 1M | 64 | fp16 | bwd | 91 | 1 | cpu | host | - | wave_CUDA | classic/cuda itr=1 n_sub=91 | 39.207 | 38.372 | 1.45 | 1.44 | 14.09 | 1.865 | 1.736 | - | - | - | 1.3e-05 | 5.1e-04 | ok |
+| 1M | 64 | fp16 | bwd | 133 | 1 | cpu | host | - | wave_CUDA | classic/cuda itr=1 n_sub=133 | 42.862 | 42.413 | 1.19 | 1.19 | 13.99 | 2.039 | 1.898 | - | - | - | 1.3e-05 | 5.2e-04 | ok |
+
+![E10](E10.png)
+
+## E11: the host-streamed backward's scatter: synchronous (the shipped default, CQSA_SCATTER_ASYNC=0) against the asynchronous fold on a worker (=1), host-resident forward+backward at 1M and 2M
+
+| N | D | dtype | dir | c | itr | acc | qkv | W | arm | engine that ran | wall s | min s | peak GiB | workspace | host GiB | /FA-2 | /SDPA | ref | rel vs ref | grads | fp64 (x ref) | fp64 dq (x ref) | status |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1M | 64 | fp16 | bwd | 7 | 1 | cpu | host | scatter=async | classic_CUDA | classic/cuda itr=1 n_sub=7 | 28.394 | 28.189 | 5.62 | 5.61 | 22.35 | 1.350 | 1.258 | - | - | - | 1.6e-05 | 4.9e-04 | ok |
+| 1M | 64 | fp16 | bwd | 7 | 1 | cpu | host | scatter=sync | classic_CUDA | classic/cuda itr=1 n_sub=7 | 30.494 | 29.268 | 5.62 | 5.61 | 22.34 | 1.450 | 1.351 | - | - | - | 1.6e-05 | 4.9e-04 | ok |
+| 2M | 64 | fp16 | bwd | 7 | 1 | cpu | host | scatter=async | classic_CUDA | classic/cuda itr=1 n_sub=7 | 118.568 | 118.063 | 11.22 | 11.21 | 33.47 | 1.410 | 1.315 | - | - | - | 1.5e-05 | 8.0e-04 | ok |
+| 2M | 64 | fp16 | bwd | 7 | 1 | cpu | host | scatter=sync | classic_CUDA | classic/cuda itr=1 n_sub=7 | 120.998 | 120.426 | 11.22 | 11.21 | 33.67 | 1.438 | 1.342 | - | - | - | 1.5e-05 | 8.0e-04 | ok |
+
+![E11](E11.png)
+
+## E12: the wave budget W in the host-resident forward (the chunk pool now follows W): launches against device memory at c=73, as E5 measured device-resident
+
+| N | D | dtype | dir | c | itr | acc | qkv | W | arm | engine that ran | wall s | min s | peak GiB | workspace | host GiB | /FA-2 | /SDPA | ref | rel vs ref | grads | fp64 (x ref) | fp64 dq (x ref) | status |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1M | 64 | fp16 | fwd | 73 | 1 | cpu | host | W=1x | wave_CUDA | wave/cuda itr=1 n_sub=73 waves=73 | 9.484 | 9.440 | 0.89 | 0.88 | 6.10 | 1.573 | 1.501 | - | - | - | 1.3e-05 | - | ok |
+| 1M | 64 | fp16 | fwd | 73 | 1 | cpu | host | W=2x | wave_CUDA | wave/cuda itr=1 n_sub=73 waves=37 | 9.060 | 8.961 | 1.75 | 1.74 | 6.71 | 1.502 | 1.434 | - | - | - | 1.3e-05 | - | ok |
+| 1M | 64 | fp16 | fwd | 73 | 1 | cpu | host | W=4x | wave_CUDA | wave/cuda itr=1 n_sub=73 waves=19 | 8.690 | 8.675 | 3.40 | 3.39 | 7.86 | 1.441 | 1.375 | - | - | - | 1.3e-05 | - | ok |
+| 1M | 64 | fp16 | fwd | 73 | 1 | cpu | host | W=8x | wave_CUDA | wave/cuda itr=1 n_sub=73 waves=10 | 8.139 | 7.970 | 6.51 | 6.50 | 10.18 | 1.349 | 1.288 | - | - | - | 1.3e-05 | - | ok |
+| 1M | 64 | fp16 | fwd | 73 | 1 | cpu | host | W=16x | wave_CUDA | wave/cuda itr=1 n_sub=73 waves=5 | 7.582 | 7.565 | 9.13 | 9.12 | 11.98 | 1.257 | 1.200 | - | - | - | 1.3e-05 | - | ok |
+| 1M | 64 | fp16 | fwd | 73 | 1 | cpu | host | W=1x | wave_Triton | wave/triton itr=1 n_sub=73 waves=73 | 13.161 | 13.074 | 2.19 | 2.18 | 6.02 | 2.182 | 2.083 | - | - | - | 1.3e-05 | - | ok |
+| 1M | 64 | fp16 | fwd | 73 | 1 | cpu | host | W=2x | wave_Triton | wave/triton itr=1 n_sub=73 waves=37 | 12.389 | 12.280 | 4.66 | 4.65 | 6.61 | 2.054 | 1.961 | - | - | - | 1.3e-05 | - | ok |
+| 1M | 64 | fp16 | fwd | 73 | 1 | cpu | host | W=4x | wave_Triton | wave/triton itr=1 n_sub=73 waves=19 | 11.957 | 11.920 | 8.03 | 8.02 | 7.78 | 1.982 | 1.892 | - | - | - | 1.3e-05 | - | ok |
+| 1M | 64 | fp16 | fwd | 73 | 1 | cpu | host | W=8x | wave_Triton | wave/triton itr=1 n_sub=73 waves=10 | 11.761 | 11.606 | 13.74 | 13.73 | 10.24 | 1.950 | 1.861 | - | - | - | 1.3e-05 | - | ok |
+| 1M | 64 | fp16 | fwd | 73 | 1 | cpu | host | W=16x | wave_Triton | wave/triton itr=1 n_sub=73 waves=5 | 11.206 | 11.137 | 19.44 | 19.43 | 12.14 | 1.858 | 1.773 | - | - | - | 1.3e-05 | - | ok |
+
+![E12](E12.png)
 
 ## E8: the v3 default: Q/K/V on the device with the accumulator in host memory (what attention() picks from 1M up) against E1's device accumulator at the same N (time cost vs device memory saved)
 

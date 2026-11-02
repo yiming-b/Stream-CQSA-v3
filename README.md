@@ -95,17 +95,16 @@ The same build installs from a checkout without compiling:
 
 The [release page](https://github.com/yiming-b/Stream-CQSA-v3/releases/tag/v3.0.0) carries the pure wheel and the
 sdist that PyPI serves, one wheel with both extensions for torch 2.10 / CUDA 13 / python 3.11, sm80 + sm90
-(`stream_cqsa-3.0.0-1cu130torch210sm8090-cp311-cp311-linux_x86_64.whl`, built on an A100 node), and, once the
-workflow's matrix has run (`.github/workflows/wheels.yml`: python 3.10/3.11/3.12 x torch 2.5.1/2.6.0 x CUDA 12.4
-x sm80/sm90; it runs on a tag when the repository variable `CUDA_WHEELS=true` is set, which needs a public
-repository's runners), two wheels per cell: `stream_cqsa` with the classic CUDA module and the companion
-`stream_cqsa_native` with the wave kernel. Install what matches your python / torch / CUDA / GPU; the wheels
-replace the PyPI package with the same version plus the extensions:
+(`stream_cqsa-3.0.0-1cu130torch210sm8090-cp311-cp311-linux_x86_64.whl`, built on an A100 node), and the
+workflow's matrix (`.github/workflows/wheels.yml`: python 3.10/3.11/3.12 x torch 2.5.1/2.6.0 x CUDA 12.4 x
+sm80/sm90, run on the tag with the repository variable `CUDA_WHEELS=true`), two wheels per cell: `stream_cqsa`
+with the classic CUDA module and the companion `stream_cqsa_native` with the wave kernel. Install what matches
+your python / torch / CUDA / GPU; the wheels replace the PyPI package with the same version plus the extensions:
 
 ```bash
 V=v3.0.0; W=stream_cqsa-3.0.0-1cu130torch210sm8090-cp311-cp311-linux_x86_64.whl        # torch 2.10 / CUDA 13 / py3.11
 pip install https://github.com/yiming-b/Stream-CQSA-v3/releases/download/$V/$W
-# matrix cells, when present: T=1cu124torch2.6sm80; PY=cp311
+# matrix cells: T=1cu124torch2.6sm80; PY=cp311
 #   stream_cqsa-3.0.0-$T-$PY-$PY-linux_x86_64.whl  and  stream_cqsa_native-3.0.0-$T-$PY-$PY-linux_x86_64.whl
 ```
 

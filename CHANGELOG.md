@@ -1,6 +1,13 @@
 # Changelog
 
-## v3.0.0 (unreleased, development in Stream-CQSA-v3)
+## v3.0.0 (2026-11-01)
+
+The v3 line: new classic and wave CUDA kernels (census + ALIGNED run-table design, 0.77-0.78x flash_attn per task),
+one extension for both causal modes and both dtypes, routing by a memory model, the host accumulator by default where
+it is cheap, grouped-query attention, a multi-device scheduler, and the v3 measurement series (`results/v3/`, E0-E12)
+behind every number in the README. `notebooks/stream_cqsa_v3_tutorial.ipynb` is the tutorial (executed on an A100).
+Entries below are in the order they landed.
+
 
 * **Grouped-query / multi-query attention.** `attention(q, k, v)` accepts `k`/`v` with `H_kv` heads dividing
   `q`'s `H` (query head `h` attends K/V head `h // (H // H_kv)`, FlashAttention's convention; SDPA's
@@ -16,6 +23,9 @@
   `autoconfig.plan` and the estimators), so the monolithic threshold and the depth follow the smaller K/V. The
   Triton kernels (the no-build fallback) reject it with a message. `tests/test_v3_gqa.py` (17 tests): 4:1 and
   8:1 within the fp16 kernels' error of SDPA and within 1e-4 of the same call on repeated heads, on every route.
+* `verbose=True` lines: a partial restore after an eviction says how many of the three tensors came back (it said
+  "left in host memory" when two of three had), the wave engine's "ran" line names the kernel that ran (it said
+  `auto`), and a training call's "ran" line carries its subproblem count.
 * Fix: `attention(kernel="triton")` wrote `CQSA_FORWARD` / `CQSA_BACKWARD` into the process environment for
   good, so every later call of the process ran the Triton kernels whatever `kernel=` said (the tests popped the
   variables by hand). The choice is scoped to the call now; the autograd function carries it to the backward.

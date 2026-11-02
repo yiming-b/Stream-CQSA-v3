@@ -198,18 +198,48 @@ if ONLY_NATIVE and not SKIP_EXT:
     )
     raise SystemExit(0)
 
+def _readme() -> str:
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "README.md")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+_URL = "https://github.com/yiming-b/Stream-CQSA-v3"
+
 setup(
     name=PACKAGE_NAME,
     version=get_version(),
-    description="Stream-CQSA v2: exact out-of-memory recovery for attention (engine, planner, devkit, native kernels)",
+    description="Stream-CQSA: exact out-of-memory recovery for attention. One function with SDPA's signature: the normal "
+                "kernel when the call fits, an exact cyclic-quorum-set decomposition when it does not; training and GQA included.",
+    long_description=_readme(),
+    long_description_content_type="text/markdown",
+    author="Yiming Bian",
+    license="BSD-3-Clause",
+    url=_URL,
+    project_urls={
+        "Source": _URL,
+        "Releases (CUDA wheels)": _URL + "/releases",
+        "Changelog": _URL + "/blob/main/CHANGELOG.md",
+        "Paper (v1)": "https://arxiv.org/abs/2604.20819",
+    },
+    classifiers=[
+        "Development Status :: 5 - Production/Stable",
+        "Intended Audience :: Science/Research",
+        "License :: OSI Approved :: BSD License",
+        "Programming Language :: Python :: 3",
+        "Topic :: Scientific/Engineering :: Artificial Intelligence",
+        "Environment :: GPU :: NVIDIA CUDA",
+    ],
     packages=find_packages(include=["stream_cqsa", "stream_cqsa.*"]),
     # Extensions (see docs/kernel_technical_note.md, docs/ultimate/03_kernels_report.md):
     #   cqsa_cuda     csrc/     the v13 classic module: census + ALIGNED run-table kernels with
     #                           v11's code as the LEGACY fallback, forward and backward, causal and
-    #                           non-causal in one module (CQS-off path == FlashAttention-2). The
-    #                           second extension of v2 (cqsa_cuda_nc from csrc_nc/, v9's non-causal
-    #                           forward) is retired: csrc_nc/ stays in the tree until the release
-    #                           decides, but is not built.
+    #                           non-causal in one module (CQS-off path == FlashAttention-2). v2's
+    #                           second extension (cqsa_cuda_nc, v9's non-causal forward) is retired
+    #                           and its tree (csrc_nc/) removed in 3.0.0.
     #   cqsa_native   native/   the multi-subproblem wave kernel v2 (optional: CQSA_BUILD_NATIVE=1;
     #                           head dims 64 and 128, both dtypes); stream_cqsa.native_wave uses it
     ext_modules=[] if SKIP_EXT else (

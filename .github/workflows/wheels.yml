@@ -46,8 +46,12 @@ jobs:
   # separate wheels because each is a ~2 h compile on a 4-core hosted runner against the
   # 6 h limit; installed together, the package uses the wave kernel automatically.
   # (Hosted runners of a PRIVATE repo have 2 cores / 7 GB and cannot build either.)
+  # On a tag the matrix runs only when the repository variable CUDA_WHEELS=true: the hosted runners of a PRIVATE
+  # repository (2 cores / 7 GB) cannot build the extensions, and 24 failing multi-hour jobs would burn the minutes.
+  # Set the variable once the repository is public (v2's matrix ran there: torch 2.5/2.6 x cu124 x sm80/90), or
+  # dispatch by hand with `cuda:`. The della wheel (torch 2.10 / CUDA 13, native/wheel_build.sh) is attached by hand.
   cuda:
-    if: ${{ startsWith(github.ref, 'refs/tags/v') || startsWith(inputs.cuda, 'single') || inputs.cuda == 'native-all' || inputs.cuda == 'all' }}
+    if: ${{ (startsWith(github.ref, 'refs/tags/v') && vars.CUDA_WHEELS == 'true') || startsWith(inputs.cuda, 'single') || inputs.cuda == 'native-all' || inputs.cuda == 'all' }}
     runs-on: ${{ inputs.runner || 'ubuntu-22.04' }}
     timeout-minutes: 360
     strategy:

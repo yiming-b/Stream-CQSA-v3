@@ -274,6 +274,7 @@ def _restore_inputs(state, mode, vb: bool, reserve_fraction: float = 0.10, budge
         return False
     ok = True
     left = budget_bytes
+    n_back = 0
     for t, stride in zip(state["tensors"], state["strides"]):
         if t.device == dev:
             continue
@@ -287,6 +288,7 @@ def _restore_inputs(state, mode, vb: bool, reserve_fraction: float = 0.10, budge
             d.copy_(t.data, non_blocking=True)
             torch.cuda.synchronize(dev)
             t.data = d
+            n_back += 1
             if left is not None:
                 left -= need
         except Exception as exc:                                     # noqa: BLE001
@@ -295,8 +297,12 @@ def _restore_inputs(state, mode, vb: bool, reserve_fraction: float = 0.10, budge
             torch.cuda.empty_cache(); ok = False
     state["restored"] = ok
     if vb:
-        print("Stream-CQSA: Q/K/V restored to " + str(dev) if ok else
-              f"Stream-CQSA: Q/K/V left in host memory (no room on {dev} next to the output); they remain valid tensors", flush=True)
+        n_all = len(state["tensors"])
+        if ok:
+            print(f"Stream-CQSA: Q/K/V restored to {dev}", flush=True)
+        else:
+            print(f"Stream-CQSA: {n_back} of {n_all} input tensors restored to {dev}; {n_all - n_back} left in host memory "
+                  f"(no room next to the output); every tensor remains valid (t.device says where)", flush=True)
     return ok
 
 
@@ -483,7 +489,7 @@ def _run(q, k, v, p, *, is_causal, scale, direction, on_cuda, out_el, overrides,
             from .native_wave import resolve_wave_kernel
             _eng, _ker = "wave", resolve_wave_kernel(WAVE_KERNELS.get(kernel, "auto"), q.dtype, int(q.shape[-1]))
         else:
-            _eng, _ker = "classic", ("triton" if (kernel in ("triton", "wave-triton") or os.environ.get("CQSA_FORWARD", "").lower() == "triton") else "cuda")
+            _eng, _ker = "classic", ("triton" if kernel in ("triton", "wave-triton") else _classic_kernel_name())
         print(_config_line(stage="plan", mode="cqsa", itr=_itr, c=_c, n_sub=_nsub, qkv=_qkv, acc=_acc, engine=_eng, kernel=_ker,
                            wave=(_wave_desc(wave_tokens, gather, kw.get("stream_from_host")) if use_wave else None),
                            n_par=(None if use_wave else kw.get("max_parallel")),
@@ -494,6 +500,8 @@ def _run(q, k, v, p, *, is_causal, scale, direction, on_cuda, out_el, overrides,
         # host-resident: chunk-pool slots (default: what the free memory allows); the engine's knob, not the planner's
         wpool = {"pool_slots": int(kw["pool_slots"])} if kw.get("pool_slots") is not None else {}
         wkern = WAVE_KERNELS.get(kernel, "auto")
+        from .native_wave import resolve_wave_kernel as _rwk
+        wkern_ran = _rwk(wkern, q.dtype, int(D))                   # what runs ("cuda" / "triton"), for the info dict
         floor = wave_token_floor(N, H=H, D=D, itemsize=q.element_size(), **wkw)
         retries = 0
         while use_wave:
@@ -506,7 +514,7 @@ def _run(q, k, v, p, *, is_causal, scale, direction, on_cuda, out_el, overrides,
                     out = wave_attention(q, k, v, causal=bool(is_causal), scale=scale, verbose=verbose, max_wave_tokens=wave_tokens,
                                          gather=gather, bwd_itr=(bwd_itr if isinstance(bwd_itr, int) else None),
                                          classic_fallback=kernel not in WAVE_KERNELS, bwd_info=binfo, **wkw, **wpool)
-                    info = {"engine": "wave", "kernel": wkern, "max_wave_tokens": wave_tokens,
+                    info = {"engine": "wave", "kernel": wkern_ran, "max_wave_tokens": wave_tokens,
                             "gather": binfo["forward_gather"], "backward": binfo, **wkw}
                 else:
                     out, info = wave_forward(q, k, v, causal=bool(is_causal), scale=scale, verbose=verbose, max_wave_tokens=wave_tokens,
@@ -551,7 +559,7 @@ def _run(q, k, v, p, *, is_causal, scale, direction, on_cuda, out_el, overrides,
                                        stream_from_host=bool(kw.get("stream_from_host", host)),
                                        accumulate_on_gpu=bool(kw.get("accumulate_on_gpu", True)),
                                        max_parallel=kw.get("max_parallel"), bwd_itr=bwd_itr)
-                info = {"engine": "classic", "kernel": "triton" if os.environ.get("CQSA_FORWARD", "").lower() == "triton" else "cuda",
+                info = {"engine": "classic", "kernel": _classic_kernel_name(),
                         "itr": kw.get("itr", "auto"), "c": kw.get("c", 7), "stream_from_host": bool(kw.get("stream_from_host", host)),
                         "accumulate_on_gpu": bool(kw.get("accumulate_on_gpu", True))}
             else:
@@ -559,11 +567,12 @@ def _run(q, k, v, p, *, is_causal, scale, direction, on_cuda, out_el, overrides,
                 # leave the fp32 result where the accumulator is; _deliver casts and moves it
                 out, info = stream_cqsa_forward(q, k, v, causal=bool(is_causal), scale=scale, verbose=verbose, out_device="acc", **kw)
                 info = {k_: v_ for k_, v_ in info.items() if k_ not in ("lse",) and not hasattr(v_, "device")}
-                info["engine"] = "classic"; info["kernel"] = "triton" if os.environ.get("CQSA_FORWARD", "").lower() == "triton" else "cuda"
+                info["engine"] = "classic"; info["kernel"] = _classic_kernel_name()
     if vb:
         ran_wave = info.get("engine") == "wave"
-        print(_config_line(stage="ran", mode="cqsa", itr=info.get("itr", kw.get("itr")), c=info.get("c", kw.get("c", 7)),
-                           n_sub=info.get("n_subproblems"),
+        _itr_ran, _c_ran = info.get("itr", kw.get("itr")), info.get("c", kw.get("c", 7))
+        print(_config_line(stage="ran", mode="cqsa", itr=_itr_ran, c=_c_ran,
+                           n_sub=info.get("n_subproblems") or (int(_c_ran) ** int(_itr_ran) if isinstance(_itr_ran, int) else None),
                            qkv=(("device -> evicted to host, streamed" if ev["state"] else "host, streamed") if kw.get("stream_from_host") else "device"),
                            acc=("host (CPU)" if not acc_gpu else "device (GPU)"),
                            engine=info.get("engine", "?"), kernel=info.get("kernel", "?"),
@@ -614,6 +623,13 @@ WAVE_KERNELS = {"wave": "auto", "wave-cuda": "cuda", "wave-triton": "triton"}
 def _wave_desc(wave_tokens, gather, stream_from_host) -> str:
     w = f"wave budget {wave_tokens:,} tokens" if wave_tokens else "wave budget default"
     return w + (", chunk pool" if stream_from_host else (", Q/K/V gathered" if gather else ", Q/K/V read in place"))
+
+
+def _classic_kernel_name() -> str:
+    """What the classic engine runs its forward on: the CUDA module when it is importable and not overridden,
+    else Triton (the no-build path; the engine falls back to it on its own, so the label must say so)."""
+    from . import interface as I
+    return "triton" if (I.cqsa_cuda is None or os.environ.get("CQSA_FORWARD", "").lower() == "triton") else "cuda"
 
 
 def _engines_for(kernel: str, dtype, D: int, direction: str, on_host: bool = False) -> tuple:

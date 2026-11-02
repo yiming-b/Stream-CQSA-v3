@@ -8,15 +8,16 @@ rule of its own: it reproduces whatever kernel it wraps.
 
 Paper (v1): [arXiv:2604.20819](https://arxiv.org/abs/2604.20819) ·
 v1 repo: [yiming-b/Stream-CQSA](https://github.com/yiming-b/Stream-CQSA) ·
-v2 repo (released, PyPI `stream-cqsa` 2.2.3): [yiming-b/Stream-CQSA-v2](https://github.com/yiming-b/Stream-CQSA-v2)
+v2 repo (the previous line, 2.2.x): [yiming-b/Stream-CQSA-v2](https://github.com/yiming-b/Stream-CQSA-v2)
 
-**v3 is in development** (version `3.0.0.dev0`, not on PyPI yet). It is v2.2.3 plus the kernel and engine
-work of the "ultimate A100 kernel" program (`docs/ultimate/`): new forward and backward kernels that remove
-the decomposition's overhead on the live tiles, a wave kernel with the same design, 128-aligned chunk
-layouts, routing by a memory model, a multi-device scheduler for mixed GPUs, and one experiment plan
-(`experiments/v3/PLAN.md`) whose results are the measurement sections below (E0-E6 and E8 complete on
-A100-SXM4-80GB, E2's 4M/8M rows on A100 80GB PCIe; E7 not run; `results/v3/STATUS.md` has the
-row counts and job ids; the section "Missing, and what deserves to be done" lists the rest).
+**v3.0.0 is the current release** (`pip install stream-cqsa`; the tutorial is `notebooks/stream_cqsa_v3_tutorial.ipynb`).
+It is v2.2.x plus the kernel and engine work of the "ultimate A100 kernel" program (`docs/ultimate/`): new forward
+and backward kernels that remove the decomposition's overhead on the live tiles, a wave kernel with the same design,
+128-aligned chunk layouts, routing by a memory model, the host accumulator by default where it is cheap,
+grouped-query attention, a multi-device scheduler for mixed GPUs, and one experiment plan (`experiments/v3/PLAN.md`)
+whose results are the measurement sections below (E0-E6 and E8-E12 on A100-SXM4-80GB, E2's 4M/8M rows on A100 80GB
+PCIe; E7 not run; `results/v3/STATUS.md` has the row counts and job ids; the section "Missing, and what deserves
+to be done" lists the rest).
 
 ## How it works
 
@@ -64,28 +65,18 @@ kept query–key pair is counted exactly once, so the result is exact.
 
 ## Install
 
-**v3 (this repo, development):** source only until 3.0.0 is released. In a checkout:
-`pip install -e . --no-build-isolation` compiles the classic module (`csrc/`, one extension; `CQSA_KERNEL_SET=common`
-= fp16+bf16, head dims 64+128, causal + non-causal; 30-75 min of nvcc) and `CQSA_BUILD_NATIVE=1` adds the wave kernel
-(`native/`); `CQSA_SKIP_EXT=1` installs the Triton-only build with no compilation. **[release: pending]** -- the
-3.0.0 wheels (PyPI pure wheel; CUDA wheels per python / torch / CUDA / GPU on the release page) follow the
-experiment results.
-
-**v2.2.3 (released):** two implementations of the kernels ship, and where you get them differs:
+Two implementations of the kernels ship, and where you get them differs:
 
 | | kernels | where | install |
 |---|---|---|---|
 | **Triton build** | CQS forward and backward in Triton, compiled on your machine for your GPU; no compiler, no torch/CUDA matching | PyPI | `pip install stream-cqsa` |
-| **CUDA build** | the classic CUDA extensions (FlashAttention-2-derived CQS forward, CUDA backward) plus the native wave kernel; the fastest forward | GitHub release page (prebuilt wheels per python / torch / CUDA / GPU) or a source build | see below |
+| **CUDA build** | the classic CUDA module (`cqsa_cuda`: census + ALIGNED kernels, FlashAttention-2-derived, forward and backward) plus the native wave kernel (`cqsa_native`); the fastest forward and backward, grouped-query attention | GitHub release page (prebuilt wheels per python / torch / CUDA / GPU) or a source build | see below |
 
-The package picks at run time: CUDA extensions and the wave kernel when they are importable,
-Triton otherwise. `stream-cqsa-doctor` shows which kernels loaded. `stream_cqsa.place_inputs(q, k, v)` moves host tensors to the GPU only if they fit and keeps the rest pinned
-in host memory (a guardrail for shared GPUs); `verbose=True` prints every automatic choice. Since v2.2.0 the wave engine
-also runs on the Triton kernel (`attention(..., kernel="wave-triton")`; `"wave-cuda"` pins the
-CUDA one), supports the host accumulator (`accumulate_on_gpu=False`) on both, and the quorum-set
-register includes c=3 and c=133; the automatic planner enumerates every registered set. In v2.2.x the Triton backward was the
-default in both builds (it measured faster than v2's CUDA backward at every length);
-in v3 the CUDA backward of the new module is the default and `CQSA_BACKWARD=triton` selects Triton.
+The package picks at run time: the CUDA module and the wave kernel when they are importable, Triton otherwise.
+`stream-cqsa-doctor` shows which kernels loaded. `stream_cqsa.place_inputs(q, k, v)` moves host tensors to the GPU
+only if they fit and keeps the rest pinned in host memory (a guardrail for shared GPUs); `verbose=True` prints every
+automatic choice. The CUDA backward of the v13 module is the default; `CQSA_BACKWARD=triton` selects Triton. The
+Triton kernels do not do grouped-query attention (K/V with fewer heads than Q): that needs the CUDA build.
 
 ### Triton build (PyPI)
 
@@ -96,34 +87,39 @@ python -m stream_cqsa.doctor                                             # what 
 ```
 
 Triton is installed with the package (`triton` on Linux, `triton-windows` on Windows, where the official
-package has no wheels). `pip install flash-attn` is optional and
-gives the monolithic fast path its own kernel. The same build installs from a checkout without
-compiling: `CQSA_SKIP_EXT=1 pip install --no-build-isolation git+https://github.com/yiming-b/Stream-CQSA-v2.git`.
+package has no wheels). `pip install flash-attn` is optional and gives the monolithic fast path its own kernel.
+The same build installs from a checkout without compiling:
+`CQSA_SKIP_EXT=1 pip install --no-build-isolation git+https://github.com/yiming-b/Stream-CQSA-v3.git`.
 
 ### CUDA build (GitHub release page)
 
-The [release page](https://github.com/yiming-b/Stream-CQSA-v2/releases/tag/v2.2.3) carries, for
-every python 3.10/3.11/3.12 x torch 2.5.1/2.6.0 x CUDA 12.4 x GPU architecture (sm80 = A100 and
-other 8.x cards, sm90 = H100) cell, two wheels: `stream_cqsa` with the classic CUDA extensions and
-the companion `stream_cqsa_native` with the wave kernel. Install both; they replace the PyPI
-package with the same version plus the extensions:
+The [release page](https://github.com/yiming-b/Stream-CQSA-v3/releases/tag/v3.0.0) carries the pure wheel and the
+sdist that PyPI serves, one wheel with both extensions for torch 2.10 / CUDA 13 / python 3.11, sm80 + sm90
+(`stream_cqsa-3.0.0-1cu130torch210sm8090-cp311-cp311-linux_x86_64.whl`, built on an A100 node), and, once the
+workflow's matrix has run (`.github/workflows/wheels.yml`: python 3.10/3.11/3.12 x torch 2.5.1/2.6.0 x CUDA 12.4
+x sm80/sm90; it runs on a tag when the repository variable `CUDA_WHEELS=true` is set, which needs a public
+repository's runners), two wheels per cell: `stream_cqsa` with the classic CUDA module and the companion
+`stream_cqsa_native` with the wave kernel. Install what matches your python / torch / CUDA / GPU; the wheels
+replace the PyPI package with the same version plus the extensions:
 
 ```bash
-V=v2.2.3; T=1cu124torch2.6sm80; PY=cp311     # pick your torch / CUDA / GPU / python
-pip install https://github.com/yiming-b/Stream-CQSA-v2/releases/download/$V/stream_cqsa-2.2.3-$T-$PY-$PY-linux_x86_64.whl
-pip install https://github.com/yiming-b/Stream-CQSA-v2/releases/download/$V/stream_cqsa_native-2.2.3-$T-$PY-$PY-linux_x86_64.whl
+V=v3.0.0; W=stream_cqsa-3.0.0-1cu130torch210sm8090-cp311-cp311-linux_x86_64.whl        # torch 2.10 / CUDA 13 / py3.11
+pip install https://github.com/yiming-b/Stream-CQSA-v3/releases/download/$V/$W
+# matrix cells, when present: T=1cu124torch2.6sm80; PY=cp311
+#   stream_cqsa-3.0.0-$T-$PY-$PY-linux_x86_64.whl  and  stream_cqsa_native-3.0.0-$T-$PY-$PY-linux_x86_64.whl
 ```
 
-Also on the release page: one wheel with both extensions for torch 2.10 / CUDA 13 / python 3.11
-(`stream_cqsa-2.2.3-1cu130torch210sm8090-...whl`, sm80 + sm90), and the pure wheel and sdist that
-PyPI serves. The CUDA wheels are too large for PyPI (100 MB per file), which is why they live on
-GitHub, as PyTorch's own CUDA wheels do. They are built by `.github/workflows/wheels.yml` on every
-tag; publishing to PyPI is the `pypi` job, enabled by the repository variable `PYPI_PUBLISH=true`
-with trusted publishing.
+The CUDA wheels are too large for PyPI (100 MB per file), which is why they live on GitHub, as PyTorch's own CUDA
+wheels do. Publishing the pure wheel and the sdist to PyPI is the workflow's `pypi` job, enabled by the repository
+variable `PYPI_PUBLISH=true` with trusted publishing.
 
-From source, for any GPU: `pip install -e . --no-build-isolation` in a checkout compiles the
-classic extension for the card present (40-75 min of nvcc; `CQSA_KERNEL_SET=common` covers
-fp16/bf16 and head dims 64/128); `CQSA_BUILD_NATIVE=1` adds the wave kernel.
+From source, for any GPU: `pip install -e . --no-build-isolation` in a checkout compiles the classic module for the
+card present (`csrc/`; `CQSA_KERNEL_SET=common` = fp16+bf16, head dims 64+128, causal + non-causal; 30-75 min of
+nvcc) and `CQSA_BUILD_NATIVE=1` adds the wave kernel (`native/`). `CQSA_SKIP_EXT=1` installs the Triton-only build.
+
+**v2.2.x** (the previous line, [yiming-b/Stream-CQSA-v2](https://github.com/yiming-b/Stream-CQSA-v2)) remains
+installable by version (`pip install stream-cqsa==2.2.4`); v2.2.4 is its last release and carries the fix for the
+pinned-`c` bug (CHANGELOG). Nothing in the one-call API changed between the lines.
 
 ## Use
 
@@ -166,17 +162,20 @@ for old code; they emit a `DeprecationWarning` pointing to `attention`.
 output in `results/quickstart/`): the dry run, the monolithic path, the decomposed path under
 a memory cap with progress, host-resident inputs, autograd, and a patched module.
 
-Notebooks (executed, outputs included): `notebooks/stream_cqsa_v2_demo.ipynb` shows the one
-function (Part A) and the engine layer under it (Part B) on one GPU; `notebooks/oom_boundary_demo.ipynb` sweeps N explicitly under a memory cap
-and shows the baseline matching Stream-CQSA below the boundary and OOM-ing above it while
-Stream-CQSA continues, exact.
+Notebooks (executed on an A100, outputs included): **`notebooks/stream_cqsa_v3_tutorial.ipynb` is the tutorial**: the
+one call, what the decomposition is and what happens when a call does not fit, the planner's candidates, a dry run,
+host-resident inputs, Q/K/V on a full GPU inside a model, training, grouped-query attention, pinning a setting,
+routing an existing model, and where the time and memory go (`notebooks/make_v3_tutorial.py` generates and executes
+it; `sbatch slurm/v3/notebook.slurm`). `notebooks/stream_cqsa_v2_demo.ipynb` part B walks through the engine layer
+under `attention`; `notebooks/oom_boundary_demo.ipynb` sweeps N under a memory cap and shows the baseline matching
+Stream-CQSA below the boundary and OOM-ing above it while Stream-CQSA continues, exact.
 
 ## Layout
 
     stream_cqsa/      the package (engine, planner, devkit, adapters, distributed, autograd)
     csrc/             the classic CUDA kernel (FlashAttention-2 + CQS: a census routes every call to the ALIGNED
                       run-table kernel or the LEGACY per-element path, forward and backward, causal and non-causal);
-                      = kernels/v13. csrc_nc/ (v2's separate non-causal build) is retired and no longer built
+                      = kernels/v13 (v2's separate non-causal build, csrc_nc/, is retired and removed)
     native/           the multi-subproblem "wave" kernel (cqsa_native): sources, build, tests, benchmark
     benchmarks/profile_sweep.py   one-parameter profiles (c; N x {itr, acc}) with quadratic/linear fits: results/profile_sweep/
     tests/            pytest suite (engine, planner, devkit, adapters)

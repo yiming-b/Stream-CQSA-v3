@@ -268,28 +268,31 @@ Everything the planner decides can be pinned by keyword: `itr=` (depth), `c=` (q
 `bwd_itr=`. A pinned depth or quorum size forces the decomposition even when the call would fit, which is how
 the measurements in the README isolate the cost of decomposing: at 1M tokens on an A100 the decomposed forward
 (7 subproblems, device-resident) runs in 0.98-1.02x the time of one FlashAttention-2 call, forward+backward in
-1.01x, with 0.65x its device memory; deeper depths and larger quorum sizes buy memory for time.
+1.01x, with 0.65x its device memory; deeper depths and larger quorum sizes buy memory for time. (At this
+size the planner's own wave budget is one subproblem per launch: its model puts the seven-launch and the
+one-launch wave within 2% of each other and takes the smaller peak; `max_wave_tokens=` pins the budget.)
 """)
 code("""
-def ms(fn, it=3):
-    fn(); torch.cuda.synchronize()
+def ms(fn, it=5):
+    fn(); fn(); torch.cuda.synchronize()
     e0, e1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
     e0.record(); [fn() for _ in range(it)]; e1.record(); torch.cuda.synchronize(); return e0.elapsed_time(e1) / it
 torch.cuda.empty_cache()
 rows = [("SDPA (FlashAttention-2), monolithic", lambda: F.scaled_dot_product_attention(q, k, v, is_causal=True), {})]
 for name, kw in [("itr=1, c=7 (7 subproblems), classic CUDA", dict(itr=1, kernel="cuda")),
-                 ("itr=1, c=7, wave CUDA (one launch)", dict(itr=1, kernel="wave-cuda")),
+                 ("itr=1, c=7, wave CUDA, 7 subproblems in one launch", dict(itr=1, kernel="wave-cuda", max_wave_tokens=800_000)),
+                 ("   the same, Q/K/V read in place (no gathered copies)", dict(itr=1, kernel="wave-cuda", max_wave_tokens=800_000, gather=False)),
                  ("itr=2, c=7 (49 subproblems)", dict(itr=2)),
                  ("itr=1, c=31 (31 subproblems of 6/31)", dict(itr=1, c=31)),
                  ("itr=1, c=7, Triton kernel", dict(itr=1, kernel="triton"))]:
     rows.append((name, lambda kw=kw: stream_cqsa.attention(q, k, v, is_causal=True, **kw), kw))
-print(f"N={N:,}, H={H}, D={D}, fp16, causal, device-resident:")
+print(f"N={N:,}, H={H}, D={D}, fp16, causal, device-resident (5 timed calls each):")
 for name, fn, kw in rows:
     torch.cuda.synchronize(); torch.cuda.reset_peak_memory_stats()
     t = ms(fn)
     if kw:
         _, info = stream_cqsa.attention(q, k, v, is_causal=True, return_info=True, **kw); assert info["engine"] != "monolithic", info
-    print(f"  {name:48} {t:7.1f} ms   peak {torch.cuda.max_memory_allocated() / 2**30:5.2f} GiB")
+    print(f"  {name:56} {t:7.1f} ms   peak {torch.cuda.max_memory_allocated() / 2**30:5.2f} GiB")
 """)
 
 md("""

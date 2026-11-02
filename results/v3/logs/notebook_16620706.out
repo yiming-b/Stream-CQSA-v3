@@ -1,0 +1,7 @@
+della-l07g5
+NVIDIA A100-SXM4-80GB
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2/cqsa_cuda_v13.cpython-311-x86_64-linux-gnu.so
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/native_v2/frozen/gqa1/cqsa_native_v2.cpython-311-x86_64-linux-gnu.so 2
+executed in 100 s
+wrote /scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/notebooks/stream_cqsa_v3_tutorial.ipynb
+exit 0  22:38:31

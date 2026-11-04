@@ -185,17 +185,19 @@ Stream-CQSA below the boundary and OOM-ing above it while Stream-CQSA continues,
     docs/             kernel technical note, design notes (kernel suite / automatic conversion),
                       the full engineering log (LOG.md), per-step kernel diffs
     kernels/          the kernel variant sources of the program (v12f forward, v12b backward, v11x experiment)
-    experiments/v3/   PLAN.md (the experiment plan) and bench.py (the one harness: run / report / status)
+    experiments/v3/   PLAN.md (the experiment plan), bench.py (the one harness: run / report / status),
+                      readme_tables.py and plots.py (the README's tables and figures from results.jsonl)
     slurm/v3/         the resubmittable experiment jobs (E_sxm.slurm, E_pcie.slurm)
     docs/ultimate/    the kernel program: 00_map (design basis), 01_design, 02 and 03 reports, progress logs
-    results/v3/       every v3 measurement: results.jsonl, report.md, STATUS.md, figures
+    results/v3/       every v3 measurement: results.jsonl, report.md, STATUS.md, figures/ (one PNG per experiment)
     results/          v2-era measurements referenced in the docs (JSON + slurm logs), incl. results/ultimate/
 
 ## Measurements
 
 All v3 numbers come from one plan, `experiments/v3/PLAN.md`, one harness (`experiments/v3/bench.py`) and one
 results directory, `results/v3/` (`results.jsonl` = every row; `report.md` = the tables, fits and figures;
-`STATUS.md` = which rows exist and which were excluded, with the job ids). Every row records the GPU, the
+`STATUS.md` = which rows exist and which were excluded, with the job ids; `figures/` = the figures below, drawn
+from the same rows by `experiments/v3/plots.py`). Every row records the GPU, the
 engine and kernel that ran, the subproblem count, wall-clock (the median of 3 timed runs after a warm-up for
 the parameter sweeps, one timed run for the scaling ladders), peak device memory, peak host memory and the
 error against FlashAttention-2 and against float64. Node types are never mixed within a table: everything is
@@ -246,6 +248,8 @@ forward+backward (the engine A/B job 15958597, `results/ultimate/engine_ab.md`; 
 `docs/ultimate/03_kernels_report.md`). The host-accumulator column is what `attention()` chooses by default
 from about 1M tokens when the monolithic call does not fit (E8).
 
+![Stream-CQSA against one FlashAttention-2 call from 128K to 4M tokens: wall time ratio and peak device memory, Q/K/V on the device (E1) and in host memory (E2)](results/v3/figures/headline.png)
+
 ### E0 correctness (job 15966097, A100-SXM4-80GB)
 
 Every series (classic CUDA / Triton, wave CUDA / Triton) x c in {3, 7, 31, 133} x itr {1, 2} x accumulator
@@ -253,6 +257,8 @@ Every series (classic CUDA / Triton, wave CUDA / Triton) x c in {3, 7, 31, 133} 
 against FlashAttention-2 and against float64. Every row decomposed (asserted) and every row is exact: the
 output's error against float64 is 0.91-1.00x FlashAttention-2's own, the gradients' at most 1.24x (fp16
 rounding of the gradient accumulation at c=133, itr=2), bf16 ~8e-4 as the format allows.
+
+![E0 / E0b: the error against float64 relative to FlashAttention-2's own, every series, c, depth and accumulator](results/v3/figures/E0.png)
 
 <!-- v3-tables:E0 -->
 128 of 128 rows ran and are exact; the worst errors per series (the reference is FlashAttention-2's output and gradients; the fp64 columns compare both to a float64 SDPA):
@@ -271,7 +277,7 @@ The device-resident backward with the host accumulator (Q/K/V on the device, dQ/
 memory: the path the default takes for training from about 1M tokens, added in v3.0) at c in {3, 7, 31, 133}
 x itr {1, 2} at 256K, classic CUDA and Triton, against FlashAttention-2 and float64. E0's host-accumulator
 rows streamed Q/K/V from the host, a different code path; E4 and E8 cover this one at c=7 only (exact,
-gradient error 1.02-1.10x FA-2's own).
+gradient error 1.02-1.10x FA-2's own). Its rows are in the E0 figure above.
 
 <!-- v3-tables:E0b -->
 14 of 14 rows ran and are exact (the reference is FlashAttention-2; fp64 = a float64 SDPA):
@@ -291,6 +297,8 @@ forward and 0.99-1.01x its forward+backward at 1M-4M (1.27x / 1.14x at 128K, whe
 are a visible share of a 90 ms call); the wave series is 1-3% behind it (the W=1 wave's grid tail); the
 Triton series 1.45-2.0x. Peak device memory is 2.0-2.4x FA-2's (the fp32 accumulator and output copies that
 the host accumulator removes, E8); at 4M the forward+backward needed depth 2 (classic) / 4 (wave) to fit.
+
+![E1: wall time relative to FlashAttention-2 and peak device memory vs N, Q/K/V on the device](results/v3/figures/E1.png)
 
 <!-- v3-tables:E1 -->
 *forward* (wall s (x FA-2) / peak device GiB; the depth that ran when it is not 1):
@@ -327,6 +335,10 @@ GiB against FA-2's 16.1 and E1's 37.9); the price is host RAM, about 8 GiB per m
 forward+backward (VmHWM 12 / 22). On the PCIe node the 8M forward -- which no monolithic kernel can hold
 with its output on an 80 GB card -- runs at 0.97x FA-2's time in 21 GiB of device memory and 91 GiB of host
 RAM; the 8M forward+backward rows are not run (1.5-3 h each).
+
+![E2: wall time relative to FlashAttention-2 and peak device memory vs N, Q/K/V and the accumulator in host memory](results/v3/figures/E2.png)
+
+![E2 on the PCIe node: 4M and 8M forward against that node's own baselines](results/v3/figures/E2_pcie.png)
 
 <!-- v3-tables:E2 -->
 **A100-SXM4-80GB**, Q/K/V in pinned host memory and the accumulator in host memory (ratios against E1's resident FA-2 rows of the same N):
@@ -385,6 +397,8 @@ costs; D=128 costs what FA-2's D=128 costs (0.93-0.99x) on the CUDA series, 2.2-
 and the Triton backward at D=128 does not finish (a known 128-wide key-tile pathology; the CUDA backward is the
 default and is unaffected).
 
+![E3: wall time relative to FlashAttention-2 and peak device memory vs the quorum size c at 1M, Q/K/V on the device](results/v3/figures/E3.png)
+
 <!-- v3-tables:E3 -->
 *forward* at N=1M, itr=1 (wall s (x FA-2) / peak device GiB):
 
@@ -415,6 +429,8 @@ default and is unaffected).
 | 133 | 133 | 22.01 s (1.05x) / 16.0 GiB | 22.43 s (1.07x) / 19.1 GiB | 39.36 s (1.87x) / 16.0 GiB | 39.30 s (1.87x) / 16.0 GiB |
 <!-- /v3-tables:E3 -->
 
+![E4: depth 1 / 2 x device / host accumulator at 1M: wall time relative to FlashAttention-2 and peak device memory](results/v3/figures/E4.png)
+
 <!-- v3-tables:E4 -->
 N=1M, c=7, Q/K/V on the device (wall s (x FA-2) / peak device GiB / peak host GiB):
 
@@ -429,6 +445,8 @@ N=1M, c=7, Q/K/V on the device (wall s (x FA-2) / peak device GiB / peak host Gi
 | bwd | 2 | device | 21.71 s (1.03x) / 16.0 GiB itr2 / 0.2 | 22.12 s (1.05x) / 19.1 GiB itr2 / 0.2 | 37.74 s (1.79x) / 16.0 GiB itr2 / 0.2 | 37.74 s (1.79x) / 16.0 GiB itr2 / 0.2 |
 | bwd | 2 | host | 25.72 s (1.22x) / 10.0 GiB itr2 / 11.3 | 22.12 s (1.05x) / 19.1 GiB itr2 / 0.2 (ran acc=gpu) | 40.29 s (1.92x) / 10.0 GiB itr2 / 11.3 | 40.40 s (1.92x) / 10.0 GiB itr2 / 11.4 |
 <!-- /v3-tables:E4 -->
+
+![E5: the wave budget at 1M, c=73: wall time relative to FlashAttention-2 and peak device memory](results/v3/figures/E5.png)
 
 <!-- v3-tables:E5 -->
 N=1M, c=73, itr=1 (73 subproblems), the wave budget as a multiple of the largest subproblem (wall s (x FA-2) / peak device GiB / waves):
@@ -446,6 +464,8 @@ N=1M, c=73, itr=1 (73 subproblems), the wave budget as a multiple of the largest
 | bwd | 8x | 21.93 s (1.04x) / 25.1 GiB / 10 waves | 38.08 s (1.81x) / 16.0 GiB |
 | bwd | 16x | 21.80 s (1.04x) / 34.1 GiB / 5 waves | 38.09 s (1.81x) / 16.0 GiB |
 <!-- /v3-tables:E5 -->
+
+![E6: fp16 / bf16 x D=64 / 128 at 1M: wall time relative to FlashAttention-2 of the same dtype and D, and peak device memory](results/v3/figures/E6.png)
 
 <!-- v3-tables:E6 -->
 N=1M, c=7, itr=1 (wall s (x FA-2) / peak device GiB):
@@ -476,6 +496,8 @@ instead of 4.8 / 9.5 / 19.0 / 37.9 (forward) and 5.7 / 11.4 / 22.7 / 45.4 instea
 (forward) to 1.1x (forward+backward) of its device memory, plus host RAM of about 7 GiB per million tokens
 forward and 14 forward+backward. The wave backward keeps its accumulator on the device (its rows ran with
 acc=gpu in the backward, as recorded).
+
+![E8: the host accumulator with Q/K/V on the device vs the device accumulator (E1), across N](results/v3/figures/E8.png)
 
 <!-- v3-tables:E8 -->
 | arm | N | dir | E1 wall s (itr) | E8 wall s (itr) | E8/E1 | E1 dev GiB | E8 dev GiB | saved | E8 host GiB (VmHWM) | E8 acc ran |
@@ -527,6 +549,8 @@ their same-configuration neighbours), because the gpu-test nodes' host CPUs and 
 other jobs; the device-resident rows reproduce within 1-2% across jobs. Host-resident numbers below the 10% level
 therefore need repeated runs, and E2's single-run rows carry that uncertainty.
 
+![E9: the device chunk pool of the host-resident forward: wall time relative to the default pool and peak device memory](results/v3/figures/E9.png)
+
 <!-- v3-tables:E9 -->
 Host-resident forward (Q/K/V in pinned host memory, accumulator on the host), c=7, itr=1. Classic engine: chunk pool of 3 / 4 / 7 slots (3 = the current subproblem's chunks; the pool keeps a chunk the next subproblem shares) against `flush` = no pool, every subproblem gathered on the host; wave engine: pool of 3 (one wave's chunks) against 7 (all chunks resident, what it sized itself to before v3.0). Wall s (x FA-2 where a resident FA-2 row exists) / peak device GiB; classic rows add H2D chunk transfers / hits of 21 loads. The 1M rows are medians of 3 timed runs (job 16500372); the 256K and 4M rows single runs, which for this host-streamed path vary by 7-13% between jobs (the gpu-test nodes' host is shared with other jobs), so differences below that at those sizes are not resolved.
 
@@ -545,6 +569,8 @@ Host-resident forward (Q/K/V in pinned host memory, accumulator on the host), c=
 E3's c sweep (N=1M, itr=1) with Q/K/V in pinned host memory and the accumulator on the host. E3 was
 device-resident, where the O(N) floor hides the subproblem's l/c scaling; here the device holds the in-flight
 subproblem alone, so the peak should fall from about 3.3 GiB at c=3 (l/c = 2/3) to about 0.5 GiB at c=133 (12/133).
+
+![E10: wall time relative to FlashAttention-2 and peak device memory vs the quorum size c at 1M, Q/K/V and the accumulator in host memory](results/v3/figures/E10.png)
 
 <!-- v3-tables:E10 -->
 N=1M, itr=1, Q/K/V in pinned host memory and the accumulator on the host (ratios against E1's resident FA-2 rows; medians of 3 runs; wall s (x FA-2) / peak device GiB; the classic column adds peak host GiB):
@@ -583,6 +609,8 @@ design (`CQSA_SCATTER_ASYNC`, off: an earlier measurement found two bandwidth-bo
 asynchronous fold on a worker is the same mechanism the device-resident backward uses. Classic CUDA, c=7, 1M and
 2M, both settings.
 
+![E11: the host-streamed backward's synchronous scatter against the asynchronous fold at 1M and 2M](results/v3/figures/E11.png)
+
 <!-- v3-tables:E11 -->
 Host-resident forward+backward, classic CUDA, c=7, itr=1 (medians of 3 runs; wall s (x FA-2) / peak device GiB / peak host GiB):
 
@@ -604,6 +632,8 @@ backward pays in full.
 E5's W sweep (N=1M, c=73) with Q/K/V and the accumulator in host memory. With the pool following W (one wave's
 chunks: l=9 slots per subproblem in the wave, all 73 chunks from W=16x), the trade is launches against the
 pool's and the packed partials' memory.
+
+![E12: the wave budget at 1M, c=73, host-resident: wall time relative to FlashAttention-2 and peak device memory](results/v3/figures/E12.png)
 
 <!-- v3-tables:E12 -->
 N=1M, c=73, itr=1, host-resident forward, the wave budget as a multiple of the largest subproblem (medians of 3 runs; wall s (x FA-2) / peak device GiB / waves / pool slots):

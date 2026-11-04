@@ -194,6 +194,58 @@ Stream-CQSA below the boundary and OOM-ing above it while Stream-CQSA continues,
 
 ## Measurements
 
+### Highlights
+
+Six conclusions from 550 measured rows, 506 of them Stream-CQSA (A100-SXM4-80GB, fp16, B=1 H=8 D=64, causal,
+c=7 unless the row varies it; every Stream-CQSA row a real decomposition, pinned to depth >= 1 and asserted,
+never the monolithic call; FlashAttention-2 = one call on the same device-resident tensors). The
+per-experiment sections below hold every row; the index table after this section says where each number
+comes from.
+
+1. **It is exact.** Across every engine, kernel, quorum size, depth and accumulator placement the output's
+   error against float64 is 0.91-1.00x FlashAttention-2's own and the gradients' at most 1.24x (E0, E0b).
+2. **When Q/K/V fit on the device, the decomposition is free from 512K tokens up.** The classic CUDA engine
+   runs at 0.95-1.00x FA-2's forward and 0.99-1.01x its forward+backward at 512K-4M (1M: 0.97x / 0.99x;
+   4M: 0.95x / 1.01x), 1.27x / 1.14x at 128K where seven launches show against a 90 ms call. It costs 2-2.4x
+   FA-2's device memory, the fp32 accumulator and output copies (E1). v2.2.3's engine on the same shape was
+   1.30x and 2.6x.
+3. **The recovery configuration (Q/K/V and the accumulator in host RAM) is within 4-7% of FA-2 at 4M**, 1.17x
+   / 1.29x at 1M, and uses 0.55-0.65x FA-2's device memory; its price is host RAM, 8 GiB per million tokens
+   forward and 17 forward+backward. On the PCIe node the 8M forward runs at 0.97x FA-2 in 21 GiB of device
+   memory against FA-2's 32 (E2).
+4. **The default's trade is cheap.** Keeping Q/K/V on the device and the accumulator in host memory (what
+   `attention()` picks from about 1M tokens when the monolithic call does not fit) costs 10-16% forward and
+   6-11% forward+backward at 1M, 1-3% at 4M, for 40% less device memory at every N (E4, E8).
+5. **c is the memory knob and barely moves the time.** Device-resident, c from 3 to 133 keeps the time at
+   0.97-1.05x FA-2 while the peak falls 11.9 -> 7.2 GiB (E3); host-resident the peak follows the subproblem's
+   l/c, 3.9 -> 0.6 GiB at a flat 1.16-1.24x FA-2 up to c=31, then the streamed volume grows with l (1.6-2.4x
+   at c=57-133) (E10). Depth 2 costs 4% and saves 24% (E4). The wave budget, bf16, D=128, the chunk pool's
+   size and the scatter mode are all within a few percent of each other (E5, E6, E9, E11, E12).
+6. **The Triton fallback (the PyPI wheel without the CUDA extensions) costs 1.45-2x FA-2** at the same
+   memory; it is what runs when the extensions are absent, not the kernels these numbers are about (E1).
+
+The numbers behind 2-4, the classic CUDA engine at c=7 (wall s (x FA-2) / peak device GiB; host RAM where it
+is used):
+
+| N | direction | FlashAttention-2 (one call) | Q/K/V on the device, device accumulator (E1) | Q/K/V on the device, host accumulator: the default from ~1M (E8) | Q/K/V and the accumulator in host RAM: recovery (E2) |
+|---|---|---|---|---|---|
+| 512K | forward | 1.48 s / 2.0 GiB | 1.48 s (**1.00x**) / 4.8 GiB | 1.92 s (1.30x) / 2.8 GiB / host 3.4 | 2.07 s (1.40x) / 1.3 GiB / host 3.9 |
+| 512K | forward + backward | 5.24 s / 5.0 GiB | 5.31 s (**1.01x**) / 9.5 GiB | 6.34 s (1.21x) / 5.7 GiB / host 6.8 | 7.38 s (1.41x) / 2.8 GiB / host 11.5 |
+| 1M | forward | 6.03 s / 4.0 GiB | 5.85 s (**0.97x**) / 9.5 GiB | 6.76 s (1.12x) / 5.6 GiB / host 7.8 | 7.08 s (1.17x) / 2.6 GiB / host 7.5 |
+| 1M | forward + backward | 21.03 s / 10.1 GiB | 20.88 s (**0.99x**) / 19.1 GiB | 23.08 s (1.10x) / 11.4 GiB / host 14.3 | 27.10 s (1.29x) / 5.6 GiB / host 17.2 |
+| 4M | forward | 97.7 s / 16.1 GiB | 92.7 s (**0.95x**) / 37.9 GiB | 95.5 s (0.98x) / 22.4 GiB / host 26.8 | 101.5 s (1.04x) / 10.4 GiB / host 32.0 |
+| 4M | forward + backward | 337.8 s / 40.3 GiB | 341.0 s (**1.01x**, depth 2) / 64.1 GiB | 344.5 s (1.02x) / 45.4 GiB / host 52.5 | 360.0 s (1.07x) / 22.4 GiB / host 67.7 |
+| 8M (PCIe node) | forward | 545.0 s / 32.3 GiB | — | — | 526.6 s (**0.97x**) / 20.8 GiB / host 64.8 |
+
+The decomposition does no extra attention work (perfect-difference-set quorums cover every chunk pair
+exactly once), so from 512K up the launches, gathers and the merge vanish next to the kernels; what remains
+is where the data lives. Reading down a column the overhead of each configuration falls with N; reading
+across a row the device memory falls as more moves to the host.
+
+![Stream-CQSA against one FlashAttention-2 call from 128K to 4M tokens: wall time ratio and peak device memory, Q/K/V on the device (E1) and in host memory (E2)](results/v3/figures/headline.png)
+
+### How the numbers were produced
+
 All v3 numbers come from one plan, `experiments/v3/PLAN.md`, one harness (`experiments/v3/bench.py`) and one
 results directory, `results/v3/` (`results.jsonl` = every row; `report.md` = the tables, fits and figures;
 `STATUS.md` = which rows exist and which were excluded, with the job ids; `figures/` = the figures below, drawn
@@ -229,27 +281,6 @@ FlashAttention-2 call and one SDPA call on the same device-resident tensors.
 | **E11** streamed backward scatter | the host-streamed backward's synchronous scatter against the asynchronous fold, 1M and 2M | 4 rows (job 16559720; 3 runs each) | asynchronous 0.93x at 1M, 0.98x at 2M, same peaks: now the default |
 | **E12** wave budget, host-resident | E5's W sweep with Q/K/V and the accumulator on the host (the pool follows W) | 10 rows (job 16559720; 3 runs each) | W=1x -> 16x: 1.57x -> 1.26x FA-2 for 0.9 -> 9.1 GiB (CUDA); the pool, not the partials, is the memory |
 | **E7** automatic mode vs out-of-core rivals | `attention()` with nothing pinned under device budgets, against two rectangular rivals | not run | measures the automatic path, which the paper does not present (the pinned rows above are the decomposition's cost); the v2.2.3 run of this grid is in `results/ooc_rivals/report.md` |
-
-### Headline (from E1 and E4; A100-SXM4-80GB, fp16, B=1 H=8 D=64, causal, Q/K/V on the device)
-
-| N | direction | FlashAttention-2 (one call) | Stream-CQSA, 7 subproblems, device accumulator | Stream-CQSA, 7 subproblems, host accumulator |
-|---|---|---|---|---|
-| 128K | forward | 0.09 s / 0.5 GiB | 0.11 s (1.27x) / 1.2 GiB | — |
-| 128K | forward + backward | 0.33 s / 1.3 GiB | 0.37 s (1.14x) / 2.4 GiB | — |
-| 1M | forward | 6.03 s / 4.0 GiB | 5.85 s (**0.97x**) / 9.5 GiB | 6.69 s (1.11x) / 5.6 GiB |
-| 1M | forward + backward | 21.03 s / 10.1 GiB | 20.88 s (**0.99x**) / 19.1 GiB | 23.09 s (1.10x) / 11.4 GiB |
-| 4M | forward | 97.7 s / 16.1 GiB | 92.7 s (**0.95x**) / 37.9 GiB | 95.5 s (0.98x) / 22.4 GiB |
-| 4M | forward + backward | 337.8 s / 40.3 GiB | 341.0 s (**1.01x**, depth 2) / 64.1 GiB | 344.5 s (1.02x) / 45.4 GiB |
-
-The decomposition does no extra attention work (perfect-difference-set quorums cover every chunk pair
-exactly once), so from 512K up the launches, gathers and the merge vanish next to the kernels; at 128K they
-are a visible share of a 90 ms call. v2.2.3's engine on the same shape was 1.30x FA-2 forward and 2.6x
-forward+backward (the engine A/B job 15958597, `results/ultimate/engine_ab.md`; the kernel-level numbers:
-`docs/ultimate/03_kernels_report.md`). The host-accumulator column is what `attention()` chooses by default
-from about 1M tokens when the monolithic call does not fit (E8).
-
-![Stream-CQSA against one FlashAttention-2 call from 128K to 4M tokens: wall time ratio and peak device memory, Q/K/V on the device (E1) and in host memory (E2)](results/v3/figures/headline.png)
-
 ### E0 correctness (job 15966097, A100-SXM4-80GB)
 
 Every series (classic CUDA / Triton, wave CUDA / Triton) x c in {3, 7, 31, 133} x itr {1, 2} x accumulator

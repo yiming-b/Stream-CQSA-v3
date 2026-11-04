@@ -51,6 +51,11 @@ def table_scaling(exp, rows, base, node="sxm", Ns=None, arms=ARMS, host_col=Fals
     Ns = Ns or sorted({r["N"] for r in ex})
     out = []
     for d in ("fwd", "bwd"):
+        if not any(r.get("status") == "ok" for r in by(ex, direction=d)):
+            # a direction with no measured row prints one line, not a grid of dashes (E2's PCIe forward+backward
+            # rows were not run by decision: 1.5-3 h each at 8M)
+            out += [f"*{'forward' if d == 'fwd' else 'forward + backward'}*: not run.", ""]
+            continue
         out += [f"*{'forward' if d == 'fwd' else 'forward + backward'}* (wall s (x FA-2) / peak device GiB; the depth that ran when it is not 1):", "",
                 "| N | FA-2 | SDPA | " + " | ".join(SHORT[a] for a in arms) + (" | host GiB (classic CUDA) |" if host_col else " |"),
                 "|---|---|---|" + "---|" * len(arms) + ("---|" if host_col else "")]

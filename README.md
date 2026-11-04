@@ -374,12 +374,7 @@ RAM; the 8M forward+backward rows are not run (1.5-3 h each).
 | 4M | 136.08 s / 16.1 GiB | 131.02 s / 16.1 GiB | 125.95 s (0.93x) / 10.4 GiB | 129.93 s (0.95x) / 19.1 GiB | 182.46 s (1.34x) / 8.7 GiB | 180.61 s (1.33x) / 24.7 GiB | 32.0 (VmHWM 46) |
 | 8M | 544.97 s / 32.3 GiB | 507.86 s / 32.3 GiB | 526.60 s (0.97x) / 20.8 GiB | 535.63 s (0.98x) / 34.8 GiB | 708.50 s (1.30x) / 17.3 GiB | 716.09 s (1.31x) / 47.2 GiB | 64.8 (VmHWM 91) |
 
-*forward + backward* (wall s (x FA-2) / peak device GiB; the depth that ran when it is not 1):
-
-| N | FA-2 | SDPA | classic CUDA | wave CUDA | classic Triton | wave Triton | host GiB (classic CUDA) |
-|---|---|---|---|---|---|---|---|
-| 4M | - | - | - | - | - | - | - |
-| 8M | - | - | - | - | - | - | - |
+*forward + backward*: not run.
 <!-- /v3-tables:E2 -->
 
 ### E3-E6 parameters

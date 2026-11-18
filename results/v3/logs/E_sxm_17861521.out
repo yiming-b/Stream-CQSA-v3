@@ -1,0 +1,26 @@
+== v3 job 17861521 on della-l08g1  Wed Nov 18 01:46:23 PM EST 2026
+NVIDIA A100-SXM4-80GB, 210 MHz, 1410 MHz, 81920 MiB
+code /scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-dc0e265 | v13 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2 | native_v2 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/native_v2/frozen/gqa1 | results /scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/v3 | parts: E13 | part budget 0s | total 3540s
+/scratch/gpfs/AKEY/yb2807/VENVs/CQSA311/bin/python
+/scratch/gpfs/AKEY/yb2807/Stream-CQSA-snapshots/Stream-CQSA-v3-dc0e265/stream_cqsa/__init__.py 2.10.0+cu130 flash_attn 2.8.3
+classic module cqsa_cuda_v13 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2/cqsa_cuda_v13.cpython-311-x86_64-linux-gnu.so backward cuda
+wave module cqsa_native_v2 /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/native_v2/frozen/gqa1/cqsa_native_v2.cpython-311-x86_64-linux-gnu.so WAVE_API 2
+1af3b98c3d2a61c0212d45f695e9fb1a  /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/kernel/v13/frozen/c2/cqsa_cuda_v13.cpython-311-x86_64-linux-gnu.so
+0fb2e4b1a4a3ce9a44e65d0bbd9722cc  /scratch/gpfs/AKEY/yb2807/Stream-CQSA-dev/next/native_v2/frozen/gqa1/cqsa_native_v2.cpython-311-x86_64-linux-gnu.so
+== part E13: budget 3270s, timeout 3390s, starts 13:47:53 -> /scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/v3/logs/17861521_E13.log
+== part E13: exit 0 (124 = timeout)  14:07:50
+E13:all      FA-2           N= 4194304 D= 64 fp16 fwd c=  - itr=  - acc=-   qkv=device cap=12GiB: OOM: CUDA out of memory. Tried to allocate 1024.00 MiB. GPU 0 has a total capacity of 79.28 GiB of which 66.79 GiB is free. Including non-PyTorch memory, this proces
+E13:all      FA-2           N= 4194304 D= 64 fp16 fwd c=  - itr=  - acc=-   qkv=device cap=8GiB: OOM: CUDA out of memory. Tried to allocate 1024.00 MiB. GPU 0 has a total capacity of 79.28 GiB of which 70.79 GiB is free. Including non-PyTorch memory, this proces
+E13:all      FA-2           N= 4194304 D= 64 fp16 bwd c=  - itr=  - acc=-   qkv=device cap=16GiB: OOM: CUDA out of memory. Tried to allocate 1024.00 MiB. GPU 0 has a total capacity of 79.28 GiB of which 62.79 GiB is free. Including non-PyTorch memory, this proces
+E13:all      FA-2           N= 4194304 D= 64 fp16 bwd c=  - itr=  - acc=-   qkv=device cap=32GiB: OOM: CUDA out of memory. Tried to allocate 4.00 GiB. GPU 0 has a total capacity of 79.28 GiB of which 49.78 GiB is free. Including non-PyTorch memory, this process h
+E13:all      classic_CUDA   N= 4194304 D= 64 fp16 bwd c=  7 itr=  1 acc=cpu qkv=host   cap=32GiB: ERROR: worker killed (rc=-9): host memory / signal?
+== done: 10 rows run, 0 already present, 0 deferred by the budget, 1166 s
+== report  14:07:50
+report: /scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/v3/report.md (731 lines), figures ['E0.png', 'E0b.png', 'E1.png', 'E2_pcie.png', 'E2.png', 'E3.png', 'E4.png', 'E5.png', 'E6.png', 'E9.png', 'E10.png', 'E11.png', 'E12.png', 'E8.png', 'E13.png'], fits.json, STATUS.md (missing 0)
+MISSING 0
+17861521||00:21:41
+17861521.batch||00:21:41
+17861521.extern||00:21:41
+== v3 job done  Wed Nov 18 02:07:59 PM EST 2026
+== chain ends: missing=0 deferred=0 hop=0
+[2026-11-18T14:07:59.250] error: Detected 1 oom_kill event in StepId=17861521.batch. Some of the step tasks have been OOM Killed.

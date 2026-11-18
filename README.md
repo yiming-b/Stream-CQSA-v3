@@ -223,6 +223,10 @@ comes from.
    size and the scatter mode are all within a few percent of each other (E5, E6, E9, E11, E12).
 6. **The Triton fallback (the PyPI wheel without the CUDA extensions) costs 1.45-2x FA-2** at the same
    memory; it is what runs when the extensions are absent, not the kernels these numbers are about (E1).
+7. **Under a device budget where FA-2 fails, the decomposition completes.** At 4M tokens with the device capped
+   to 12 GiB (forward) or 16 GiB (forward+backward), FA-2 cannot allocate while the recovery configuration pinned
+   to depth 1 runs at 1.10x / 1.14x the uncapped FA-2 time in 10 GiB of device memory, and 8 GiB suffices for the
+   forward at c=31 (E13).
 
 The numbers behind 2-4, the classic CUDA engine at c=7 (wall s (x FA-2) / peak device GiB; host RAM where it
 is used):
@@ -280,6 +284,7 @@ FlashAttention-2 call and one SDPA call on the same device-resident tensors.
 | **E10** c, host-resident | the c sweep of E3 with Q/K/V and the accumulator in host memory, where the floor is gone and the subproblem's l/c scaling sets the device memory | 36 rows (jobs 16559720, 16562804; 3 runs each) | device peak 3.9 -> 0.6 GiB from c=7 to c=133 (l/c 0.43 -> 0.09) at a flat 1.16-1.24x FA-2 up to c=31, then 1.6-2.4x: the streamed tokens grow with l |
 | **E11** streamed backward scatter | the host-streamed backward's synchronous scatter against the asynchronous fold, 1M and 2M | 4 rows (job 16559720; 3 runs each) | asynchronous 0.93x at 1M, 0.98x at 2M, same peaks: now the default |
 | **E12** wave budget, host-resident | E5's W sweep with Q/K/V and the accumulator on the host (the pool follows W) | 10 rows (job 16559720; 3 runs each) | W=1x -> 16x: 1.57x -> 1.26x FA-2 for 0.9 -> 9.1 GiB (CUDA); the pool, not the partials, is the memory |
+| **E13** recovery under device budgets | N=4M under per-process device caps (24 / 12 / 8 GiB forward, 32 / 16 GiB forward+backward): one FA-2 call against the host-resident decomposition pinned to itr=1 | 10 rows (job 17861521; the c=7 forward+backward row at 32 GiB re-run with more host RAM, job 17863425) | FA-2 fails below its footprint (16.1 / 40.3 GiB); the decomposition completes at 12 GiB (c=7: 1.10x the uncapped FA-2 time, 10.4 GiB) and 8 GiB (c=31: 4.7 GiB) forward, and at 16 GiB (c=31: 1.14x, 10.1 GiB) forward+backward |
 | **E7** automatic mode vs out-of-core rivals | `attention()` with nothing pinned under device budgets, against two rectangular rivals | not run | measures the automatic path, which the paper does not present (the pinned rows above are the decomposition's cost); the v2.2.3 run of this grid is in `results/ooc_rivals/report.md` |
 ### E0 correctness (job 15966097, A100-SXM4-80GB)
 
@@ -679,6 +684,34 @@ Triton kernel 1.3-1.4x slower at every rung and about twice the memory (its gath
 is the pool, which reaches all 73 chunks (Q/K/V fully resident) at W=16x; the packed partial outputs are the
 smaller part. The planner's two-tier rule takes the largest rung that fits (the next one down is 7% slower,
 outside the 2% micro band) and walks this ladder down under a tighter budget.
+
+### E13 recovery under device budgets (jobs 17861521, 17863425)
+
+The boundary measured directly: the 4M-token call of E1 / E2 with the device capped per process
+(`torch.cuda.set_per_process_memory_fraction`, the same A100-SXM4-80GB otherwise), one FA-2 call on device-resident
+tensors against the recovery configuration (Q/K/V and the accumulator in host memory, itr=1 pinned, c=7 where its
+subproblem fits the cap and c=31 below). Uncapped on this node FA-2 takes 97.7 s (forward) and 337.8 s
+(forward+backward) (E1).
+
+<!-- v3-tables:E13 -->
+N=4M, fp16, D=64, causal, one A100-SXM4-80GB with the device budget capped per process (`torch.cuda.set_per_process_memory_fraction`); FA-2 = one flash_attn call on device-resident Q/K/V; Stream-CQSA = Q/K/V and the accumulator in host memory, itr=1 pinned (wall s / peak device GiB / peak host GiB):
+
+| direction | device budget | FA-2 | Stream-CQSA c | Stream-CQSA |
+|---|---|---|---|---|
+| fwd | 24 GiB | 97.5 s / 16.1 GiB | 7 | 107.4 s / 10.4 GiB / host 32.0 |
+| fwd | 12 GiB | **OOM** | 7 | 107.4 s / 10.4 GiB / host 32.0 |
+| fwd | 8 GiB | **OOM** | 31 | 106.2 s / 4.7 GiB / host 21.4 |
+| bwd | 32 GiB | **OOM** | 7 | error |
+| bwd | 16 GiB | **OOM** | 31 | 386.0 s / 10.1 GiB / host 57.8 |
+<!-- /v3-tables:E13 -->
+
+What it shows. FA-2 fails on its first allocation at every budget below its footprint (16.1 GiB forward, 40.3
+forward+backward). The decomposition completes unchanged at 12 GiB (c=7: 107 s, 1.10x the uncapped FA-2 time, 10.4
+GiB) and, with the larger quorum size, at 8 GiB (c=31: 106 s, 4.7 GiB, no slower than c=7 at this N) and at 16 GiB
+for the forward+backward (c=31: 386 s, 1.14x, 10.1 GiB of device memory, 58 GiB of host RAM). The budget a call needs
+is the quorum size's choice, which the planner makes from the free memory. The c=7 forward+backward row at 32 GiB
+was killed by the first job's 80 GB host allowance (its uncapped twin in E2 runs in 22.4 GiB of device memory with
+86 GiB VmHWM) and ran again with 96 GB.
 
 ### Where the memory goes
 

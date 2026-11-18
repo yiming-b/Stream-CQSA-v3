@@ -1,6 +1,6 @@
-# results/v3 status (2026-10-31 23:34)
+# results/v3 status (2026-11-18 14:12)
 
-`/scratch/gpfs/AKEY/yb2807/Stream-CQSA-v3/results/v3/results.jsonl`: 550 distinct configurations recorded (last row per key).
+`results/v3/results.jsonl`: 560 distinct configurations recorded (last row per key).
 
 | experiment | part | planned | ok | oom | error | missing | jobs |
 |---|---|---|---|---|---|---|---|
@@ -23,6 +23,7 @@
 | E11 | all | 4 | 4 | 0 | 0 | 0 | 16559720 |
 | E12 | all | 10 | 10 | 0 | 0 | 0 | 16559720 |
 | E8 | all | 16 | 16 | 0 | 0 | 0 | 16116751, 16119471 |
+| E13 | all | 10 | 5 | 4 | 1 | 0 | 17861521 |
 
 **Missing rows: 0**
 
@@ -30,3 +31,13 @@
 
 - arm=classic_Triton/wave_Triton, D=128, direction=bwd: Triton backward at D=128 does not finish (known 128-wide key-tile pathology); CUDA backward is the default
 - exp=E2, node=pcie, direction=bwd: not run: 1.5-3 h per row at 150 GB host RAM on gpu-short; the SXM 4M rows and the PCIe forward rows cover the question
+
+## Failed rows (oom / error)
+
+| experiment | part | row | status | job | message |
+|---|---|---|---|---|---|
+| E13 | all | E13:all      FA-2           N= 4194304 D= 64 fp16 fwd c=  - itr=  - acc=-   qkv=device cap=12GiB | oom | 17861521 | CUDA out of memory. Tried to allocate 1024.00 MiB. GPU 0 has a total capacity of 79.28 GiB of which 66.79 GiB is free. Including non-PyTorch memory, this proces |
+| E13 | all | E13:all      FA-2           N= 4194304 D= 64 fp16 fwd c=  - itr=  - acc=-   qkv=device cap=8GiB | oom | 17861521 | CUDA out of memory. Tried to allocate 1024.00 MiB. GPU 0 has a total capacity of 79.28 GiB of which 70.79 GiB is free. Including non-PyTorch memory, this proces |
+| E13 | all | E13:all      FA-2           N= 4194304 D= 64 fp16 bwd c=  - itr=  - acc=-   qkv=device cap=16GiB | oom | 17861521 | CUDA out of memory. Tried to allocate 1024.00 MiB. GPU 0 has a total capacity of 79.28 GiB of which 62.79 GiB is free. Including non-PyTorch memory, this proces |
+| E13 | all | E13:all      FA-2           N= 4194304 D= 64 fp16 bwd c=  - itr=  - acc=-   qkv=device cap=32GiB | oom | 17861521 | CUDA out of memory. Tried to allocate 4.00 GiB. GPU 0 has a total capacity of 79.28 GiB of which 49.78 GiB is free. Including non-PyTorch memory, this process h |
+| E13 | all | E13:all      classic_CUDA   N= 4194304 D= 64 fp16 bwd c=  7 itr=  1 acc=cpu qkv=host   cap=32GiB | error | 17861521 | worker killed (rc=-9): host memory / signal? |

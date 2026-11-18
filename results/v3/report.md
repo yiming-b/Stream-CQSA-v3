@@ -1,6 +1,6 @@
 # Stream-CQSA v3 experiments (experiments/v3/PLAN.md): report
 
-Generated 2026-10-31 23:33 by `experiments/v3/bench.py report` from `../../Stream-CQSA-v3/results/v3/results.jsonl` (585 rows, 550 configurations; the last row per key). GPUs: NVIDIA A100 80GB PCIe, NVIDIA A100-SXM4-80GB. Jobs: 15966097, 16003186, 16005563, 16007771, 16011674, 16056869, 16057173, 16059599, 16061624, 16061811, 16063609, 16070367, 16072865, 16074280, 16074929, 16075878, 16077768, 16079116, 16079918, 16092420, 16094767, 16113653, 16115186, 16115960, 16116751, 16119471, 16328779, 16333022, 16334737, 16500372, 16500373, 16559720, 16562804. Modules: cqsa_cuda_v13 / cqsa_native_v2.
+Generated 2026-11-18 14:12 by `experiments/v3/bench.py report` from `results/v3/results.jsonl` (595 rows, 560 configurations; the last row per key). GPUs: ?, NVIDIA A100 80GB PCIe, NVIDIA A100-SXM4-80GB. Jobs: 15966097, 16003186, 16005563, 16007771, 16011674, 16056869, 16057173, 16059599, 16061624, 16061811, 16063609, 16070367, 16072865, 16074280, 16074929, 16075878, 16077768, 16079116, 16079918, 16092420, 16094767, 16113653, 16115186, 16115960, 16116751, 16119471, 16328779, 16333022, 16334737, 16500372, 16500373, 16559720, 16562804, 17861521. Modules: cqsa_cuda_v13 / cqsa_native_v2.
 
 B=1 H=8 causal; wall = median of the timed runs (fwd: one attention() call; bwd: forward + torch.autograd.grad), min alongside; peak = torch.cuda.max_memory_allocated over the call, workspace = peak minus what was resident before it; host = VmHWM delta over the timed runs; /FA-2 and /SDPA = wall ratios against the resident monolithic baselines of the same (node type, N, D, dtype, direction) (the experiment's own first, E1's / E6's otherwise); ref = the reference arm of the row (FA-2 = flash_attn, or SDPA-flash = torch SDPA on its flash backend where flash_attn is not installed); rel = norm-relative error against that arm on the same inputs (grads: the worst of dq/dk/dv); fp64 = norm-relative error on 128 sampled rows against an fp64 reference, with the ratio to the reference arm's own fp64 error on the same rows in parentheses (PLAN.md asks <= 1.2). Every Stream-CQSA row pins itr and c and asserts the decomposition it reports; `[*]` marks an engine other than the series' nominal one (documented routing: the wave backward runs on the CUDA kernel and on device-resident inputs only, so wave_Triton fwd+bwd and host-resident wave backwards run on the classic engine; the wave backward keeps a device accumulator, so wave_CUDA acc=cpu fwd+bwd rows ran with acc=gpu in the backward).
 
@@ -713,3 +713,20 @@ Host accumulator (E8) vs device accumulator (E1), Q/K/V on the device, c=7, the 
 | wave_CUDA | 4M | fwd | 96.16 (1) | 98.87 (1) | 1.028 | 41.68 | 24.28 | 42% | 32.8 (33.9) | cpu |
 
 ![E8](E8.png)
+
+## E13: recovery under device budgets: N=4M under a per-process device memory cap (the row's extra, applied with torch.cuda.set_per_process_memory_fraction), one FlashAttention-2 call against the recovery configuration (Q/K/V and the accumulator in host memory, pinned itr=1; c=7 where its subproblem fits the cap, c=31 below)
+
+| N | D | dtype | dir | c | itr | acc | qkv | W | arm | engine that ran | wall s | min s | peak GiB | workspace | host GiB | /FA-2 | /SDPA | ref | rel vs ref | grads | fp64 (x ref) | fp64 dq (x ref) | status |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 4M | 64 | fp16 | fwd | - | - | - | device | cap=12GiB | FA-2 | oom: CUDA out of memory. Tried to allocate 1024.00 MiB. GPU 0 has a total capacity of 79.28 GiB of which 66.79 GiB is free. I | - | - | - | - | - | - | - | - | - | - | - | - | oom |
+| 4M | 64 | fp16 | fwd | - | - | - | device | cap=24GiB | FA-2 | monolithic | 97.532 | 97.532 | 16.13 | 4.13 | 0.00 | 1.000 | 0.957 | - | - | - | 4.2e-05 | - | ok |
+| 4M | 64 | fp16 | fwd | - | - | - | device | cap=8GiB | FA-2 | oom: CUDA out of memory. Tried to allocate 1024.00 MiB. GPU 0 has a total capacity of 79.28 GiB of which 70.79 GiB is free. I | - | - | - | - | - | - | - | - | - | - | - | - | oom |
+| 4M | 64 | fp16 | fwd | 7 | 1 | cpu | host | cap=12GiB | classic_CUDA | classic/cuda itr=1 n_sub=7 | 107.396 | 107.396 | 10.38 | 10.37 | 31.99 | 1.101 | 1.054 | - | - | - | 1.9e-05 | - | ok |
+| 4M | 64 | fp16 | fwd | 7 | 1 | cpu | host | cap=24GiB | classic_CUDA | classic/cuda itr=1 n_sub=7 | 107.382 | 107.382 | 10.38 | 10.37 | 31.98 | 1.101 | 1.054 | - | - | - | 1.9e-05 | - | ok |
+| 4M | 64 | fp16 | fwd | 31 | 1 | cpu | host | cap=8GiB | classic_CUDA | classic/cuda itr=1 n_sub=31 | 106.225 | 106.225 | 4.70 | 4.69 | 21.37 | 1.089 | 1.043 | - | - | - | 1.1e-05 | - | ok |
+| 4M | 64 | fp16 | bwd | - | - | - | device | cap=16GiB | FA-2 | oom: CUDA out of memory. Tried to allocate 1024.00 MiB. GPU 0 has a total capacity of 79.28 GiB of which 62.79 GiB is free. I | - | - | - | - | - | - | - | - | - | - | - | - | oom |
+| 4M | 64 | fp16 | bwd | - | - | - | device | cap=32GiB | FA-2 | oom: CUDA out of memory. Tried to allocate 4.00 GiB. GPU 0 has a total capacity of 79.28 GiB of which 49.78 GiB is free. Incl | - | - | - | - | - | - | - | - | - | - | - | - | oom |
+| 4M | 64 | fp16 | bwd | 7 | 1 | cpu | host | cap=32GiB | classic_CUDA | error: worker killed (rc=-9): host memory / signal? | - | - | - | - | - | - | - | - | - | - | - | - | error |
+| 4M | 64 | fp16 | bwd | 31 | 1 | cpu | host | cap=16GiB | classic_CUDA | classic/cuda itr=1 n_sub=31 | 385.965 | 385.965 | 10.13 | 10.12 | 57.84 | 1.143 | 1.062 | - | - | - | 1.1e-05 | 1.4e-03 | ok |
+
+![E13](E13.png)

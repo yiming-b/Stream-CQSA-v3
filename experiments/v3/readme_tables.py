@@ -243,7 +243,31 @@ def sections(rows):
     S["E10"] = table_e10(rows, base) if by(rows, exp="E10") else ["_no E10 rows yet_", ""]
     S["E11"] = table_e11(rows, base) if by(rows, exp="E11") else ["_no E11 rows yet_", ""]
     S["E12"] = table_e12(rows, base) if by(rows, exp="E12") else ["_no E12 rows yet_", ""]
+    S["E13"] = table_e13(rows) if by(rows, exp="E13") else ["_no E13 rows yet_", ""]
     return S
+
+
+def table_e13(rows):
+    """E13: N=4M under per-process device memory caps: FA-2 (one call) against the pinned host-resident decomposition."""
+    ex = by(rows, exp="E13")
+    caps = sorted({(r["direction"], float(str(r["extra"])[4:].split("GiB")[0])) for r in ex}, key=lambda x: (x[0] != "fwd", -x[1]))
+    out = ["N=4M, fp16, D=64, causal, one A100-SXM4-80GB with the device budget capped per process "
+           "(`torch.cuda.set_per_process_memory_fraction`); FA-2 = one flash_attn call on device-resident Q/K/V; Stream-CQSA = "
+           "Q/K/V and the accumulator in host memory, itr=1 pinned (wall s / peak device GiB / peak host GiB):", "",
+           "| direction | device budget | FA-2 | Stream-CQSA c | Stream-CQSA |", "|---|---|---|---|---|"]
+    def st(r, host=False):
+        if r is None:
+            return "-"
+        if r.get("status") == "ok":
+            return f"{r['wall_s']:.1f} s / {r['peak_dev_gib']:.1f} GiB" + (f" / host {r.get('peak_host_gib', 0):.1f}" if host else "")
+        return "**OOM**" if r.get("status") == "oom" else "error"
+    for dr, cap in caps:
+        ext = f"cap={cap:g}GiB"
+        fa = one(ex, arm="FA-2", direction=dr, extra=ext)
+        sc = one(ex, arm="classic_CUDA", direction=dr, extra=ext)
+        out.append(f"| {dr} | {cap:g} GiB | {st(fa)} | {sc['c'] if sc else '-'} | {st(sc, host=True)} |")
+    out.append("")
+    return out
 
 
 def write_readme(S):

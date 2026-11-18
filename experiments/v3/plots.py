@@ -47,6 +47,7 @@ ORANGES = ["#f3a98c", "#eb6834", "#b6431b"]
 DIRS = (("fwd", "forward"), ("bwd", "forward + backward"))
 
 plt.rcParams.update({
+    "pdf.fonttype": 42, "ps.fonttype": 42,
     "figure.facecolor": SURFACE, "axes.facecolor": SURFACE, "savefig.facecolor": SURFACE,
     "font.family": "DejaVu Sans", "font.size": 9.5, "axes.titlesize": 10.5, "axes.labelsize": 9.5,
     "axes.titleweight": "normal", "axes.titlecolor": TEXT, "axes.labelcolor": TEXT2,
@@ -248,18 +249,25 @@ def legend_below(fig, handles_labels=None, ncol=None, y=0.0, ax=None):
                columnspacing=1.6, handletextpad=0.6)
 
 
+PAPER = os.environ.get("CQSA_PLOTS_PAPER", "0") != "0"     # no in-figure titles (the caption carries them), vector PDF
+
+
 def finish(fig, path, title, subtitle=None, legend_h=0.07):
     H = fig.get_size_inches()[1]
-    n_sub = subtitle.count("\n") + 1 if subtitle else 0
-    fig.suptitle(title, x=0.01, ha="left", fontsize=12, fontweight="bold", color=TEXT, y=1 - 0.12 / H, va="top")
-    if subtitle:
-        fig.text(0.01, 1 - 0.36 / H, subtitle, ha="left", va="top", fontsize=9, color=TEXT2)
-    top = 1 - (0.5 + 0.16 * n_sub) / H
-    fig.tight_layout(rect=(0, legend_h, 1, top))
+    if PAPER:
+        fig.tight_layout(rect=(0, legend_h, 1, 1))
+        path = os.path.splitext(path)[0] + ".pdf"
+    else:
+        n_sub = subtitle.count("\n") + 1 if subtitle else 0
+        fig.suptitle(title, x=0.01, ha="left", fontsize=12, fontweight="bold", color=TEXT, y=1 - 0.12 / H, va="top")
+        if subtitle:
+            fig.text(0.01, 1 - 0.36 / H, subtitle, ha="left", va="top", fontsize=9, color=TEXT2)
+        top = 1 - (0.5 + 0.16 * n_sub) / H
+        fig.tight_layout(rect=(0, legend_h, 1, top))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fig.savefig(path, dpi=150)
     plt.close(fig)
-    print("wrote", os.path.relpath(path, ROOT))
+    print("wrote", os.path.relpath(path, ROOT) if path.startswith(ROOT) else path)
 
 
 def ylim_pad(ax, lo=None, hi=None, pad=0.08):

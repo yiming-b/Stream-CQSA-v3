@@ -1667,8 +1667,9 @@ def cmd_report(a):
             elif exp == "E6":
                 figure_bars(exp, ex, png, lambda r: (r["dtype"], r["D"]), lambda g: f"{g[0]} D={g[1]}",
                             [("fp16", 64), ("bf16", 64), ("fp16", 128), ("bf16", 128)])
-            figs.append(png)
-            lines += [f"![{exp}]({os.path.basename(png)})", ""]
+            if os.path.exists(png):                              # an experiment without a figure (E13) has its table only
+                figs.append(png)
+                lines += [f"![{exp}]({os.path.basename(png)})", ""]
         except Exception as e:                                   # noqa: BLE001
             lines += [f"_figure failed: {type(e).__name__}: {e}_", ""]
             traceback.print_exc()

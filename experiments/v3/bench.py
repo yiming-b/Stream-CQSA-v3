@@ -164,6 +164,16 @@ PLAN = {
         grid=dict(N=[512 * K, M, 2 * M, 4 * M], c=[7], itr=["min"], acc=["cpu"], dtype=["fp16"], D=[64], direction=["fwd", "bwd"]),
         arms=("classic_CUDA", "wave_CUDA"), qkv="device", warmup=1, reps=1, ref="spot", node="sxm",
         parts={"all": {}}),
+    "E13": dict(
+        question="recovery under device budgets: N=4M under a per-process device memory cap (the row's extra, applied with "
+                 "torch.cuda.set_per_process_memory_fraction), one FlashAttention-2 call against the recovery configuration "
+                 "(Q/K/V and the accumulator in host memory, pinned itr=1; c=7 where its subproblem fits the cap, c=31 below)",
+        grid=dict(N=[4 * M], c=[7], itr=[1], acc=["cpu"], dtype=["fp16"], D=[64], direction=["fwd"], extra=["cap=24GiB", "cap=12GiB"]),
+        extra_grids=[dict(N=[4 * M], c=[31], itr=[1], acc=["cpu"], dtype=["fp16"], D=[64], direction=["fwd"], extra=["cap=8GiB"]),
+                     dict(N=[4 * M], c=[7], itr=[1], acc=["cpu"], dtype=["fp16"], D=[64], direction=["bwd"], extra=["cap=32GiB"]),
+                     dict(N=[4 * M], c=[31], itr=[1], acc=["cpu"], dtype=["fp16"], D=[64], direction=["bwd"], extra=["cap=16GiB"])],
+        arms=("classic_CUDA", "FA-2"), qkv="host", warmup=0, reps=1, ref="spot", node="sxm",
+        parts={"all": {}}),
 }
 EXPERIMENTS = tuple(PLAN)
 
@@ -769,7 +779,10 @@ def _worker(row, res):
     host = row.get("qkv") == "host"
     seed = N * 1000 + D + (7 if dtype == "bf16" else 0)
     torch.manual_seed(0)
-    if row.get("mem_cap_gib"):                               # plumbing tests of the OOM paths on a shared GPU
+    if row.get("extra") and str(row["extra"]).startswith("cap="):     # E13: the device budget of this row, in GiB
+        row = dict(row, mem_cap_gib=float(str(row["extra"])[4:].split("GiB")[0]))
+        res["mem_cap_gib"] = row["mem_cap_gib"]
+    if row.get("mem_cap_gib"):                               # a capped device (E13; plumbing tests of the OOM paths)
         total = torch.cuda.get_device_properties(0).total_memory
         torch.cuda.set_per_process_memory_fraction(min(1.0, float(row["mem_cap_gib"]) * 2**30 / total))
 
